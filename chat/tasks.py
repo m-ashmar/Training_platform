@@ -109,21 +109,30 @@ def _discard(message):
 
 
 def _announce_poster(message_id):
+    """`message.updated` for a poster just stored (`_announce_update`)."""
+    _announce_update(message_id, "poster")
+
+
+def _announce_update(message_id, what):
     """`message.updated` to everyone with the thread open: the message as it now reads,
-    the same object REST returns (`poster_url` filled). Serialized without a request,
-    as `message.new` is, so on the filesystem backend its URLs are relative to the API
-    host. Never raises: the poster stands whatever the socket layer does."""
+    the same object REST returns — through `chat.services.frame_payload`, the one
+    builder of a socket frame's message, so a program card keeps its card on this frame
+    too (BACKEND_BUGS B-150; it was serialized with no reader, and `program` was always
+    null here). Serialized without a request, as `message.new` is, so on the filesystem
+    backend its URLs are relative to the API host. A message taken back is not
+    announced. Never raises: what the worker stored stands whatever the socket layer
+    does."""
     try:
         from .events import broadcast
         from .models import Message
-        from .serializers import MessageSerializer
+        from .services import frame_payload
 
         message = (Message.objects.select_related('exercise', 'routine')
                    .filter(pk=message_id).first())
         if message is None or message.deleted_at is not None:
             return
         broadcast(message.conversation_id, 'message.updated',
-                  {'message': dict(MessageSerializer(message).data)})
+                  {'message': frame_payload(message)})
     except Exception:       # noqa: BLE001
-        logger.warning("could not announce the poster of chat video %s", message_id,
+        logger.warning("could not announce the %s of chat message %s", what, message_id,
                        exc_info=True)

@@ -333,21 +333,50 @@ def _moved(conversation, message):
     conversation.last_message_at = message.created_at
 
 
-def _announce(conversation, message):
-    """The socket fan-out and the push, for any kind of message. Same object as REST.
+def frame_payload(message, *, checked=False) -> dict:
+    """The `message` object of a socket frame — `message.new` and `message.updated`
+    alike: the object REST returns, `media`, `exercise` and `program` included.
 
-    The socket frame is serialized without a request, so on the filesystem backend its
-    `media.url` is relative to the API host (a GCS URL is absolute either way); both
-    people in the group are the conversation's members, checked at connect.
+    Serialized without a request, so on the filesystem backend its `media.url` is
+    relative to the API host (a GCS URL is absolute either way). Both people in the
+    group are the conversation's members, checked at connect, and ONE frame serves them
+    both, so a program card's `program` is decided for the pair — never left to
+    `get_program`'s answer for "no reader", which is null (BACKEND_BUGS B-150: every
+    `message.updated` of a card said «لم يعد متاحاً» until the next read):
 
-    A program card goes out WITH its card: the send has just checked that the trainer
-    wrote the routine and the client is on it, so both people in the group may read it
-    (`readable_routines`), and one frame serves them both.
+      * `checked=True` — the send that wrote the card has just checked that the trainer
+        wrote the routine and the client is on it (`resolve_program`), so both may read
+        it and nothing is asked (`_announce`, `message.new`);
+      * otherwise — a frame about a message sent earlier (`message.updated`: a poster
+        cut, a duration measured) — the routine is asked of BOTH members through
+        `readable_routine_ids`, the rule a read of the thread applies, and the card
+        rides along only if both may still read it. A routine taken off the client
+        since then leaves this frame's card null for both, as the client's own read
+        does; the trainer's next read draws it again. Three small queries, and only for
+        a program card: a photo, voice note or video costs none.
     """
-    context = ({'readable_routines': {message.routine_id}}
-               if message.routine_id is not None else {})
-    payload = dict(MessageSerializer(message, context=context).data)
-    broadcast(conversation.pk, 'message.new', {'message': payload})
+    from .serializers import readable_routine_ids
+
+    context = {}
+    if message.routine_id is not None:
+        if checked:
+            readable = {message.routine_id}
+        else:
+            pair = (Conversation.objects.select_related('trainer', 'client')
+                    .filter(pk=message.conversation_id).first())
+            readable = (readable_routine_ids(pair.trainer, [message])
+                        & readable_routine_ids(pair.client, [message])
+                        if pair is not None else set())
+        context['readable_routines'] = readable
+    return dict(MessageSerializer(message, context=context).data)
+
+
+def _announce(conversation, message):
+    """The socket fan-out and the push, for any kind of message. Same object as REST
+    (`frame_payload`): a program card goes out WITH its card, which the send has just
+    checked both people in the group may read."""
+    broadcast(conversation.pk, 'message.new',
+              {'message': frame_payload(message, checked=True)})
     notify_new_message(message)
 
 
