@@ -110,6 +110,8 @@ local/test database), merged with wave 1.
 | Template goal (2026-10-07) | `POST/PATCH /api/routine/templates/` take `goal` only as one of the four codes (any case, the code stored); anything else 400 `bad_goal` (`8f15972` on `fx/w1-programs`) |
 | Development data (2026-10-07) | Every row in the development database (programs, templates, users, everything) is throwaway: the owner drops it himself before launch, and production starts empty (`bootstrap_platform`). So a fix needs no data migration or compatibility for rows written during development |
 
+**GitHub's line merged in (2026-11-21).** The deployed line (GitHub's `spec/payments-compliance`, PR #2 merge `f77b3e1`: Django 5.2.19, Pillow 13, `deploy/`, S3 media, the AI provider settings, security CI) and the fix run's 107 local commits were merged (`e452d21`); `ccd5da0` makes deploy/setup.sh write `PUBLIC_PAGES_BASE_URL` (required in production since B-174, which the live server's deploy/.env lacked) and the app-link identifiers, with a test that boots production on setup.sh's file and the compose environment alone. Full gate on `ccd5da0`: 2900 passed, 0 failed. Pushed. The server update needs one line added to deploy/.env first: DEPLOY_CHECKLIST.md §12.3.
+
 **Waves** (each: worktree builders from one base, tests proven on the old code, merged one
 branch at a time, then ONE full gate + the smoke; a review of the merged diff after):
 
