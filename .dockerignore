@@ -16,6 +16,12 @@
 .env
 .env.*
 !.env.example
+# The single-server deployment keeps its secrets in deploy/.env, and the two patterns
+# above are anchored at the root: they do not match it. Nothing under deploy/ runs
+# inside the image (it is the compose file, the Caddyfile and the setup script).
+deploy/
+**/.env
+**/.env.*
 key.md
 *.pem
 *.key

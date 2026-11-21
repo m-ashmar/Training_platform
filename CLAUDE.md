@@ -21,7 +21,7 @@ and store-compliance spec. Not yet deployed.
 ```
 Python 3.12 · Django 5.2 LTS · DRF 3.18 · Channels 4 (Daphne) · Celery 5.6
 PostgreSQL (prod, and tests: Docker on :5433) · Redis, 6 logical DBs · RS256 JWT + OTP
-Docker → Fly.io (Amsterdam)
+Docker → one Hetzner server via deploy/ (first deployment; Fly.io refuses Syria) · fly.toml kept
 ```
 
 Roles: `client`, `trainer`, `agent` (cash top-ups), `admin`.
@@ -37,7 +37,9 @@ Roles: `client`, `trainer`, `agent` (cash top-ups), `admin`.
 
 Settings: `settings_base.py` (shared) · `settings_local.py` (tests, dev) ·
 `settings_production.py` (kill-switch `enforce_production_safety()`) · secrets only through
-`require_env()` / AWS Secrets Manager.
+`require_env()` / AWS Secrets Manager. Media in production is object storage,
+`MEDIA_BACKEND=gcs` or `s3` (any S3-compatible store; the first deployment's choice).
+Deploying: `DEPLOY_CHECKLIST.md`; section 12 is the single-server layout in `deploy/`.
 
 Mobile: `yalla_gym/` is the Flutter client, built by its own sessions from the design canvas
 and from THIS SOURCE CODE — not from documents (owner, 2026-09-19). A backend session does

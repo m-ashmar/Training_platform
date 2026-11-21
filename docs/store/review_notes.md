@@ -260,7 +260,8 @@ from.
   (`data_inventory.md`, recipient `ai_provider`).
 - The provider is not named in the app; the coach says it is "powered by an outside AI
   service provider" (the owner, 2026-09-24). **[OWNER]** Apple's reviewer may ask which
-  provider; the configured one is OpenAI.
+  provider; the configured one is Cloudflare Workers AI, running the open model Gemma
+  (the owner, 2026-11-17).
 - "Help us improve" (keeping anonymous copies of conversations to improve the coach) is
   a separate switch, OFF until the person turns it on; the copies carry no name or
   account and are deleted when it goes off, with the account, or after at most 365
@@ -307,7 +308,8 @@ Families policy does not apply).
    (`docs/legal/README.md`), and `PUBLIC_PAGES_BASE_URL`, `PLATFORM_CONTACT_EMAIL`,
    `PLATFORM_NAME` and `PLATFORM_LEGAL_NAME` are set. The store listing's privacy URL is
    `https://<PUBLIC_PAGES_BASE_URL>/legal/privacy/?lang=ar` (and `?lang=en`).
-4. `OPENAI_API_KEY` is set, so the AI coach answers the reviewer.
+4. `AI_API_KEY` is set (with `AI_BASE_URL` and `AI_ASSISTANT_MODEL`), so the AI coach
+   answers the reviewer.
 5. The App Privacy and Data safety answers are `privacy_labels.md`.
 6. Publisher identity (spec §10): submit under the registered company, state truthfully
    where the service operates (Syria), and expect questions; take legal advice on the

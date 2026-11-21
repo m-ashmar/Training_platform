@@ -107,7 +107,7 @@ Agents: when an agent tops up your wallet, they see your name, your account numb
 
 The AI service provider: only after you agree, an outside AI service provider receives your conversation with the AI coach and the data it reads to answer you (your profile, body data, goals, injury note, workouts, routine, diet plan and meals). [OWNER: decide whether to name the provider here.] If you turn on "Help us improve", anonymous copies of your conversations are kept by us; they carry no name or account.
 
-Service providers that process data for us, under our instructions: our hosting provider (Fly.io), our database provider, Google Cloud Storage (the files you upload), Google Firebase Cloud Messaging (push notifications: your device token and the text of each notification), our email provider (sign-up and password-reset codes), ShamCash (the reference and amount of a payment, and a trainer's payout address), and, if enabled, an error-reporting service that receives no personal data. [OWNER: name the database and email providers.]
+Service providers that process data for us, under our instructions: our hosting provider (Hetzner), which also holds the database, its object storage service (the files you upload), Google Firebase Cloud Messaging (push notifications: your device token and the text of each notification), our email provider (sign-up and password-reset codes), ShamCash (the reference and amount of a payment, and a trainer's payout address), and, if enabled, an error-reporting service that receives no personal data. [OWNER: name the email provider.]
 
 We may disclose data when the law requires it. [LAWYER: complete.]
 
@@ -153,7 +153,7 @@ Data travels between the app and our servers encrypted (HTTPS). Passwords and co
 
 ## Where your data is stored
 
-Our servers are hosted in the Netherlands (Amsterdam). Files are stored with Google Cloud, push notifications go through Google Firebase, and the AI coach's provider may process data in other countries. [LAWYER: describe the transfers and the safeguards that apply.]
+Our servers are hosted in Germany, and the files you upload are stored there as well. Push notifications go through Google Firebase, and the AI coach's provider may process data in other countries. [LAWYER: describe the transfers and the safeguards that apply.]
 
 ## Changes to this policy
 

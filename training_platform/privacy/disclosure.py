@@ -88,9 +88,11 @@ RECIPIENTS: dict[str, Recipient] = {
         "note, activity level, the trainer's name), workouts and set logs, the routine, "
         "the diet plan and meals, and the coach's own notes about the person "
         "(`ai_assistant/services/context_compiler.py`, `ai_assistant/tools/`). The app "
-        "names no provider (the owner's decision, 2026-09-24); the one configured is "
-        "OpenAI (`OPENAI_API_KEY`, `OPENAI_MODEL`). Nothing else is sent to an AI: diet "
-        "plans are built by the platform's own rules.",
+        "names no provider (the owner's decision, 2026-09-24). The provider is "
+        "configuration (`AI_BASE_URL`, `AI_ASSISTANT_MODEL`, `AI_API_KEY`); the owner "
+        "chose Gemma, an open model, served by Cloudflare Workers AI (2026-11-17), "
+        "whose terms say it neither stores the content nor trains on it. Nothing else "
+        "is sent to an AI: diet plans are built by the platform's own rules.",
         "service provider"),
     "push_provider": Recipient(
         "Google Firebase Cloud Messaging",
@@ -105,11 +107,14 @@ RECIPIENTS: dict[str, Recipient] = {
         "(`EMAIL_HOST`).",
         "service provider"),
     "file_storage": Recipient(
-        "Google Cloud Storage",
+        "The file storage provider",
         "The files people upload: profile photos, trainers' media, chat photos, voice "
         "notes and videos, post and challenge images, and trainers' verification "
-        "documents (a separate private bucket). Production refuses to start without it "
-        "(`MEDIA_BACKEND=gcs`, `settings_production.py`).",
+        "documents (under a private prefix, or in a bucket of their own). Production "
+        "refuses to start without object storage (`MEDIA_BACKEND`, "
+        "`settings_production.py`): an S3-compatible store (`s3`), which is Hetzner "
+        "Object Storage on the single-server deployment, or Google Cloud Storage "
+        "(`gcs`). Objects are private and are read through signed URLs that expire.",
         "service provider"),
     "payment_gateway": Recipient(
         "ShamCash",
@@ -130,10 +135,14 @@ class Processor:
 #: Service providers that hold EVERY source, because they run the platform. Listed once
 #: in the inventory, not on each source.
 PROCESSORS: tuple[Processor, ...] = (
-    Processor("Fly.io", "Runs the servers (`fly.toml`, region Amsterdam). Every request "
-              "and every stored row passes through it."),
+    Processor("The hosting provider", "Runs the servers. Every request and every stored "
+              "row passes through it. On the single-server deployment (`deploy/`) it is "
+              "Hetzner, in Germany; `fly.toml` describes the same processes on Fly.io "
+              "(Amsterdam)."),
     Processor("The PostgreSQL and Redis providers", "Hold the database and the caches. "
-              "Chosen by the owner at deployment."),
+              "On the single-server deployment both run on the hosting provider's "
+              "server and there is no separate provider; otherwise chosen by the owner "
+              "at deployment."),
     Processor("Sentry (optional)", "Server error reports, only when `SENTRY_DSN` is set, "
               "and with `send_default_pii=False` (no email, no request body, no IP)."),
     Processor("AWS Secrets Manager (optional)", "Holds the server's own secrets when "
