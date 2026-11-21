@@ -191,7 +191,11 @@ Worktrees are how several agents build at once. The setup is done for you; what 
   into it (`pytest ... > <scratchpad>/x.log`) or chains `mkdir && git ...` can be refused
   as "names git in a form too complex to verify" (2026-09-27). Run the command plainly
   and pipe to `tail`, or run it with `run_in_background`, whose output file is kept for
-  you; make the directory in a command of its own.
+  you; make the directory in a command of its own. `cd <worktree> && <anything>` is
+  refused the same way (the worktree's path holds `-Git-` too), and so is a
+  `cat >> file <<EOF` heredoc: every command already starts in the worktree, so drop the
+  `cd`, put a multi-step run in a script under the scratchpad and run that, and append
+  to a file with the Edit tool (2026-11-21).
 - `seeded_catalogue` loads the food catalogue but does NOT give the test database
   access: a test that takes it and no `db` fails with "Database access not allowed".
 - `.venv` in a worktree is a **symlink**. `.gitignore` now covers both spellings, but check
@@ -277,6 +281,10 @@ session runs it in a separate worktree at the base commit. What did work (2026-0
 routine products): `git archive <base> | tar -x -C <scratchpad>/<unique dir>`, symlink
 `.venv` and `.env` into it, copy your test file in, and run pytest THERE with its own
 `DB_NAME` and `--create-db` — your worktree is never touched, so it can run while you edit.
+Read WHY each test fails there: a `monkeypatch.setattr(module, "name", ...)` of a function
+your fix ADDS raises AttributeError on the old code, and an import of a new constant
+raises ImportError, so the old-code run "fails" without ever reaching the bug. Pass
+`raising=False`, and import only what the old code has (fx/w2-chat, 2026-11-21).
 
 ## Rules that outrank your judgement
 
