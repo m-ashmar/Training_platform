@@ -340,6 +340,13 @@ def _iso(value):
     return timezone.localtime(value).isoformat() if value is not None else None
 
 
+def utc_offset_minutes(local_moment) -> int:
+    """The UTC offset of an aware moment in whole minutes east of UTC (+03:00 is 180,
+    -05:00 is -300): the offset `_iso` writes the agent's rows with (BACKEND_BUGS
+    B-190)."""
+    return int(local_moment.utcoffset().total_seconds() // 60)
+
+
 # ------------------------------------------------------------------ the push
 def notify_client_on_commit(tx, client, profile) -> None:
     """The client hears of the top-up once it has committed (BACKEND_BUGS B-115). Only
@@ -383,7 +390,7 @@ def person(user) -> dict | None:
 
 def account_body(profile) -> dict:
     """`GET wallet/agent/me/` (BACKEND_BUGS B-113; `currency` B-144, `today` and
-    `time_zone` B-146)."""
+    `time_zone` B-146, `utc_offset_minutes` B-190)."""
     from django.conf import settings
 
     from .currencies import CURRENCY_CODES
@@ -415,6 +422,8 @@ def account_body(profile) -> dict:
             "last_settlement": settlement_row(settlement) if settlement else None,
         }
     day = next_settlement_on(profile)
+    # One reading of the clock for the day and its offset, so the two always agree.
+    local_now = timezone.localtime()
     return {
         "user_id": profile.user_id,
         "profile": {"display_name": profile.display_name, "city": profile.city,
@@ -429,8 +438,12 @@ def account_body(profile) -> dict:
         "currency": currency_for(profile.user_id),
         # The server's day and zone (B-146): the caps' "today" and the day `since` /
         # `until` on agent/ledger/ are read in.
-        "today": timezone.localdate().isoformat(),
+        "today": local_now.date().isoformat(),
         "time_zone": settings.TIME_ZONE,
+        # That zone's offset from UTC now, in minutes east (B-190; 180 for
+        # Asia/Damascus): the offset `today` and the rows' timestamps are written with,
+        # so the phone never has to map a zone name to an offset itself.
+        "utc_offset_minutes": utc_offset_minutes(local_now),
         "currencies": currencies,
     }
 

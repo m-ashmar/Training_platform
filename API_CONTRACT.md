@@ -2121,7 +2121,11 @@ field and code; in short:
   own wallet currency, so the app picks `currencies[currency]` without reading
   `wallet/balance/` (BACKEND_BUGS B-144); `today` (YYYY-MM-DD) and `time_zone`
   ("Asia/Damascus"), the server's day and zone that the caps and `since`/`until` are
-  read in (B-146). The top-level `status` is `AgentProfile.status`, the same value as
+  read in (B-146). Additive (BACKEND_BUGS B-190): `utc_offset_minutes`, an integer, the
+  offset of that zone from UTC at the moment of the answer in minutes east (180 for
+  Asia/Damascus), read with `today` from the same clock: add it to an instant in UTC
+  and take the date to place the instant on the server's day, without mapping the zone
+  name to an offset on the phone. The top-level `status` is `AgentProfile.status`, the same value as
   `profile.status` (B-148). The agent ledger's, receipts' and settlements' timestamps
   and the key's `paired_at` / `last_signature_at` now carry the server's offset
   (+03:00), like `wallet/transactions/`: the same instants.
