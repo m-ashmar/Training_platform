@@ -49,6 +49,9 @@ def decrypt_rows(apps, schema_editor):
     with connection.cursor() as cursor:
         for user in qs.iterator(chunk_size=500):
             # Bypass the field so the plaintext is written raw rather than re-encrypted.
+            # The f-string holds only the model's own table name (from _meta); both
+            # values are query parameters, so nothing a user wrote reaches the SQL text.
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             cursor.execute(
                 f'UPDATE "{table}" SET specific_injury = %s WHERE id = %s',
                 [user.specific_injury, user.pk],

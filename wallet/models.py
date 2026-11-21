@@ -1055,6 +1055,9 @@ def move_funds_atomic(source: Wallet | None, destination: Wallet | None, amount,
             table, pk = (connection.ops.quote_name(meta.db_table),
                          connection.ops.quote_name(meta.pk.column))
             with connection.cursor() as cur:
+                # The table and pk names come from the model's _meta, quoted by the
+                # backend; the actor's id is a query parameter.
+                # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 cur.execute(f"SELECT 1 FROM {table} WHERE {pk} = %s FOR KEY SHARE", [actor_id])
 
         # Lock every wallet involved in ONE deterministic order (ascending id) before
