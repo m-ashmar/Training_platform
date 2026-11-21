@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -186,6 +187,8 @@ ANSWERS = [
     "",                                        # the From address: the default
     "",                                        # no AI key
     "",                                        # no Sentry DSN
+    "",                                        # no signing fingerprint yet
+    "",                                        # no Apple team id yet
 ]
 
 
@@ -271,6 +274,57 @@ def test_production_boots_on_what_setup_wrote(written):
     env.pop("S3_BUCKET_NAME")
     refused = _production_boot(**env)
     assert refused.returncode != 0 and "S3_BUCKET_NAME" in refused.stderr
+
+
+def _server_env(values):
+    """What a server running ONLY setup.sh's file and this compose file hands the web
+    process: the file's values, then the compose file's own `environment`, interpolated
+    the way Compose does the two simple forms it uses (`${X:-default}`, `${X:?message}`),
+    and nothing else."""
+    env = dict(values)
+    for key, raw in _compose()["services"]["web"]["environment"].items():
+        value = re.sub(r"\$\{(\w+):[-?][^}]*\}", lambda m: values.get(m.group(1), ""),
+                       str(raw))
+        defaults = re.fullmatch(r"\$\{(\w+):-([^}]*)\}", str(raw))
+        if defaults and not values.get(defaults.group(1)):
+            value = defaults.group(2)
+        env[key] = value
+    env["PATH"] = os.environ.get("PATH", "")
+    return env
+
+
+@pytest.mark.django_db(transaction=False)
+def test_production_boots_on_setup_and_compose_alone(written):
+    """The test above boots through the shared test environment (`_production_boot`),
+    which supplies every required variable itself: a variable setup.sh forgets is filled
+    in there, and that test still passes. This one boots on the file and the compose
+    file's environment ALONE, which is the server's situation. It caught
+    PUBLIC_PAGES_BASE_URL (required in production since BACKEND_BUGS B-174) missing from
+    setup.sh: merged into the deployed line on 2026-11-21, the live server would have
+    refused to boot at its next update."""
+    work, _ = written
+    env = _server_env(_read_env_file(work / ".env"))
+    code = ("import training_platform.settings_production as s; "
+            "s.enforce_production_safety(); print('BOOTED')")
+    booted = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert booted.returncode == 0, booted.stderr
+    assert "BOOTED" in booted.stdout
+
+
+def test_setup_writes_the_public_pages_base_and_the_apps_identifiers(written):
+    """The legal links are built on the API host until a hub domain exists, and the
+    association files name this app. The signing fingerprint and the Apple team id are
+    not known at setup time, so they are not written: the two files answer 404
+    `app_links_not_configured` until they are added (releases/app_links.py)."""
+    work, _ = written
+    values = _read_env_file(work / ".env")
+    assert values["PUBLIC_PAGES_BASE_URL"] == "https://api.staging-yg.test"
+    assert values["APP_LINKS_ANDROID_PACKAGES"] == "com.yallagym.app"
+    assert values["APP_LINKS_IOS_BUNDLE_IDS"] == "com.yallagym.app"
+    assert values["APP_LINKS_PATHS"] == "/app/*"
+    assert "APP_LINKS_ANDROID_SHA256_FINGERPRINTS" not in values
+    assert "APP_LINKS_IOS_TEAM_ID" not in values
 
 
 def test_setup_refuses_an_address_that_is_not_a_host_name(tmp_path):

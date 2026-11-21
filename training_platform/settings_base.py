@@ -227,12 +227,12 @@ ACCOUNT_ADAPTER = "users.adapters.CustomAccountAdapter"
 # answers `console_login_disabled` and nothing is written. Turning it on is the owner's
 # decision, not a deploy detail.
 OPS_QR_LOGIN_ENABLED = get_bool_env_optional("OPS_QR_LOGIN_ENABLED", False)
-# The console's own origin (e.g. https://ops.yallagym.com) when it is served under a
+# The console's own origin (e.g. https://ops.yalagym.com) when it is served under a
 # host of its own; empty means the host the API request came to. Used for the links the
 # operator's phone is given (B-119 queue pages, the B-120 sign-in link).
 OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
 # Where the public pages — the privacy policy, the terms, the account-deletion page
-# (legal/) — are reached from outside, e.g. https://yallagym.com when the hub domain serves
+# (legal/) — are reached from outside, e.g. https://yalagym.com when the hub domain serves
 # or forwards `/legal/...`. The capabilities answer hands these URLs to every build
 # (legal/links.py). Empty means the host the API request came to — in development only:
 # production refuses to boot without an https value (BACKEND_BUGS B-174).

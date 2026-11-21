@@ -142,8 +142,8 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 | `DJANGO_SETTINGS_MODULE` | | `training_platform.settings_production` | | Set by the image and `fly.toml`. Never change |
 | `DJANGO_SECRET_KEY` | R | | yes | At least 32 characters, not a `django-insecure` placeholder. Section 4 |
 | `DJANGO_OLD_SECRET_KEY_1` | | | yes | The previous secret key during a rotation (section 4) |
-| `DJANGO_ALLOWED_HOSTS` | R | | | Comma separated, e.g. `api.yallagym.com`. No wildcard, no localhost |
-| `CORS_ALLOWED_ORIGINS` | R | | | Comma separated full origins, e.g. `https://yallagym.com` (the web hub). No wildcard, no localhost |
+| `DJANGO_ALLOWED_HOSTS` | R | | | Comma separated, e.g. `api.yalagym.com`. No wildcard, no localhost |
+| `CORS_ALLOWED_ORIGINS` | R | | | Comma separated full origins, e.g. `https://yalagym.com` (the web hub). No wildcard, no localhost |
 | `CSRF_TRUSTED_ORIGINS` | R | | | Comma separated full origins that post forms: the API host (console) and the hub |
 | `TIME_ZONE` | | `Asia/Damascus` | | Local dates (a training day, a coaching month). Scheduled jobs run on UTC (section 8) |
 | `LOG_LEVEL` | | `INFO` | | One JSON line per record on stdout |
@@ -269,7 +269,7 @@ the privacy policy (`docs/store/privacy_labels.md`).
 ### 3.9 Public pages, app links, identity, console
 | Variable | | Default | What |
 |---|---|---|---|
-| `PUBLIC_PAGES_BASE_URL` | R | | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yallagym.com`. The capabilities answer hands these URLs to every build, and the store listings name the same pages. Boot refuses it unset, not https, or a local address (B-174) |
+| `PUBLIC_PAGES_BASE_URL` | R | | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yalagym.com`. The capabilities answer hands these URLs to every build, and the store listings name the same pages. Boot refuses it unset, not https, or a local address (B-174) |
 | `APP_LINKS_ANDROID_PACKAGES` | | | Comma separated package names. Empty: `/.well-known/assetlinks.json` answers 404 `app_links_not_configured` |
 | `APP_LINKS_ANDROID_SHA256_FINGERPRINTS` | | | The SHA-256 of every release-signing certificate (the direct APK's key, and Play's app-signing key once there is a Play build) |
 | `APP_LINKS_IOS_TEAM_ID`, `APP_LINKS_IOS_BUNDLE_IDS` | | | For `/.well-known/apple-app-site-association` |
@@ -568,6 +568,21 @@ docker compose ps -a            # migrate: Exited (0). Everything else: Up / hea
 Later deploys: `git pull && docker compose build web && docker compose up -d`. The
 containers are replaced one after another, so expect a few seconds of refused
 connections; a failed migration stops there with the old containers still running.
+
+`setup.sh` never edits an existing `deploy/.env`, so a variable that became required
+after a server was set up has to be added by hand before `docker compose up -d`. A file
+written before 2026-11-21 lacks `PUBLIC_PAGES_BASE_URL`, which production requires since
+BACKEND_BUGS B-174 (without it `migrate` refuses to boot and the old containers keep
+serving), and the app's identifiers for the two association files. From `deploy/`,
+with the server's own API host in place of `api.example.com`:
+```bash
+grep -q '^PUBLIC_PAGES_BASE_URL=' .env || echo "PUBLIC_PAGES_BASE_URL='https://api.example.com'" >> .env
+grep -q '^APP_LINKS_ANDROID_PACKAGES=' .env || printf '%s\n' "APP_LINKS_ANDROID_PACKAGES='com.yallagym.app'" "APP_LINKS_IOS_BUNDLE_IDS='com.yallagym.app'" "APP_LINKS_PATHS='/app/*'" >> .env
+```
+`APP_LINKS_ANDROID_SHA256_FINGERPRINTS` (the release key's SHA-256) and
+`APP_LINKS_IOS_TEAM_ID` are added the same way once known; until then
+`/.well-known/assetlinks.json` and `apple-app-site-association` answer 404
+`app_links_not_configured`.
 
 Commands that sections 6 and 7 write as `fly ssh console -C "<command>"` are
 `docker compose exec -u appuser web <command>` here (`-u appuser`: `exec` does not go

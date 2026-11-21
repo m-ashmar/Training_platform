@@ -5,7 +5,7 @@ store listing in both languages, and their URLs travel through the capabilities 
 so they can move without a release. The account-deletion page rides along, because the
 Play listing needs it and the app's own deletion screen may point at it.
 
-The base is `PUBLIC_PAGES_BASE_URL` (the hub domain, e.g. `https://yallagym.com`, which
+The base is `PUBLIC_PAGES_BASE_URL` (the hub domain, e.g. `https://yalagym.com`, which
 serves or forwards `/legal/...`) and, when that is unset, the host the request came to.
 Production refuses to boot without an https base (`settings_production`, BACKEND_BUGS
 B-174), so the fallback is development's only.

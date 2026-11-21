@@ -77,7 +77,7 @@ echo "Yalla Gym: single-server setup. Nothing is sent anywhere; this writes depl
 echo
 
 echo "1. Where it runs"
-ask API_DOMAIN  "  The API's host name, already pointing at this server (e.g. api.yallagym.com)"
+ask API_DOMAIN  "  The API's host name, already pointing at this server (e.g. api.yalagym.com)"
 case "$API_DOMAIN" in
     http://*|https://*|*/*|*" "*) echo "  Give the host name only, without https:// or a path." >&2; exit 1 ;;
     localhost*|127.*|*"*"*)        echo "  It must be a real public host name." >&2; exit 1 ;;
@@ -123,6 +123,26 @@ echo "5. Error alerts"
 ask_secret SENTRY_DSN "  The Sentry DSN" optional
 echo
 
+echo "6. Links that open the app (both can be added later: until then the two files answer 404)"
+ask_optional APP_LINKS_ANDROID_SHA256_FINGERPRINTS "  The release-signing key's SHA-256 fingerprint"
+if [ -n "$APP_LINKS_ANDROID_SHA256_FINGERPRINTS" ]; then
+    fp="$(printf '%s' "$APP_LINKS_ANDROID_SHA256_FINGERPRINTS" | tr -d ': ' | tr 'a-f' 'A-F')"
+    case "$fp" in
+        *[!0-9A-F]*) fp="" ;;
+    esac
+    if [ "${#fp}" -ne 64 ]; then
+        echo "  That is not a SHA-256 fingerprint (64 hex digits, colons allowed); skipped."
+        APP_LINKS_ANDROID_SHA256_FINGERPRINTS=""
+    fi
+fi
+ask_optional APP_LINKS_IOS_TEAM_ID "  The Apple developer team id (10 letters and digits)"
+case "$APP_LINKS_IOS_TEAM_ID" in
+    "") ;;
+    *[!A-Z0-9]*) echo "  An Apple team id is 10 capital letters and digits; skipped."; APP_LINKS_IOS_TEAM_ID="" ;;
+    *) [ "${#APP_LINKS_IOS_TEAM_ID}" -eq 10 ] || { echo "  An Apple team id is 10 capital letters and digits; skipped."; APP_LINKS_IOS_TEAM_ID=""; } ;;
+esac
+echo
+
 # --- generating --------------------------------------------------------------------
 echo "Generating the keys on this server..."
 hex() { openssl rand -hex "$1"; }
@@ -152,6 +172,15 @@ line ACME_EMAIL "$ACME_EMAIL"
 line DJANGO_ALLOWED_HOSTS "$API_DOMAIN"
 line CORS_ALLOWED_ORIGINS "https://$API_DOMAIN"
 line CSRF_TRUSTED_ORIGINS "https://$API_DOMAIN"
+# Where the privacy policy, terms and account-deletion page are reached. Production
+# refuses to boot without it (BACKEND_BUGS B-174). The API host serves /legal/... itself,
+# so it is the base until a hub domain exists; then change this line.
+line PUBLIC_PAGES_BASE_URL "https://$API_DOMAIN"
+# The app the two association files (/.well-known/) name. Fixed by the app's build
+# (applicationId and the iOS bundle id), and /app/* is the path its App Links filter opens.
+line APP_LINKS_ANDROID_PACKAGES "com.yallagym.app"
+line APP_LINKS_IOS_BUNDLE_IDS "com.yallagym.app"
+line APP_LINKS_PATHS "/app/*"
 line SENTRY_ENVIRONMENT "staging"
 line DB_NAME "yallagym"
 line DB_USER "yallagym"
@@ -183,6 +212,10 @@ if [ -n "$AI_API_KEY" ]; then
     fi
 fi
 if [ -n "$SENTRY_DSN" ]; then line SENTRY_DSN "$SENTRY_DSN"; fi
+if [ -n "$APP_LINKS_ANDROID_SHA256_FINGERPRINTS" ]; then
+    line APP_LINKS_ANDROID_SHA256_FINGERPRINTS "$APP_LINKS_ANDROID_SHA256_FINGERPRINTS"
+fi
+if [ -n "$APP_LINKS_IOS_TEAM_ID" ]; then line APP_LINKS_IOS_TEAM_ID "$APP_LINKS_IOS_TEAM_ID"; fi
 
 chmod 600 "$tmp"
 mv "$tmp" "$target"

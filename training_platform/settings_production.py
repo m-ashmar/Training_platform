@@ -450,7 +450,7 @@ _PLACEHOLDER_MAIL_DOMAINS = {"trainingplatform.com", "example.com", "example.net
 def _from_address_problem(value):
     """Why `value` cannot be the From of the platform's email, or None when it can.
 
-    A display name is welcome (`Yalla Gym <no-reply@yallagym.com>`). The domain must be
+    A display name is welcome (`Yalla Gym <no-reply@yalagym.com>`). The domain must be
     one the provider has verified — nothing here can check that, but a placeholder or a
     malformed address is certainly not, and the provider would refuse or junk every
     sign-up code sent from it.
@@ -554,11 +554,11 @@ def _public_pages_base_problem(value):
     if not base:
         return ("PUBLIC_PAGES_BASE_URL is not set — the privacy policy, terms and "
                 "account-deletion links every build is handed would follow whatever host "
-                "a request reached; set it to the hub domain, e.g. https://yallagym.com")
+                "a request reached; set it to the hub domain, e.g. https://yalagym.com")
     parts = urlsplit(base)
     if parts.scheme != "https" or not parts.hostname:
         return (f"PUBLIC_PAGES_BASE_URL is {base!r} — it must be an https URL with a "
-                "host, e.g. https://yallagym.com")
+                "host, e.g. https://yalagym.com")
     if parts.hostname in ("localhost", "127.0.0.1", "::1") \
             or parts.hostname.endswith(".localhost"):
         return f"PUBLIC_PAGES_BASE_URL is {base!r} — a local address in production"
