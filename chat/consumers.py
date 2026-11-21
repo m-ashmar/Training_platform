@@ -1,4 +1,7 @@
-"""The live half of the chat: `ws://host/ws/chat/<conversation_id>/?token=<JWT>`.
+"""The live half of the chat: `wss://<host>/ws/chat/<conversation_id>/?token=<JWT>`.
+
+(TLS ends at Caddy in production; a local server, which has no TLS, takes the same path
+over the plain ws scheme.)
 
 Authentication is `training_platform.ws_auth.authenticate_scope`, the one
 implementation both other consumers use: an **access** token, never an `UntypedToken`,
