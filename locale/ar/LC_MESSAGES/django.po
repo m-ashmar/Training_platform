@@ -6089,3 +6089,10 @@ msgstr "أُعيد فتح الوجبة"
 #: diet/views.py
 msgid "Nothing to undo"
 msgstr "لا يوجد ما يمكن التراجع عنه"
+
+#. `challenge_host_limit` (Road to 10 S3.4): the member already hosts the most
+#. challenges at once (`CHALLENGE_HOST_LIMIT`, 3).
+#: social/views.py
+#, python-format
+msgid "You are already hosting %(limit)d challenges, the most at once. Close one or wait until one ends."
+msgstr "أنت تستضيف %(limit)d تحديات الآن، وهذا الحد الأقصى. أغلق أحدها أو انتظر حتى ينتهي أحدها."

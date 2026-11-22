@@ -3496,6 +3496,16 @@ may not do answers the same coded refusals as anyone: 403 `not_owner` (someone e
 post, comment or challenge), 403 `challenge_clients_only` (another coach's clients-only
 challenge). No route refuses by role, and nothing differs by build.
 
+**How many challenges one member hosts at once** (Road to 10 S3.4, the owner's 3 of
+2026-11-22). Any member may still create a challenge, but one member hosts at most
+`CHALLENGE_HOST_LIMIT` (3) at once: created by them and not over (upcoming or running;
+one an operator hid does not count). The next `POST challenges/` answers 409
+`{"error", "code": "challenge_host_limit", "limit", "hosting"}` (new code), checked
+before the body, and nothing is written; closing one (`PATCH {"status": "completed"}`)
+or its end frees the place. Staff are not limited. Nothing differs by build. The
+platform's own starter challenge is made by an operator with `manage.py
+create_starter_challenge --creator <staff username>` (DEPLOY_CHECKLIST.md §6).
+
 `POST challenges/{id}/leave/` removes the caller's participation, recounts
 `participants_count` and closes the gap in the standing. Codes: `left_challenge` (200),
 `not_participating` (400, you had not joined), `challenge_closed` (400, the challenge

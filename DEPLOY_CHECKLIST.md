@@ -293,7 +293,9 @@ limit), `PERIODIC_SCAN_SIZE` (5000), `PRIVACY_BATCH_ROWS` (1000),
 `PRIVACY_EXPORT_SPOOL_BYTES` (8 MB, at most 64 MB), `STORAGE_DELETE_BATCH` (100),
 `IMAGE_DECODE_SLOTS` (0 = sized from the machine's memory),
 `IMAGE_DECODE_MEMORY_BYTES` (0 = read from the machine), `IMAGE_DECODE_RESERVED_BYTES`
-(192 MB), `IMAGE_DECODE_WAIT_SECONDS` (2), `IMAGE_DECODE_RETRY_AFTER_SECONDS` (5).
+(192 MB), `IMAGE_DECODE_WAIT_SECONDS` (2), `IMAGE_DECODE_RETRY_AFTER_SECONDS` (5),
+`CHALLENGE_HOST_LIMIT` (3, the owner's number: challenges one member hosts at once;
+0 = no limit).
 Boot refuses combinations that cannot fit the machine (`heavy_work_problems`).
 
 ## 4. Keys: making, custody, loss, leak, rotation
@@ -359,6 +361,12 @@ REVIEW_ACCOUNTS_EMAIL='appreview+{role}@your-domain' REVIEW_ACCOUNTS_PASSWORD='â
   exercises and the food catalogue (`load_food_catalogue --apply`, NEVER `--wipe`).
   **Never run `load_food_catalogue --wipe` against a live database**: it deletes what
   clients have eaten and every preference they built.
+- **A challenge to join on day one** (Road to 10 S3.4): after the first operator exists,
+  `python manage.py create_starter_challenge --creator <that operator's username>`
+  opens the platform's starter challenge for the whole community (12 training days in
+  30, counted from the training people log, ranked because staff made it; Arabic and
+  English). Run it again whenever no starter is running: it creates nothing while one
+  is upcoming or running (`--days` and `--target` change the defaults; `--force` opens another).
 - `check_catalogue` exits non-zero when an invariant the planner needs is broken, most
   importantly a food without a verified allergen composition.
 - After a bulk import outside the ORM: `python manage.py update_translation_fields`.
