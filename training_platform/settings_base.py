@@ -428,7 +428,7 @@ CHALLENGE_HOST_LIMIT = get_int_env("CHALLENGE_HOST_LIMIT", 3)
 # merchant account id is set and no API token: nothing reads the account, an operator
 # attaches the transfer in the console). `GET /api/subscription/v1/gateways/` says it
 # beside the gateway, and the app words its promise from it (the owner's D5,
-# 2026-11-22). 24 is a placeholder: THE OWNER CONFIRMS THE NUMBER.
+# 2026-11-22). 24 is the owner's number (2026-11-22: "up to 24 hours is fine for review").
 PAYMENT_REVIEW_HOURS = 24
 # When the payment screens say "ShamCash is not responding, your payment is safe, we
 # will keep checking" (the spec, section 6; subscription/gateway_health.py): after this
