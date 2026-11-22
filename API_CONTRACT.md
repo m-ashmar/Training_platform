@@ -1002,7 +1002,18 @@ Preferences govern the email as they govern the push: `channels.email: false` on
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
 inbox row is written either way. `GET preferences/event_types/` answers additively
 `{"event_types": [...], "email_event_types": [the six above]}`; `payment_confirmed` is a
-valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`).
+valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Since
+2026-11-22 (Road to 10 S0.4) it also answers `role` and `role_event_types` /
+`role_email_event_types`: the same lists cut to the kinds the caller's ROLE is ever sent
+(`notifications/audience.py`, read from each kind's call site), `all` always kept. A
+settings page draws those rows; `event_types` keeps every kind, and a preference on any
+listed kind is still accepted. A trainer's kinds: `client_request_received`,
+`client_request_cancelled`, `client_unassigned_trainer`, `client_request_approved` /
+`_rejected`, `coaching_ended` / `_finished`, `coaching_fee_held` / `_released` /
+`_refunded`, `trainer_verification_approved` / `_rejected`, `withdrawal_requested` /
+`_paid` / `_failed` (also by email), `routine_product_approved` / `_rejected` / `_sold`
+/ `_sale_refunded`, `trainer_weekly_digest`, `chat_message`, `session_completed` and the
+five social kinds.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -1623,7 +1634,8 @@ not filtered (`chat/views.py`): it has reporting (`coach_message`) and blocking.
 change to the list takes effect at the next write, without a release.
 
 **AI consent.** `GET ai-consent/` → `{granted, policy_version, granted_at,
-revoked_at}`; never asked reads as all-null with `granted: false`, which is how the
+revoked_at}` (a trainer gets the same answers; the AI coach is a client's plan feature,
+so a trainer's privacy page offers no AI rows, decided in the app by role); never asked reads as all-null with `granted: false`, which is how the
 app tells "not asked yet" from "said no" (`revoked_at` set). `POST ai-consent/`
 `{granted, policy_version}` returns the same body; `policy_version` is required when
 granting and ignored when revoking.
@@ -1671,7 +1683,16 @@ The flags are enforced by the server, not only rendered by the app:
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
 `exchange_rate`, `price_of_record`, `price_of_record_currency` — absent, not null), and
-`GET v1/gateways/` answers an empty list. Additive fields:
+`GET v1/gateways/` answers an empty list, with `can_pay: false` and `reason:
+"not_available_on_channel"`. On a build that may sell (Road to 10 S0.5, the owner's D5,
+2026-11-22) every registered gateway is listed with `available` (it can take a payment
+now), `kind` — `automatic` (the server reads the merchant account and confirms the
+payment itself) or `reviewed` (the customer transfers to the merchant account and a
+person confirms it in the console), null when unavailable — and `review_hours` (for
+`reviewed`: within how many hours it is confirmed, `PAYMENT_REVIEW_HOURS`; null
+otherwise); `enabled` equals `available`. The answer's `can_pay` is true when one is
+available, else `reason: "no_gateway"`. Sell only on `can_pay`, and word the promise
+from `kind`. Additive fields:
 `money_type` on payments and wallet transactions (`PLATFORM_SUB`, `COACHING_1TO1`,
 `ROUTINE_PRODUCT`, `WALLET_MOVE`) and `source` on subscriptions (`shamcash`, `agent_wallet`,
 `operator_grant`, `trial`, reserved: `apple_iap`, `google_play`; blank until entitled).

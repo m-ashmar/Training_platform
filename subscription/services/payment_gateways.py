@@ -241,11 +241,20 @@ class PaymentGatewayManager:
 
     @staticmethod
     def get_available_gateways() -> Dict[str, Dict[str, Any]]:
-        from ..settings.gateway_config import (
-            get_available_gateways, get_gateway_config, get_gateway_info,
-        )
+        """The gateways whose API token is set, described (`describe_gateways`)."""
+        from ..settings.gateway_config import get_available_gateways
+
+        return PaymentGatewayManager.describe_gateways(get_available_gateways())
+
+    @staticmethod
+    def describe_gateways(names) -> Dict[str, Dict[str, Any]]:
+        """Each named gateway's name, currencies and per-currency bounds, whatever its
+        credentials (`GET v1/gateways/` lists every registered gateway and says which can
+        take a payment: `gateway_config.gateway_kind`)."""
+        from ..settings.gateway_config import get_gateway_config, get_gateway_info
+
         available = {}
-        for gateway_name in get_available_gateways():
+        for gateway_name in names:
             info = get_gateway_info(gateway_name)
             limits = info.get('amount_limits') or {}
             # The legacy flat pair describes the gateway's own settlement currency,

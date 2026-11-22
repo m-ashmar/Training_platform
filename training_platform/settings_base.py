@@ -413,6 +413,12 @@ PAYMENT_POLL_BATCH = 100
 # poll_expired_checkouts): the ShamCash adapter's own lookback, since nothing older
 # could be found on the merchant account anyway.
 PAYMENT_LATE_MONEY_WINDOW_HOURS = 72
+# Within how many hours a person confirms a transfer on a `reviewed` gateway (the
+# merchant account id is set and no API token: nothing reads the account, an operator
+# attaches the transfer in the console). `GET /api/subscription/v1/gateways/` says it
+# beside the gateway, and the app words its promise from it (the owner's D5,
+# 2026-11-22). 24 is a placeholder: THE OWNER CONFIRMS THE NUMBER.
+PAYMENT_REVIEW_HOURS = 24
 # When the payment screens say "ShamCash is not responding, your payment is safe, we
 # will keep checking" (the spec, section 6; subscription/gateway_health.py): after this
 # many reads of the merchant account in a row could not reach it, over at least this

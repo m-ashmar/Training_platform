@@ -171,6 +171,28 @@ def can_initiate_payments(gateway_name: str) -> bool:
     return bool(config.get('api_key') or config.get('merchant_id'))
 
 
+def gateway_kind(gateway_name: str) -> Optional[str]:
+    """How this gateway's payments are confirmed, or None when it can take none.
+
+    `automatic` — an API token is set, so the server reads the merchant account itself
+    (a hosted checkout, or the reconcile poller matching the transfer's note) and
+    confirms the payment with no one involved. `reviewed` — only the merchant account
+    id: the customer transfers to it and nothing can read the account, so a person
+    confirms the transfer in the console (`PAYMENT_REVIEW_HOURS`). The same two
+    credentials `can_initiate_payments` accepts, so a gateway has a kind exactly when it
+    can take a payment.
+    """
+    try:
+        config = GATEWAY_REGISTRY[gateway_name]['config'].get(GATEWAY_MODE) or {}
+    except (ValueError, KeyError):
+        return None
+    if config.get('api_key'):
+        return 'automatic'
+    if config.get('merchant_id'):
+        return 'reviewed'
+    return None
+
+
 def get_available_gateways() -> list:
     """List of enabled gateway names."""
     return [name for name in GATEWAY_REGISTRY.keys() if is_gateway_enabled(name)]

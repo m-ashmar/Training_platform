@@ -1549,25 +1549,60 @@ class PaymentGatewayView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        """
-        Get available payment gateways.
-        
-        Returns:
-            List of available gateways with their capabilities
+        """GET /api/subscription/v1/gateways/ — the ways to pay for a plan, and whether
+        there is one at all, BEFORE any checkout opens (the owner's D5, 2026-11-22; Road
+        to 10 S0.5). Authenticated. Headers: `X-App-Channel`, `X-App-Version`.
+
+        200::
+
+            {"success": true,
+             "can_pay": true,                     a gateway below is `available`
+             "reason": null | "no_gateway" | "not_available_on_channel",
+             "gateways": [{"name": "shamcash", "display_name": "ShamCash",
+                           "available": true,     it can take a payment now
+                           "kind": "automatic" | "reviewed" | null,
+                           "review_hours": 24 | null,
+                           "enabled": true,       = available (kept for old builds)
+                           "supported_currencies": ["SYP", "USD"],
+                           "settlement_currency": "SYP",
+                           "amount_limits": {"SYP": {"min": 100, "max": 5000000}},
+                           "min_amount": 100, "max_amount": 5000000}]}
+
+        `kind`: `automatic` — the server reads the merchant account and confirms the
+        payment itself; `reviewed` — the customer transfers to the merchant account and
+        a person confirms it in the console, within `review_hours`
+        (`PAYMENT_REVIEW_HOURS`); null when the gateway is not set up. Sell a plan only
+        when `can_pay` is true, and word the promise from `kind`.
+
+        What differs by build, and nothing else does: a build that may not sell plans
+        (`can_purchase_platform_sub` off — `play`, `ios`, no channel) gets `gateways:
+        []`, `can_pay: false`, `reason: "not_available_on_channel"` — how to pay is a
+        payment instruction, never shown there. Otherwise every registered gateway is
+        listed, and `reason` is `no_gateway` when none is available.
         """
         try:
             # How to pay is a payment instruction. A build that may not sell plans gets
             # an empty list — the same for every user of that build, reviewer or not.
             if not flags_for_request(request)['can_purchase_platform_sub']:
-                return Response({'success': True, 'gateways': []})
+                return Response({'success': True, 'can_pay': False,
+                                 'reason': 'not_available_on_channel', 'gateways': []})
 
-            available_gateways = PaymentGatewayManager.get_available_gateways()
-            
+            from django.conf import settings as django_settings
+
+            from .settings.gateway_config import GATEWAY_REGISTRY, gateway_kind
+
+            described = PaymentGatewayManager.describe_gateways(GATEWAY_REGISTRY)
+            review_hours = int(getattr(django_settings, 'PAYMENT_REVIEW_HOURS', 24))
+
             gateway_list = []
-            for gateway_name, gateway_info in available_gateways.items():
+            for gateway_name, gateway_info in described.items():
+                kind = gateway_kind(gateway_name)
                 gateway_list.append({
                     'name': gateway_name,
                     'display_name': gateway_info['name'],
+                    'available': kind is not None,
+                    'kind': kind,
+                    'review_hours': review_hours if kind == 'reviewed' else None,
                     'supported_currencies': gateway_info['supported_currencies'],
                     'settlement_currency': gateway_info['settlement_currency'],
                     # Per-currency bounds. The flat pair below is kept for existing
@@ -1575,11 +1610,13 @@ class PaymentGatewayView(APIView):
                     'amount_limits': gateway_info['amount_limits'],
                     'min_amount': gateway_info.get('min_amount'),
                     'max_amount': gateway_info.get('max_amount'),
-                    'enabled': gateway_info['enabled']
+                    'enabled': kind is not None,
                 })
-            
+            can_pay = any(entry['available'] for entry in gateway_list)
             return Response({
                 'success': True,
+                'can_pay': can_pay,
+                'reason': None if can_pay else 'no_gateway',
                 'gateways': gateway_list
             })
             
