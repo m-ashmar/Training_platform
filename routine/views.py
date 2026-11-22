@@ -5716,7 +5716,9 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         generic `permission_denied`).
 
         `{trainer_id, trainer_name, client_count, recent_activity: [...]}`. Each entry
-        carries the client, their last session, this week's exercises and, since
+        carries `unread_count` (S2.3: messages from that client the trainer has not
+        read, as the chat list counts them), the client, their last session (with its
+        `id`, S2.3), this week's exercises and, since
         2026-09-20, `week_plan` — that client's week against the coach's plan
         (`sets_planned`, `sets_logged`, `sets_missed`, `days_closed`, `perfect_days`,
         `short_days`) — and `trend`, how many of their exercises are `rising`, `easing`
@@ -5747,11 +5749,19 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         # queries on one page load.
         clients = list(clients)
         activity = RecentActivitySerializer.collect(clients)
+        # Each row's unread count (Road to 10 S2.3), the chat list's own annotation, for
+        # the whole roster in one query.
+        from chat.serializers import conversation_queryset
+
+        unread = dict(conversation_queryset(user)
+                      .filter(client_id__in=[client.pk for client in clients])
+                      .values_list('client_id', 'unread_count'))
         # With the request: `client_info.profile_picture` is absolute here as it is
         # everywhere else (the same shape bug as BACKEND_BUGS B-032, on the picture).
         recent_activity = [
             RecentActivitySerializer(
-                client, context={"activity": activity, "request": request}).data
+                client, context={"activity": activity, "request": request,
+                                 "unread": unread}).data
             for client in clients
         ]
         

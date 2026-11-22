@@ -2307,13 +2307,15 @@ class RecentActivitySerializer(serializers.ModelSerializer):
     """
     client_info = serializers.SerializerMethodField()
     last_session = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
     this_week = serializers.SerializerMethodField()
     recent_exercises = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
         fields = [
-            'client_info', 'last_session', 'this_week', 'recent_exercises'
+            'client_info', 'last_session', 'this_week', 'recent_exercises',
+            'unread_count'
         ]
 
     # ---- batch collection ---------------------------------------------------
@@ -2482,9 +2484,16 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             'profile_picture': _absolute_picture(obj, self.context.get('request'))
         }
 
+    def get_unread_count(self, obj):
+        """Messages from this client the trainer has not read (Road to 10 S2.3): the same
+        number `GET /api/v1/chat/conversations/` shows on that thread, read for the whole
+        roster in one query by the view (`context['unread']`). 0 without a thread."""
+        return int((self.context.get('unread') or {}).get(obj.pk, 0))
+
     def get_last_session(self, obj):
-        """`{date, routine_name, exercises_completed, total_volume, duration,
-        duration_seconds}`, or null before the first completed session.
+        """`{id, date, routine_name, exercises_completed, total_volume, duration,
+        duration_seconds}`, or null before the first completed session. `id` (S2.3) is
+        the session, for its review.
 
         `duration_seconds` (additive, BACKEND_BUGS B-095) is the session's length in
         exactly the shape `trainer/client-progress/{id}/` `recent_activity[].duration`
@@ -2512,6 +2521,8 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             seconds = str(elapsed.total_seconds())
 
         return {
+            # The session itself (Road to 10 S2.3): the review opens from the row.
+            'id': last_session.pk,
             # The Damascus day (TIME_ZONE), as routine/outcomes judges idle days: the
             # stored UTC day moved a session after local midnight to yesterday (B-135).
             'date': timezone.localdate(last_session.end_time) if last_session.end_time else None,

@@ -46,8 +46,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 #: The one priority order, first to last. Within a kind, see `_sort_key`.
-KIND_ORDER = ('new_request', 'form_check', 'idle_client', 'slipping_client',
-              'program_ending')
+KIND_ORDER = ('new_request', 'form_check', 'unanswered_message', 'awaiting_first_program',
+              'idle_client', 'slipping_client', 'program_ending')
 
 #: A program counts as ending from this many days before its `end_date`. The app's own
 #: composer used 7 (`QueueComposer.endingWithinDays`) before this endpoint existed, so
@@ -209,11 +209,86 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
             },
         })
 
-    # --- idle and slipping: one card per client, idle first when both are true.
+    # --- unanswered messages (Road to 10 S2.3): a usable client's thread in which the
+    # client wrote during THIS coaching and the trainer has not written since — the same
+    # `answered` and `began` the form checks use. A form-check video is its own card
+    # above and is not counted again; a message the client took back is not waiting.
+    waiting = (Message.objects
+               .filter(conversation__trainer=trainer,
+                       conversation__client_id__in=usable,
+                       deleted_at__isnull=True,
+                       sender_id=F('conversation__client_id'),
+                       created_at__gte=Subquery(began))
+               .filter(~Exists(answered))
+               .exclude(kind=KIND_VIDEO, exercise__isnull=False)
+               .order_by('conversation_id', 'created_at', 'id')
+               .values('conversation_id', 'sender_id', 'pk', 'created_at'))
+    threads = {}
+    for row in waiting:
+        thread = threads.setdefault(row['conversation_id'], {'first': row, 'count': 0})
+        thread['count'] += 1
+    for conversation_id, thread in threads.items():
+        first = thread['first']
+        items.append({
+            'kind': 'unanswered_message',
+            'id': f"unanswered_message:{conversation_id}:{first['pk']}",
+            'client': _client_card(clients[first['sender_id']], request),
+            'at': first['created_at'],
+            'unanswered_message': {
+                'conversation_id': conversation_id,
+                'message_id': first['pk'],
+                'count': thread['count'],
+                'sent_at': first['created_at'],
+            },
+        })
+
+    # --- awaiting a first programme (S2.3): the coaching's month 1 is HELD until the
+    # first programme arrives (`users/coaching.py`: accept holds it, the first programme
+    # pays it out). That client is not idle: the next move is the trainer's. The same
+    # rule `coaching_status` answers `awaiting_first_program` by.
+    from .models import CoachingPeriod
+    from .trainer_directory import CoachingPriceBook
+
+    relations = {relation.client_id: relation for relation in
+                 TrainerClientRelation.objects.filter(trainer=trainer, status='approved',
+                                                      client_id__in=usable)}
+    latest = {}
+    for period in (CoachingPeriod.objects
+                   .filter(relation_id__in=[r.pk for r in relations.values()])
+                   .order_by('relation_id', '-number')
+                   .distinct('relation_id')):
+        latest[period.relation_id] = period
+    awaiting = {}
+    for client_id, relation in relations.items():
+        period = latest.get(relation.pk)
+        if period is not None and period.status == 'held':
+            awaiting[client_id] = (relation, period.price, period.currency)
+        elif period is None and relation.hold_reference:
+            awaiting[client_id] = (relation, relation.agreed_rate,
+                                   relation.agreed_currency or None)
+    book = CoachingPriceBook(request) if awaiting else None
+    for client_id, (relation, amount, currency) in awaiting.items():
+        held, held_currency = (book.price(amount, currency) if currency
+                               else (None, None))
+        items.append({
+            'kind': 'awaiting_first_program',
+            'id': f'awaiting_first_program:{relation.pk}',
+            'client': _client_card(clients[client_id], request),
+            'at': relation.responded_at or relation.created_at,
+            'awaiting_first_program': {
+                'relation_id': relation.pk,
+                'since': relation.responded_at or relation.created_at,
+                'held_amount': held,
+                'held_currency': held_currency,
+            },
+        })
+
+    # --- idle and slipping: one card per client, idle first when both are true. A client
+    # awaiting their first programme is that card instead, never idle.
     idle, slipping = [], []
     for client_id in usable:
         row = by_client.get(client_id)
-        if row is None:
+        if row is None or client_id in awaiting:
             continue
         codes = {r['code']: r for r in row['reasons']}
         if 'never_started' in codes or 'quiet' in codes:
@@ -254,6 +329,8 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
                 'days': (today - last_on).days if last_on else None,
                 'last_trained_on': last_on,
                 'last_workout': ({'at': session.end_time or session.start_time,
+                                  # The session review opens from it (S2.3).
+                                  'session_id': session.pk,
                                   'day': session.day,
                                   'routine': _program(session.routine, trainer)}
                                  if session else None),
@@ -336,6 +413,10 @@ def _sort_key(item):
         return (rank, at, item['new_request']['request_id'], 0)
     if kind == 'form_check':
         return (rank, at, item['form_check']['message_id'], 0)
+    if kind == 'unanswered_message':
+        return (rank, at, item['unanswered_message']['message_id'], 0)
+    if kind == 'awaiting_first_program':
+        return (rank, at, item['awaiting_first_program']['relation_id'], 0)
     if kind == 'idle_client':
         return (rank, -item['_score'], at, item['client']['id'])
     if kind == 'slipping_client':
@@ -362,7 +443,8 @@ class AttentionQueueView(APIView):
 
         {"count": 4,
          "items": [
-           {"kind": "new_request" | "form_check" | "idle_client" | "slipping_client"
+           {"kind": "new_request" | "form_check" | "unanswered_message"
+                    | "awaiting_first_program" | "idle_client" | "slipping_client"
                     | "program_ending",
             "id": "form_check:812",          stable per item: kind + the row's own id(s)
             "client": {"id", "name", "first_name", "last_name", "profile_picture"},
@@ -377,13 +459,16 @@ class AttentionQueueView(APIView):
     |---|---|---|
     | `new_request` | the request was sent | the pending-requests row, exactly as `GET /api/auth/trainer/pending-requests/` answers a request the CLIENT sent (one builder, `users.trainer_requests.pending_request_row`): `request_id` (what `trainer/respond-to-request/` takes), `client_id`, `client_name`, `client_username`, `initiated_by` (always `client` here), `status` (`pending`), `created_at`, `requested_at`, `note` (the client's own words), `client_email`, `client_profile_picture`, `client_age`, `client_gender`, `client_goals`, `client_activity_level`, the v2 answers `training_goal`, `training_place`, `training_days_per_week` (a code, or "" / null while unanswered), and the QUOTE: `agreed_rate` + `agreed_currency` (the fee quoted with the request, in the trainer's currency when it converts, the unit always beside it), `trainer_net` (that fee less the platform's commission), `commission_rate` (that commission as a fraction, `0.2`) — the four null on a build that may not show a coaching fee (above), the first three also when no fee was quoted. Never a health note: those come after acceptance |
     | `form_check` | the video was sent | `message_id`, `conversation_id`, `exercise` `{id, name}`, `caption`, `duration_seconds` (null when the container declared none), `sent_at`, `media` (the thread's signed, expiring `{url, ...}`) |
-    | `idle_client` | the day they became quiet (last trained + `QUIET_DAYS`), or when the coaching began for a client who never trained | `reason` (`quiet` / `never_started`), `days` (null = never trained), `last_trained_on`, `last_workout` `{at, day, routine: {id, name}}` or null, `program` `{id, name}` or null. `never_started` only for a client who has never trained (`days` null); a client who has trained is idle only after `QUIET_DAYS` without, as `quiet` |
+    | `unanswered_message` | the first message waiting | (S2.3, 2026-11-22) a thread where the client wrote during this coaching and the trainer has not written since: `conversation_id`, `message_id` (the first one waiting), `count` (messages waiting), `sent_at`. A form-check video is its own `form_check` card and is not counted here |
+    | `awaiting_first_program` | the coaching began | (S2.3) month 1 is held until the first programme arrives: `relation_id`, `since`, `held_amount` + `held_currency` (the held month, in the reader's currency when it converts; both null on a build that may not show a coaching fee). Such a client is never `idle_client` |
+    | `idle_client` | the day they became quiet (last trained + `QUIET_DAYS`), or when the coaching began for a client who never trained | `reason` (`quiet` / `never_started`), `days` (null = never trained), `last_trained_on`, `last_workout` `{at, session_id, day, routine: {id, name}}` or null (`session_id` S2.3), `program` `{id, name}` or null. `never_started` only for a client who has never trained (`days` null); a client who has trained is idle only after `QUIET_DAYS` without, as `quiet` |
     | `slipping_client` | today | `this_week_percent`, `usual_percent` (their own four-week share of planned sets), `planned_sets`, `missed_sets`, `last_trained_on`, `program` |
     | `program_ending` | `PROGRAM_ENDING_WITHIN_DAYS` (7) before `end_date` | `routine_id`, `name`, `week`, `weeks` (week N of M, from `start_date` / `end_date`), `end_date`, `days_left` |
 
-    THE ORDER — one, total: `new_request`, `form_check`, `idle_client`,
-    `slipping_client`, `program_ending`; within a kind the most urgent first — the
-    longest-waiting request, the oldest unanswered video, the idle client with the
+    THE ORDER — one, total: `new_request`, `form_check`, `unanswered_message`,
+    `awaiting_first_program`, `idle_client`, `slipping_client`, `program_ending`; within a
+    kind the most urgent first — the longest-waiting request, the oldest unanswered video,
+    the oldest unanswered message, the longest-held first month, the idle client with the
     highest `attention` urgency score (then the longest overdue), the biggest drop
     against their own average, the programme with the fewest days left — and every tie
     broken by a unique id (`_sort_key`).
