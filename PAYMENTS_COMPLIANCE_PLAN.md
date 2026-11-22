@@ -11,9 +11,9 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 (media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
 and order live in `BACKEND_DELTA.md`, not here.
 
-**Where things stand (2026-11-23):** Road to 10 is the work now: phase 0 and batch A are on this
-branch, phase 3 and S2.7 are merged on `road10/integration` awaiting the full gate, S2.13 and
-batch B are being built (the Road to 10 section below has the table per batch). The fix run is
+**Where things stand (2026-11-23):** Road to 10 is the work now: phase 0, batch A, phase 3 and
+S2.7 are on this branch (full gate at `24170ca`: 3003 passed, 0 failed); S2.13 and batch B are
+next through `road10/integration` (the Road to 10 section below has the table per batch). The fix run is
 paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
 ## Build order
@@ -143,20 +143,21 @@ BACKEND_BUGS rows there). Workers never edit this file, BACKEND_BUGS.md or SIDE_
 | S2.3 the trainer's queue | `b18fb0b` | DONE: attention kinds for an unanswered message and a client awaiting a first programme; unread counts on the roster; the last session's id |
 
 **Batch D, phase 3** (worker "Road to 10 phase 3", branch `claude/road10-phase3-632678`, merged on
-`road10/integration` as `42e3109`):
+`road10/integration` as `42e3109`; LANDED on this branch 2026-11-23 with S2.7, full gate at
+`24170ca` on a fresh database: 3003 passed, 0 failed, 0 skipped):
 
 | Item | Commit | State |
 |---|---|---|
-| S3.5 a meal confirmed today can be undone (D11) | `cd93730` | MERGED: `POST /api/diet/v1/client/meals/{id}/undo/`; new code `undo_window_closed` |
-| S3.8 trainers in the community (D11) | `99c9032` | MERGED: no route refused a trainer; 7 tests now guard it, docstrings say so |
-| S3.4 a starter challenge, and the hosting limit | `b266bcb` | MERGED: `manage.py create_starter_challenge --creator <operator>` (DEPLOY_CHECKLIST §6); the 4th hosted challenge answers 409 `challenge_host_limit`; a challenge an operator hid holds no place (the worker's choice, told to the owner) |
-| S3.1 push payloads, code side | `72489fc` | MERGED: `request_id`, `client_id`, `trainer_id`, `session_id`, `routine_id` added where a page needs them (API_CONTRACT §4). The Firebase credentials on the server are the owner's step |
+| S3.5 a meal confirmed today can be undone (D11) | `cd93730` | LANDED: `POST /api/diet/v1/client/meals/{id}/undo/`; new code `undo_window_closed` |
+| S3.8 trainers in the community (D11) | `99c9032` | LANDED: no route refused a trainer; 7 tests now guard it, docstrings say so |
+| S3.4 a starter challenge, and the hosting limit | `b266bcb` | LANDED: `manage.py create_starter_challenge --creator <operator>` (DEPLOY_CHECKLIST §6); the 4th hosted challenge answers 409 `challenge_host_limit`; a challenge an operator hid holds no place (the worker's choice, told to the owner) |
+| S3.1 push payloads, code side | `72489fc` | LANDED: `request_id`, `client_id`, `trainer_id`, `session_id`, `routine_id` added where a page needs them (API_CONTRACT §4). The Firebase credentials on the server are the owner's step |
 
 **Batch C, money** (worker "Road to 10 money", branch `claude/road10-money-bb9d57`):
 
 | Item | Commit | State |
 |---|---|---|
-| S2.7 "do not renew after this month" (D12) | `7c8dc0a` | MERGED (`b906639`): `POST /api/v1/coaching/renewal/` `{renew}`; `stop_renewal`, `ends_at`, `ending_reminder` on `coaching/current/`; push `coaching_ending_soon`; migration `users/0048`. Its own adversarial review found 2 MEDIUM, both fixed before the commit |
+| S2.7 "do not renew after this month" (D12) | `7c8dc0a` | LANDED (merged as `b906639`; full gate at `24170ca`: 3003 passed, 0 failed): `POST /api/v1/coaching/renewal/` `{renew}`; `stop_renewal`, `ends_at`, `ending_reminder` on `coaching/current/`; push `coaching_ending_soon`; migration `users/0048`. Its own adversarial review found 2 MEDIUM, both fixed before the commit |
 | S2.13 a plan paid from the wallet (D19) | — | IN PROGRESS. Design in the worker's note: one route `POST /api/subscription/v1/subscriptions/{id}/pay-from-wallet/` with an idempotency key, `PaymentService.pay_from_wallet`, `require_purchase_allowed(PLATFORM_SUB)` first (so `play`/`ios` refuse), 100% to the platform, the wallet named LAST in the gateway list |
 
 **Batch B** (worker "Road to 10 batch B", branch `claude/road10-batch-b-*`, cut from `b18fb0b`):
