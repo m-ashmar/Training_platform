@@ -215,8 +215,18 @@ class HomeView(APIView):
     started: with `workout_hero.cta.state` `refused` this hero is sent too, and LEADS
     the list (see above)::
 
-        {"goal": "build_muscle",              the stored code, never a label
-         "matches": 3}                        trainers available who suit that goal
+        {"goal": "build_muscle",              the stored code, never a label; null
+                                              when unanswered and a request is open
+         "matches": 3,                        trainers available who suit that goal
+         "step": "waiting",                   waiting | invited, ONLY while a request
+                                              is open; absent = choose (S2.1)
+         "request_id": 41,                    with step
+         "trainer": {"id": 7, "first_name": "Rami"}}   with step
+
+        `waiting`: the client asked and the trainer has not answered (cancel with
+        `client/cancel-trainer-request/`); `invited`: a trainer invited them (answer
+        with `client/respond-to-invite/`). Sent, while a request is open, even before
+        the goal is answered.
 
         No price in this section, on any build.
 
@@ -230,6 +240,7 @@ class HomeView(APIView):
          "current": "profile"}
 
         `state` is `done`, `current` or `todo`; `current` is the first unfinished step.
+        The `coach` step is `awaiting` while a request is open, sent or received (S2.1).
         `missing` is exactly `onboarding_missing` from `client/profile/`, so the app can
         send the person to the same fields.
 
@@ -586,6 +597,9 @@ class HomeView(APIView):
         relation, _status = sections.coaching_of(person)
         plan = sections.active_diet_plan(person, on_date)
         coached = relation is not None
+        # The request this client is waiting on, if any: the hero's and the checklist's
+        # face (Road to 10 S2.1). Not asked for a coached client.
+        pending = None if coached else first_day.open_request(person)
         # One reading of the clock for every state that depends on it: a meal and the
         # workout beside it in the timeline are judged against the same minute, and it
         # is the moment `as_of` names, so the page's life is counted from it.
@@ -618,9 +632,10 @@ class HomeView(APIView):
             # started — the coaching ended and the routine is `refused` — keeps it, in
             # the lead (`REFUSED_DAY_ORDER`, the owner, 2026-09-28).
             'find_trainer_hero': (None if coached or (hero is not None and not refused_day)
-                                  else first_day.find_trainer_hero(person)),
+                                  else first_day.find_trainer_hero(person,
+                                                                   pending=pending)),
             'setup_checklist': None if coached else first_day.setup_checklist(
-                person, routine=routine, plan=plan, coached=coached),
+                person, routine=routine, plan=plan, coached=coached, pending=pending),
             'featured_trainers': None if coached else first_day.featured_trainers(
                 person, request=request, flags=flags),
             # The programmes on sale are for every client, coached or not (the owner,

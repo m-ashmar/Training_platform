@@ -27,8 +27,36 @@ FEATURED_TRAINERS = 3
 READY_PROGRAMS = 4
 
 
-def find_trainer_hero(person) -> dict | None:
-    """The first-day hero: the goal they chose, and how many trainers suit it.
+def open_request(person):
+    """The coaching request this client is waiting on, or None (Road to 10 S2.1).
+
+    A pending relation with a trainer who is visible to them: their own request first
+    (`initiated_by` `client`, or `unknown` for a row from before the field), else the
+    newest invitation a trainer sent (`trainer`). A pair where either has blocked the
+    other is not an open request. One query, read once by the view for the hero and the
+    checklist."""
+    from moderation.services import blocked_ids
+    from users.models import TrainerClientRelation
+    from users.visibility import public_people
+
+    rows = list(TrainerClientRelation.objects.select_related('trainer')
+                .filter(client=person, status='pending',
+                        trainer__in=public_people())
+                .exclude(trainer_id__in=blocked_ids(person))
+                .order_by('-requested_at', '-id')[:10])
+    own = [row for row in rows if row.initiated_by != 'trainer']
+    return (own or rows or [None])[0]
+
+
+def find_trainer_hero(person, *, pending=None) -> dict | None:
+    """The first-day hero: the goal they chose, and how many trainers suit it — and, once
+    a request is open, which face the hero shows (Road to 10 S2.1).
+
+    `step` (present only while a request is open; absent means `choose`, pick a
+    trainer): `waiting` (the client asked and the trainer has not answered), `invited` (a
+    trainer invited them). With it the section adds `request_id` (what `client/cancel-trainer-request/` or
+    `client/respond-to-invite/` takes) and `trainer: {id, first_name}`. `pending` is
+    `open_request(person)`, read by the caller.
 
     Codes and numbers only — `goal` is the stored code (`users/models.py
     TRAINING_GOALS`), never a label, and the app writes "build muscle" in the reader's
@@ -46,12 +74,20 @@ def find_trainer_hero(person) -> dict | None:
     from users.trainer_directory import matches_for_goal
 
     goal = getattr(person, 'training_goal', '') or ''
-    if not goal:
+    if not goal and pending is None:
         return None
-    return {'goal': goal, 'matches': matches_for_goal(person)}
+    data = {'goal': goal or None, 'matches': matches_for_goal(person) if goal else 0}
+    if pending is not None:
+        # Only while a request is open: with nothing open the section keeps the shape it
+        # always had, `{goal, matches}`, and no `step` means `choose`.
+        data['step'] = 'invited' if pending.initiated_by == 'trainer' else 'waiting'
+        data['request_id'] = pending.pk
+        data['trainer'] = {'id': pending.trainer_id,
+                           'first_name': pending.trainer.first_name}
+    return data
 
 
-def setup_checklist(person, *, routine, plan, coached) -> dict | None:
+def setup_checklist(person, *, routine, plan, coached, pending=None) -> dict | None:
     """The three steps of the artboard, each with its state, and which one is current.
 
     `profile` is the platform's own answer to "is this person's profile finished"
@@ -79,6 +115,11 @@ def setup_checklist(person, *, routine, plan, coached) -> dict | None:
     for step in steps:
         step['state'] = ('done' if step['done']
                          else 'current' if step['code'] == current else 'todo')
+    # A request is open (sent, or an invitation received): the coach step is neither
+    # to do nor done — it is awaiting the other side (Road to 10 S2.1). Additive value.
+    coach = steps[1]
+    if not coach['done'] and pending is not None:
+        coach['state'] = 'awaiting'
     return {'steps': steps, 'current': current}
 
 
