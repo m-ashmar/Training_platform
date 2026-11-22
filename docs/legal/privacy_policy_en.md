@@ -50,7 +50,7 @@ Shop location of an agent: for agents, the city and area of their shop, shown wi
 
 Date of birth, age and gender: your date of birth is required when you sign up, because the app is for people aged 14 and over. Age and gender help plan training and nutrition.
 
-Health information: height, weight and weight over time, injuries and the injury areas you choose, allergies, and the allergen check of your diet plan. You choose whether to give these; some features need them. Your injury note and injury areas are stored encrypted.
+Health information: height, weight and weight over time, the body measurements you log (chest, arm, waist and thigh), injuries and the injury areas you choose, allergies, and the allergen check of your diet plan. You choose whether to give these; some features need them. Your injury note and injury areas are stored encrypted.
 
 Fitness and training activity: your workouts, sets, weights and repetitions, routines and progress, goals, diet plans, the meals you tick, skip, swap or rate, challenges you join, and summaries of your progress.
 

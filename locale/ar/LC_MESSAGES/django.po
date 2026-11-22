@@ -6080,3 +6080,15 @@ msgstr "اختر كلمة مرور مختلفة عن كلمة مرورك الح�
 #: users/password_views.py
 msgid "Your password has been changed. Other devices have been signed out."
 msgstr "تم تغيير كلمة المرور. تم تسجيل الخروج من الأجهزة الأخرى."
+
+#. Road to 10 S2.11: chest, arm, waist and thigh are logged in centimetres; a
+#. measurement sent with another unit is refused.
+#: analytics/serializers.py
+msgid "Body measurements are recorded in centimetres (cm)."
+msgstr "تُسجَّل قياسات الجسم بالسنتيمتر (سم)."
+
+#. metrics/?latest_for= (Road to 10 S2.11): a name that is not a metric type.
+#: analytics/views.py
+#, python-format
+msgid "latest_for must be one or more of: %(types)s."
+msgstr "يجب أن يكون latest_for واحدًا أو أكثر من: %(types)s."

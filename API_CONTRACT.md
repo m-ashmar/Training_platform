@@ -471,6 +471,22 @@ messages). The same on every build.
 | `POST` | `/api/analytics/sessions/end_session/` | auth | `UserSessionViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/analytics/sessions/{id}/` | auth | `UserSessionViewSet` |
 
+**Body measurements (Road to 10 S2.11, the owner's D18).** `POST /api/analytics/metrics/`
+`{metric_type, value, unit?, notes?}` takes four circumferences beside `weight`, in
+CENTIMETRES, each within its ruler: `chest` 60-160, `arm` 20-60, `waist` 50-160, `thigh`
+30-100. The row answers `unit: "cm"` whatever was sent. No route is new. Refusals, all 400
+`validation_error` with `field_errors`: `value` field code `invalid` (outside the range);
+`unit` field code `unit_not_cm` (a unit other than `cm` on one of the four);
+`metric_type` field code `invalid_choice`. `body_fat` is not part of the launch.
+
+`GET /api/analytics/metrics/?latest_for=weight,chest,arm,waist,thigh` answers the CALLER's
+newest row of each named type, in the list's own shape (`{count, next, previous,
+results}`, newest first; a type never logged has no row). 400 `bad_metric_type`
+(+ `field`: `latest_for`) for a name that is not a metric type or an empty list.
+`current_metrics/` and `metric_trends/?metric_type=` answer the new types as they answer
+weight. Health data: the person's own, read by nobody else, in their export, deleted with
+the account. Nothing differs by build.
+
 ### Authentication & Users
 
 | Method | Path | Auth | View |

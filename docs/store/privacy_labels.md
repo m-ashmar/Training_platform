@@ -62,7 +62,7 @@ Every type below is **Linked to the user** (it is stored against the account) an
 | Contact Info > Physical Address | App Functionality | An agent's city and area, on the listing agents agree to (`address`) |
 | Identifiers > User ID | App Functionality | Username and account number (`user_ids`) |
 | Identifiers > Device ID | App Functionality | The push token of each phone (`device_ids`) |
-| Health & Fitness > Health | App Functionality, Product Personalization | Height, weight, injuries, allergies, body-weight history, the allergen check of a plan (`health`) |
+| Health & Fitness > Health | App Functionality, Product Personalization | Height, weight, injuries, allergies, body-weight history, the body measurements a person logs (chest, arm, waist, thigh), the allergen check of a plan (`health`) |
 | Health & Fitness > Fitness | App Functionality, Product Personalization | Workouts, sets, routines, diet plans, meals ticked, goals, challenges (`fitness`) |
 | Purchases > Purchase History | App Functionality | Plan payments, coaching months, programs bought, the ledger (`purchases`) |
 | Financial Info > Other Financial Info | App Functionality | Wallet balance, a trainer's ShamCash address, withdrawals, an agent's cash record (`financial`) |

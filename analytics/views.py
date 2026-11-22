@@ -130,8 +130,53 @@ class UserActivityViewSet(viewsets.ModelViewSet):
 
 
 class PerformanceMetricViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for performance metrics
+    """The caller's measurements over time (every row for a staff account), newest
+    first, paginated (`{count, next, previous, results}`, `?page_size=` up to 100).
+    Any signed-in account; 401 without a token. Nothing here differs by build.
+
+    A row is `{id, user, metric_type, value, unit, recorded_at, notes, metadata}`.
+    `recorded_at` is the server's clock at the write; `user` is always the caller.
+
+    `POST /api/analytics/metrics/` — body `metric_type`, `value` (a finite number) and
+    optionally `unit`, `notes`, `metadata` (JSON, at most 8 KB). 201 with the row.
+
+    **Body measurements** (Road to 10 S2.11, the owner's D18, 2026-11-22). Beside
+    `weight` (kg, 20-400), four circumferences are logged in CENTIMETRES, each within
+    the range the app's ruler draws:
+
+        `chest` 60-160 · `arm` 20-60 · `waist` 50-160 · `thigh` 30-100
+
+    The server writes `unit: "cm"` on them whatever is sent; `unit` may be left out.
+    `body_fat` and `muscle_mass` are still accepted by the route and are not part of
+    the launch (D18: no body fat) — the app does not offer them.
+
+    Refusals, all 400 `validation_error` with `field_errors`:
+
+      on `value`, field code `invalid` — outside the type's range (the message names
+          the range), or not a finite number;
+      on `unit`, field code `unit_not_cm` — a body measurement sent with a unit other
+          than `cm`: refused, never stored as centimetres it is not;
+      on `metric_type`, field code `invalid_choice` — not a metric type.
+
+    Writes are throttled per account (`analytics_write`, 429 beyond it).
+
+    **Reading them.** Three reads answer the new types exactly as they answer weight:
+
+      `GET metrics/?latest_for=<type>,<type>,...` — the CALLER's newest row of each
+          named type, in the list's own shape (a type never logged simply has no row),
+          so the body page fills «آخر قياس» for every ruler in one call:
+          `?latest_for=weight,chest,arm,waist,thigh`. 400 `bad_metric_type`
+          (+ `field`: `latest_for`) for a name that is not a metric type, or an empty
+          list;
+      `GET metrics/current_metrics/` — the newest value of EVERY type the caller has:
+          `[{metric_type, latest_value, latest_date}]`;
+      `GET metrics/metric_trends/?metric_type=<type>&days=<1-365>` — a daily series:
+          `[{recorded_at__date, avg_value, count}]`, bucketed by the caller's own
+          calendar day.
+
+    These are health data: the person's own, read by nobody else — not their coach, not
+    another account — exported with their data and deleted with their account
+    (`training_platform/privacy/sources.py`, `performance_metrics`).
     """
     serializer_class = PerformanceMetricSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -147,6 +192,32 @@ class PerformanceMetricViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Automatically set user"""
         serializer.save(user=self.request.user)
+
+    def list(self, request, *args, **kwargs):
+        raw = request.query_params.get('latest_for')
+        if raw is None:
+            return super().list(request, *args, **kwargs)
+        known = {key for key, _label in PerformanceMetric.METRIC_TYPES}
+        wanted = {name.strip() for name in raw.split(',') if name.strip()}
+        if not wanted or not wanted <= known:
+            return Response(
+                {'error': _('latest_for must be one or more of: %(types)s.')
+                    % {'types': ', '.join(sorted(known))},
+                 'code': 'bad_metric_type', 'field': 'latest_for'},
+                status=status.HTTP_400_BAD_REQUEST)
+        # The CALLER's, also for a staff account: `get_queryset()` is the whole table
+        # there, and "my newest chest" must never be somebody else's.
+        mine = PerformanceMetric.objects.filter(user=request.user)
+        # One row per type, chosen in a narrow subquery and read back through the
+        # ordinary queryset, so the page keeps the list's own order.
+        newest = (mine.filter(metric_type__in=wanted)
+                  .order_by('metric_type', '-recorded_at', '-id')
+                  .distinct('metric_type').values('pk'))
+        queryset = mine.filter(pk__in=newest).order_by('-recorded_at', '-id')
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(queryset, many=True).data)
     
     @action(detail=False, methods=['get'])
     def metric_trends(self, request):

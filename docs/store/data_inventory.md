@@ -529,7 +529,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 ### `performance_metrics` — `analytics.PerformanceMetric`
 
-**Why.** Measurements over time (body weight, workout duration) for progress charts and badges.
+**Why.** Measurements over time (body weight, the chest, arm, waist and thigh circumferences the person logs, workout duration) for progress charts and badges.
 
 **Whose.** Rows whose `user` is the account.
 

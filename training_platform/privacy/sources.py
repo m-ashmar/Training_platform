@@ -270,8 +270,9 @@ register(PersonalDataSource(
     data_types=("app_activity", "connection")))
 register(PersonalDataSource(
     label="performance_metrics", model="analytics.PerformanceMetric", user_field="user",
-    purpose=("Measurements over time (body weight, workout duration) for progress charts "
-             "and badges."),
+    purpose=("Measurements over time (body weight, the chest, arm, waist and thigh "
+             "circumferences the person logs, workout duration) for progress charts and "
+             "badges."),
     recipients=(),
     data_types=("health", "fitness")))
 
