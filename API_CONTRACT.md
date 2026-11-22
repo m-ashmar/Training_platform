@@ -209,6 +209,7 @@ so parse ids client-side.
 | `chat_message` | `conversation_id`, `message_id` — a message in the trainer–client chat. Sent only when the recipient has opened that conversation since the last `chat_message` about it, so a burst of messages is one push |
 | `coaching_renewed` | `trainer_id` — a new month of coaching was charged from the wallet |
 | `coaching_renewal_soon` | `trainer_id` — the paid month ends in a few days |
+| `coaching_ending_soon` | `trainer_id` — the paid month ends in a few days and the coaching ends with it: the client asked not to renew (`POST /api/v1/coaching/renewal/` `renew: false`, Road to 10 S2.7). Sent instead of `coaching_renewal_soon`, once per month; nothing is charged |
 | `coaching_payment_due` | `trainer_id`, `status` (`frozen`) — the month ended unpaid, so the coaching is paused; repeated on each reminder step while it stays paused |
 | `coaching_ended` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1; `"0"` on a notice queued before). The grace period ran out unpaid; sent to both |
 | `coaching_finished` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1). Coaching ended for a reason other than money; sent to both |
@@ -1514,6 +1515,19 @@ client is in (`trainer/unassign-client/` answers 409 `coaching_month_active`;
 `at_period_end: true` stops the renewal instead), and cannot delete the account while
 coaching anyone (`DELETE privacy/erase/` answers 409 `trainer_has_active_clients`).
 
+**«لا تجدّد بعد هذا الشهر» (Road to 10 S2.7, the owner's D12).** The client switches it with
+`POST /api/v1/coaching/renewal/` `{"renew": false}` and back with `{"renew": true}`
+(repeats are harmless; the answer is the `coaching/current/` object). When the paid month
+ends the coaching ends instead of renewing: nothing charged, nothing held, the month
+already paid stays the trainer's; both get `coaching_finished`. The 3-day reminder is
+`coaching_ending_soon` instead of `coaching_renewal_soon`. `coaching/current/` carries
+`stop_renewal`, `ends_at` and `ending_reminder`; the trainer reads the same object (no
+price) as `coaching` on `GET /api/auth/trainer/client-profile/{id}/`. `renew: true` is
+refused where the build may not pay for coaching (403 `not_available_on_channel`);
+`renew: false` never is; on a `frozen` coaching it is accepted and the next hourly run
+ends it, nothing charged. Codes: `renew_required`, `no_coaching`, `nothing_to_renew` (a
+coaching that never renews: free, sold as one fee before months existed, or `unpaid`).
+
 **Answering a coaching request.** `trainer/respond-to-request/` and
 `client/respond-to-invite/` both take `{request_id, action: "approve"|"reject"}` and
 refuse with the same codes, because both go through the same two helpers:
@@ -1551,6 +1565,7 @@ private copy (`templates/{id}/generate/`: `client_id`, or `client_ids` for sever
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/coaching/current/` | auth (client) | `CurrentCoachingView` |
+| `POST` | `/api/v1/coaching/renewal/` | auth (client) | `CoachingRenewalView` |
 
 ### Safety: reporting, blocking, AI consent
 

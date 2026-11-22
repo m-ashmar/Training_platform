@@ -11,6 +11,12 @@ month (owner, 2026-09-19).
                    COACHING_FROZEN_REMINDER_DAYS. The hourly run charges again as soon as
                    the wallet covers the month, and that month starts when it is paid.
     leave early    an unpaid month 1 goes back to the client    (`release_hold`)
+    do not renew   the client's «لا تجدّد بعد هذا الشهر» (`set_renewal`, Road to 10
+                   S2.7, the owner's D12): when the paid month ends the coaching ends
+                   instead of renewing — nothing charged, nothing held, the month already
+                   paid stays the trainer's. The 3-day reminder says it ends
+                   (`coaching_ending_soon`) instead of that it renews. Withdrawn by the
+                   client at any time before the renewal run reaches the month's end
     it ends        the trainer's routines stay readable and cannot be started, like a
                    freeze; asking for the trainer again starts a new coaching
 
@@ -340,7 +346,8 @@ def due_relation_ids(now=None) -> list[int]:
     """Approved relations whose latest month is paid out and over, on-time ones first.
 
     A frozen one is included only when there is something to do: the client's wallet
-    now covers the month, or a reminder step has come round. Frozen coachings never end
+    now covers the month, a reminder step has come round, or the client asked not to
+    renew (S2.7: it is ended at once, nothing charged). Frozen coachings never end
     by themselves, and locking every one of them every hour grew without bound until the
     run's time limit starved the on-time renewals behind them. Decided on one unlocked
     read; `renew` re-checks everything under its locks.
@@ -366,8 +373,9 @@ def _due(now=None) -> tuple[list[int], list[int]]:
                           last_price=Subquery(latest.values('price')[:1]))
                 .filter(last_status='settled', last_end__lte=now)
                 .order_by('pk')
-                .values_list('pk', 'client_id', 'last_frozen', 'last_notices', 'last_price'))
-    on_time = [pk for pk, _client, frozen, _n, _p in rows if frozen is None]
+                .values_list('pk', 'client_id', 'last_frozen', 'last_notices', 'last_price',
+                             'client_stops_renewal'))
+    on_time = [pk for pk, _client, frozen, _n, _p, _stop in rows if frozen is None]
     frozen = [row for row in rows if row[2] is not None]
     if not frozen:
         return on_time, []
@@ -375,9 +383,10 @@ def _due(now=None) -> tuple[list[int], list[int]]:
                     .values_list('owner_id', 'balance'))
     steps = frozen_reminder_days()
     waking = []
-    for pk, client_id, frozen_at, notices, price in frozen:
+    for pk, client_id, frozen_at, notices, price, stops in frozen:
         reached = sum(1 for d in steps if d <= (now - frozen_at).days)
-        if balances.get(client_id, Decimal('0')) >= price or reached > (notices or 0):
+        if (stops or balances.get(client_id, Decimal('0')) >= price
+                or reached > (notices or 0)):
             waking.append(pk)
     return on_time, waking
 
@@ -387,7 +396,8 @@ def renew(relation_id, now=None) -> str:
 
     Returns what happened: 'renewed'; 'frozen' (the wallet cannot cover the month: the
     coaching is paused, newly or still); 'reminded' (still paused, and a reminder step
-    was reached); 'ended' (an account disabled, or the trainer's scheduled end); or
+    was reached); 'ended' (an account disabled, the trainer's scheduled end, or the
+    client's «do not renew after this month»); or
     'not_due' / 'gone' / 'not_started' when there is nothing to do.
     Idempotent: a second call for the same month finds it already charged.
     """
@@ -422,6 +432,19 @@ def renew(relation_id, now=None) -> str:
             # The trainer asked to stop when this month ended; it has. Checked before the
             # money, so a scheduled end also ends a frozen coaching.
             end_coaching(relation, reason='ended_by_trainer')
+            return 'ended'
+        if relation.client_stops_renewal:
+            # The client asked not to renew after this month (S2.7, the owner's D12).
+            # Checked before the money, like the trainer's end, and read under the
+            # relation's lock, so a withdrawal that committed first is seen and one
+            # still waiting finds the row gone: nothing is charged and nothing is held,
+            # and the month that just ended stays paid out to the trainer — no money
+            # moves at all. The operators' record of endings gets its row now, not when
+            # the flag was set: the client could still have withdrawn it then.
+            from .models import CoachingEnding
+            CoachingEnding.record(trainer=trainer, client=client, ended_by='client',
+                                  reason=None, scheduled=True)
+            end_coaching(relation, reason='stopped_by_client')
             return 'ended'
         # The month's own price, never the trainer's current rate.
         price = last.price
@@ -489,10 +512,14 @@ def renew(relation_id, now=None) -> str:
 
 
 def remind_upcoming(now=None, *, batch=None, after=None) -> int:
-    """Tell every client whose paid month ends within COACHING_RENEWAL_REMINDER_DAYS that
-    it renews soon (the owner, 2026-09-19: every client, whether or not the wallet covers
-    it). Once per month (`renewal_reminder_sent_at`); not when the trainer is ending the
-    coaching. Returns how many were told.
+    """Tell every client whose paid month ends within COACHING_RENEWAL_REMINDER_DAYS what
+    happens then (the owner, 2026-09-19: every client, whether or not the wallet covers
+    it): that it renews (`coaching_renewal_soon`), or — when the client asked not to
+    renew (S2.7) — that the coaching ends and nothing is charged (`coaching_ending_soon`).
+    Which one is read under the relation's lock. Once per month
+    (`renewal_reminder_sent_at`, either notice): a client who switches the choice after
+    being told is not told again, the answer to the switch says it. Not when the trainer
+    is ending the coaching. Returns how many were told.
 
     Kept out of `renew_due`, whose counts the beat task returns unchanged.
 
@@ -500,7 +527,8 @@ def remind_upcoming(now=None, *, batch=None, after=None) -> int:
     of relations with an id after `after`; `batch.cut` then says more remain.
     """
     from notifications.domain.dispatcher import emit_event
-    from notifications.domain.trainer_client_events import CoachingRenewalSoonEvent
+    from notifications.domain.trainer_client_events import (CoachingEndingSoonEvent,
+                                                            CoachingRenewalSoonEvent)
 
     from .models import CoachingPeriod, TrainerClientRelation
 
@@ -539,7 +567,9 @@ def remind_upcoming(now=None, *, batch=None, after=None) -> int:
             # Whole days, rounded up: 71 hours left reads "3 days", not "2".
             left = last.ends_at - now
             days = max(1, left.days + (1 if left % timedelta(days=1) else 0))
-            event = CoachingRenewalSoonEvent(
+            Event = (CoachingEndingSoonEvent if relation.client_stops_renewal
+                     else CoachingRenewalSoonEvent)
+            event = Event(
                 actor_id=relation.trainer_id, recipient_id=relation.client_id,
                 trainer_name=relation.trainer.full_name or relation.trainer.username,
                 days=days, period_id=last.pk)
@@ -659,7 +689,13 @@ def coaching_status(relation, now=None) -> dict:
             # freezes (`frozen_since`).
             'grace_until': None, 'frozen_since': None, 'renewal_reminder': False,
             # The trainer is stopping when the current month ends: no renewal.
-            'ending': relation.ends_at_period_end}
+            'ending': relation.ends_at_period_end,
+            # The client's own «do not renew after this month» (S2.7), which they can
+            # switch back; `ends_at` says when the coaching ends instead of renewing
+            # (either side's choice), and `ending_reminder` that it is within the same
+            # few days the renewal reminder uses.
+            'stop_renewal': relation.client_stops_renewal,
+            'ends_at': None, 'ending_reminder': False}
     if last is None:
         # Held before months existed, or free, or sold as one fee before months existed.
         if relation.hold_reference:
@@ -680,11 +716,62 @@ def coaching_status(relation, now=None) -> dict:
         # month ended, until a month is paid.
         body['status'] = 'frozen'
         body['frozen_since'] = last.ends_at
-    elif not relation.ends_at_period_end:
+    elif relation.ends_at_period_end or relation.client_stops_renewal:
+        # Nothing renews: the coaching ends with this month.
+        body['ends_at'] = last.ends_at
+        body['ending_reminder'] = last.ends_at - now <= reminder_lead()
+    else:
         # Includes the minutes between a month's end and the hourly renewal.
         body['renews_at'] = last.ends_at
         body['renewal_reminder'] = last.ends_at - now <= reminder_lead()
     return body
+
+
+def set_renewal(client, *, renew):
+    """The client's «لا تجدّد بعد هذا الشهر» (Road to 10 S2.7, the owner's D12): set it
+    (`renew=False`) or withdraw it (`renew=True`) on their approved coaching.
+
+    Returns `(relation, code)`: `code` is None when done — including a repeat, which
+    writes nothing — `'no_coaching'` (no approved trainer; `relation` None), or
+    `'nothing_to_renew'` when asked to stop a coaching that never renews: no month and
+    nothing held (free, or sold as one fee before months existed), or a month 1 support
+    returned (`unpaid`: nothing renews until support resolves it). Withdrawing is never
+    refused.
+
+    A FROZEN coaching may be stopped: it would renew the moment the wallet covers the
+    month, so the choice matters there too. The hourly run then wakes it at once
+    (`_due`) and ends it before any money is read — a top-up landing meanwhile is not
+    charged. A hold from before months existed may be stopped as well: its first program
+    opens a month, which would renew.
+
+    Moves no money. Locks the relation row only (`of=('self',)`, the first lock of the
+    order in `users/trainer_relations.py`), which is the lock `renew` takes first: a
+    choice made while the renewal runs waits for it and then finds the coaching
+    renewed (the choice applies to the new month) or ended (`no_coaching`), never half
+    of each. A trainer's end (`ends_at_period_end`) is not touched: it stands whatever
+    the client chooses.
+    """
+    from .models import TrainerClientRelation
+
+    with transaction.atomic():
+        relation = (TrainerClientRelation.objects.select_for_update(of=('self',))
+                    .select_related('trainer')
+                    .filter(client=client, status='approved').first())
+        if relation is None:
+            return None, 'no_coaching'
+        stop = not renew
+        if relation.client_stops_renewal == stop:
+            return relation, None
+        if stop:
+            last = relation.periods.order_by('-number').first()
+            if ((last is None and not relation.hold_reference)
+                    or (last is not None and last.status not in ('held', 'settled'))):
+                return relation, 'nothing_to_renew'
+        relation.client_stops_renewal = stop
+        relation.save(update_fields=['client_stops_renewal', 'updated_at'])
+        logger.info("Coaching %s: the client %s the renewal", relation.pk,
+                    'stopped' if stop else 'restored')
+        return relation, None
 
 
 # ----------------------------------------------------------------------- training

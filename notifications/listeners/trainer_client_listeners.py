@@ -24,6 +24,7 @@ from notifications.domain.trainer_client_events import (
     ClientRequestCancelledEvent,
     ClientUnassignedTrainerEvent,
     CoachingEndedEvent,
+    CoachingEndingSoonEvent,
     CoachingFinishedEvent,
     CoachingPaymentDueEvent,
     CoachingRenewalSoonEvent,
@@ -284,6 +285,13 @@ def handle_coaching_renewal_soon(event: CoachingRenewalSoonEvent):
     _send_coaching(event, event_type='coaching_renewal_soon', related_id=event.period_id,
                    context={'name': event.trainer_name, 'days': event.days},
                    data={'type': 'coaching_renewal_soon', 'trainer_id': event.actor_id})
+
+
+@subscribe(CoachingEndingSoonEvent)
+def handle_coaching_ending_soon(event: CoachingEndingSoonEvent):
+    _send_coaching(event, event_type='coaching_ending_soon', related_id=event.period_id,
+                   context={'name': event.trainer_name, 'days': event.days},
+                   data={'type': 'coaching_ending_soon', 'trainer_id': event.actor_id})
 
 
 @subscribe(CoachingPaymentDueEvent)

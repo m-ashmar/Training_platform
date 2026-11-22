@@ -44,6 +44,7 @@ EVENT_CLASS_REGISTRY = {
     # Monthly coaching (users/coaching.py).
     'coaching_renewed': 'notifications.domain.trainer_client_events.CoachingRenewedEvent',
     'coaching_renewal_soon': 'notifications.domain.trainer_client_events.CoachingRenewalSoonEvent',
+    'coaching_ending_soon': 'notifications.domain.trainer_client_events.CoachingEndingSoonEvent',
     'coaching_payment_due': 'notifications.domain.trainer_client_events.CoachingPaymentDueEvent',
     'coaching_ended': 'notifications.domain.trainer_client_events.CoachingEndedEvent',
     'coaching_finished': 'notifications.domain.trainer_client_events.CoachingFinishedEvent',

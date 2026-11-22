@@ -36,6 +36,7 @@ AUDIENCE = {
     'client_unassigned_trainer': frozenset({TRAINER}),
     'coaching_renewed': frozenset({CLIENT}),
     'coaching_renewal_soon': frozenset({CLIENT}),
+    'coaching_ending_soon': frozenset({CLIENT}),
     'coaching_payment_due': frozenset({CLIENT}),
     'coaching_ended': MEMBERS,
     'coaching_finished': MEMBERS,

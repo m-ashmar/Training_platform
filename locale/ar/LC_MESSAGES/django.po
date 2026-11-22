@@ -6116,3 +6116,32 @@ msgid ""
 msgstr ""
 "أنت تستضيف %(limit)d تحديات الآن، وهذا الحد الأقصى. أغلق أحدها أو انتظر حتى "
 "ينتهي أحدها."
+
+#. Road to 10 S2.7: the 3-day reminder for a client who asked not to renew.
+#: notifications/domain/trainer_client_events.py
+msgid "Your coaching ends soon"
+msgstr "ينتهي تدريبك قريباً"
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid ""
+"Your month of coaching with %(name)s ends in %(days)s days, and it will not "
+"renew. Nothing more will be charged."
+msgstr ""
+"ينتهي شهر تدريبك مع %(name)s خلال %(days)s أيام، ولن يتجدد. لن يُخصم منك أي "
+"مبلغ آخر."
+
+#. `renew_required` (S2.7): `POST coaching/renewal/` without a boolean `renew`.
+#: users/coaching_views.py
+msgid "Say whether the coaching should renew."
+msgstr "حدّد إن كان التدريب سيتجدد أم لا."
+
+#. `no_coaching` (S2.7).
+#: users/coaching_views.py
+msgid "You do not have a trainer."
+msgstr "ليس لديك مدرب."
+
+#. `nothing_to_renew` (S2.7): the coaching would not renew anyway.
+#: users/coaching_views.py
+msgid "This coaching does not renew, so there is nothing to stop."
+msgstr "هذا التدريب لا يتجدد، فلا يوجد ما يمكن إيقافه."

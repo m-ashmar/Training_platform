@@ -1189,7 +1189,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** App activity (`app_activity`); Purchase and payment history (`purchases`).
 
-**Fields stored.** `id`, `trainer`, `client`, `status`, `initiated_by`, `agreed_rate`, `agreed_currency`, `hold_reference`, `requested_at`, `ends_at_period_end`, `client_note`, `responded_at`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `trainer`, `client`, `status`, `initiated_by`, `agreed_rate`, `agreed_currency`, `hold_reference`, `requested_at`, `ends_at_period_end`, `client_stops_renewal`, `client_note`, `responded_at`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 

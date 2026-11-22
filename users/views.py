@@ -1304,6 +1304,20 @@ class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
     message = _lazy('This endpoint is only for trainers')
 
 
+def _coaching_on_file(viewer, client):
+    """The coaching on a trainer's file for `client` (Road to 10 S2.7): what
+    `users.coaching.coaching_status` says of the approved relation between them — an
+    admin reads the client's approved relation, whoever coaches — or None. No price."""
+    from .coaching import coaching_status
+    from .models import TrainerClientRelation
+
+    rows = TrainerClientRelation.objects.filter(client=client, status='approved')
+    if not getattr(viewer, 'is_admin', False):
+        rows = rows.filter(trainer=viewer)
+    relation = rows.first()
+    return coaching_status(relation) if relation is not None else None
+
+
 class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """`/api/auth/trainer/client-profile/` (list) and `…/{id}/` — a trainer reads the
     profiles of their approved clients (an admin: every client's).
@@ -1319,6 +1333,17 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     | `404` | `not_found` | `{id}` is no client at all |
 
     All three answered only their status default before (the owner, 2026-09-24).
+
+    `{id}/` also carries `coaching` (additive, Road to 10 S2.7): the coaching between
+    the caller and this client, read live, the same object `GET /api/v1/coaching/
+    current/` answers the client but never with a price — `status`, `period`,
+    `renews_at`, `ending` (the trainer's own scheduled end), `stop_renewal` (the CLIENT
+    asked not to renew after this month: the coaching ends with it, nothing more is
+    charged; the trainer cannot change it, and still cannot end the paid month early),
+    `ends_at` (when it ends instead of renewing), `ending_reminder`, `frozen_since`,
+    `renewal_reminder`, `since`, `trainer_id`, `grace_until`. Null when there is no
+    approved coaching (an admin: the client's approved coaching with anyone). The list
+    does not carry it.
     """
     queryset = CustomUser.objects.filter(user_type='client')
     serializer_class = ClientProfileViewSerializer
@@ -1366,12 +1391,13 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
         from training_platform.cache import private_cache
         cache_key = LanguageContext.cache_key("client_profile", pk)
         data = private_cache().get(cache_key)
-        if data is not None:
-            return Response(data)
-        serializer = self.get_serializer(obj)
-        data = serializer.data
-        private_cache().set(cache_key, data, timeout=300)
-        return Response(data)
+        if data is None:
+            serializer = self.get_serializer(obj)
+            data = serializer.data
+            private_cache().set(cache_key, data, timeout=300)
+        # The coaching is read live, never from the five-minute cache: the client's
+        # «do not renew» (S2.7) is a choice they switch, and the file must show it now.
+        return Response({**data, 'coaching': _coaching_on_file(request.user, obj)})
 
     def list(self, request, *args, **kwargs):
         """
@@ -2376,11 +2402,12 @@ def approve_trainer_relation(relation, actor):
 
         relation.status = 'approved'
         relation.responded_at = timezone.now()
-        # A new coaching starts renewing: a stop a trainer scheduled on an earlier
-        # approval of this same row is not this one's.
+        # A new coaching starts renewing: a stop either side scheduled on an earlier
+        # approval of this same row is not this one's (the client's is S2.7).
         relation.ends_at_period_end = False
+        relation.client_stops_renewal = False
         relation.save(update_fields=['status', 'responded_at', 'ends_at_period_end',
-                                     'updated_at'])
+                                     'client_stops_renewal', 'updated_at'])
         _record_outcome(relation)
         locked_client.assigned_trainer = trainer
         locked_client.save(update_fields=['assigned_trainer'])
