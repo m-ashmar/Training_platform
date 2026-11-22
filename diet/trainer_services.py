@@ -374,6 +374,10 @@ class TrainerDietPlanService:
                 is_active=False, superseded_on=today)
             DietPlan.objects.filter(pk=diet_plan.pk).update(
                 is_draft=False, is_active=True, updated_at=timezone.now())
+            # A queryset update fires no signal: retire the client's home here, after
+            # the commit, so their first read shows the plan (Road to 10 S0.6).
+            from training_platform.signals import bust_home_on_commit
+            bust_home_on_commit(diet_plan.user_id)
         diet_plan.is_draft, diet_plan.is_active = False, True
         if superseded_ids:
             logger.info("Trainer %s sent plan %s, replacing %s for client %s",

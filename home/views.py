@@ -500,9 +500,11 @@ class HomeView(APIView):
     (BACKEND_BUGS B-179; midnight is not a boundary). The entry is retired the moment a workout session is started, changed or
     finished, a day closes, a chat message arrives or is taken back, the client reads
     the thread, a block is made or lifted between the client and anyone, or the
-    client's coaching relation changes (`training_platform/signals.py`). Everything
-    else — a meal ticked, a badge earned, a subscription lapsing — shows within the
-    120 s.
+    client's coaching relation changes (a request sent or answered included), a
+    programme is bought, a diet plan of theirs is built or sent to them, their
+    subscription row is saved, or money is written to their wallet — the person's own
+    actions (`training_platform/signals.py`; Road to 10 S0.6). Everything else — a meal
+    ticked, a badge earned, a subscription lapsing on its date — shows within the 120 s.
 
     Days are the SERVER's calendar days (`Asia/Damascus`), not the account's
     `preferred_timezone`: every training date, meal date and outcome in this platform

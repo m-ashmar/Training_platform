@@ -268,6 +268,57 @@ def bust_home_on_a_purchase(sender, instance, **kwargs):
     bust_home_on_commit(instance.buyer_id)
 
 
+# Road to 10 S0.6 (2026-11-22): the first home read after the person's own action is
+# fresh. A request sent or answered (`TrainerClientRelation`, above) and a programme
+# bought (`RoutinePurchase`, above) already retired it; these three did not, and waited
+# out the 120 s.
+
+@receiver(post_save, sender='diet.DietPlan')
+def bust_home_on_a_diet_plan(sender, instance, **kwargs):
+    """A plan built (the engine's, a trainer's) is the `nutrition_today` and
+    `day_timeline` sections and the setup checklist's `program` step. A trainer's draft
+    SENT is a queryset `.update()` that no signal sees: `diet/trainer_services.py
+    _publish` retires the client's home itself."""
+    bust_home_on_commit(instance.user_id)
+
+
+@receiver(post_save, sender='subscription.Subscription')
+def bust_home_on_a_subscription(sender, instance, **kwargs):
+    """The plan decides the diet section, `readable_only` and the smart note's
+    `coach.available`. A save is the person's own act (a checkout, a renewal, a cancel,
+    an upgrade); the nightly lapse is a queryset `.update()` and shows within 120 s."""
+    bust_home_on_commit(instance.user_id)
+
+
+@receiver(post_save, sender='wallet.Transaction')
+def bust_home_on_a_ledger_row(sender, instance, created, **kwargs):
+    """Money written to a person's wallet — a top-up credited, a coaching fee held or
+    returned, a programme paid — retires their home: the trainer cards are priced in
+    their wallet's currency. Only for the people whose wallets the row names, once the
+    write commits; never fails the money it follows."""
+    if not created:
+        return
+    wallet_ids = [pk for pk in (instance.source_wallet_id, instance.destination_wallet_id)
+                  if pk]
+    if not wallet_ids:
+        return
+    from django.db import transaction as _txn
+
+    def _bust():
+        try:
+            from wallet.models import Wallet
+
+            for owner_id in (Wallet.objects.filter(pk__in=wallet_ids)
+                             .values_list('owner_id', flat=True)):
+                if owner_id:
+                    bust_home(owner_id)
+        except Exception:
+            logger.warning("Could not bust the home cache for wallets %s; it will "
+                           "expire on TTL", wallet_ids, exc_info=True)
+
+    _txn.on_commit(_bust)
+
+
 # ---------------------------------------------------------------------------
 # Orphaned upload cleanup
 # ---------------------------------------------------------------------------

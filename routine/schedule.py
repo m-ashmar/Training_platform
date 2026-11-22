@@ -256,7 +256,7 @@ def _rest_owed(*, days, working, pointer, last, start_date, on_date):
         elif pointer > day:
             owed = rest_between(day + 1, pointer)
         else:
-            owed = []           # days done out of order: nothing is owed, the work is
+            owed = []           # days done out of order: being caught up, none owed
     elapsed = (on_date - anchor).days
     if 1 <= elapsed <= len(owed):
         return owed[elapsed - 1]
