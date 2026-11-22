@@ -11,9 +11,10 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 (media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
 and order live in `BACKEND_DELTA.md`, not here.
 
-**Where things stand (2026-11-22):** Road to 10 phase 0 is the work now (its section below);
-the fix run is paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to
-resume).
+**Where things stand (2026-11-23):** Road to 10 is the work now: phase 0 and batch A are on this
+branch, phase 3 and S2.7 are merged on `road10/integration` awaiting the full gate, S2.13 and
+batch B are being built (the Road to 10 section below has the table per batch). The fix run is
+paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
 ## Build order
 
@@ -117,6 +118,57 @@ the app session ("Frontend handoff and app build") with the route, fields and co
 | S0.4 the account pages answer a trainer correctly (notification kinds, inbox, export, blocked, the delete-account refusal while coaching, no AI consent rows) | — | DONE 2026-11-22: checked inbox (`/api/social/notifications/`), export, blocks and erase (409 `trainer_has_active_clients`, approved relations only) — all answered a trainer already; FIXED `event_types/` (+ `role`, `role_event_types`, `role_email_event_types` from `notifications/audience.py`); AI consent offers a trainer nothing of its own (the coach is a client plan feature; the app hides the rows by role). Tests `tests/test_road10_s04_trainer_account.py` |
 | S0.5 the gateway list says per gateway `available`, `kind` (`automatic` or `reviewed`) and the hours for `reviewed` (D5) | — | DONE 2026-11-22: `GET v1/gateways/` lists every registered gateway with `available`, `kind` (`gateway_config.gateway_kind`: token = automatic, account id alone = reviewed), `review_hours` (`PAYMENT_REVIEW_HOURS` = 24, **the owner confirms the number**), and `can_pay` + `reason` (`no_gateway`, `not_available_on_channel`). Tests `tests/test_road10_s05_gateways.py` |
 | S0.6 home's cached page is dropped after the person's own action (plan built, request sent or answered, top-up credited, programme bought, subscription changed) | — | DONE 2026-11-22: new receivers on `diet.DietPlan`, `subscription.Subscription` and `wallet.Transaction` (the wallets' owners), and the trainer's draft send (`.update()`) retires the client's home itself; requests, purchases and a closed day already did; a meal confirmed retires it too (`diet.DailyProgress` save, asked by the app session). Tests `tests/test_road10_s06_home_fresh.py` |
+
+**How the rest is built (owner, 2026-11-22: "watch the worker, keep managing it, start other workers
+if needed, keep synchronised").** The backend session is the manager. Each worker builds a batch in
+its own worktree and branch and reports every item to the manager (commit, the hand-off text,
+migrations, settings, shared files). The manager reads the diff, merges on the branch
+`road10/integration` (worktree `.claude/worktrees/rv-dec`, `fixrun/merge_one.sh` for the `.po`/`.mo`),
+runs ONE full gate per merged batch there, fast-forwards `spec/payments-compliance` to it, and only
+then sends the hand-off to the app session: the app reads the main checkout's source. One writer
+per checkout: the main checkout is written by the manager only (the app session still commits its
+BACKEND_BUGS rows there). Workers never edit this file, BACKEND_BUGS.md or SIDE_BUGS.md.
+
+**The owner's numbers (2026-11-22):** a reviewed transfer is confirmed within 24 hours
+(`PAYMENT_REVIEW_HOURS`); one member hosts at most 3 challenges at once (`CHALLENGE_HOST_LIMIT`).
+
+**Batch A** (built in the main checkout by the phase-0 session, handed to the app item by item):
+
+| Item | Commit | State |
+|---|---|---|
+| S2.8 password change while signed in (D14) | `11866ed` | DONE: `POST /api/auth/password/change/`; every other session ends, this one gets a fresh login |
+| S2.12 support contacts (D13) | `4e5dea0` | DONE as its OWN route `GET /api/v1/config/support/` `{email, whatsapp}` (two tests pin the capabilities answer's exact contents); `whatsapp` empty until the owner gives the number |
+| S2.1 home knows a request is open | `0b94e61` | DONE: the first-day hero says `waiting` / `invited` with the request and the trainer; with nothing open it keeps its old shape; the checklist's coach step reads `awaiting` |
+| S2.2 a trainer's name and photo | `95c543e` | DONE: a trainer with a blank name is asked for it before the shell; the own-photo upload existed; the console can take a reported picture down |
+| S2.3 the trainer's queue | `b18fb0b` | DONE: attention kinds for an unanswered message and a client awaiting a first programme; unread counts on the roster; the last session's id |
+
+**Batch D, phase 3** (worker "Road to 10 phase 3", branch `claude/road10-phase3-632678`, merged on
+`road10/integration` as `42e3109`):
+
+| Item | Commit | State |
+|---|---|---|
+| S3.5 a meal confirmed today can be undone (D11) | `cd93730` | MERGED: `POST /api/diet/v1/client/meals/{id}/undo/`; new code `undo_window_closed` |
+| S3.8 trainers in the community (D11) | `99c9032` | MERGED: no route refused a trainer; 7 tests now guard it, docstrings say so |
+| S3.4 a starter challenge, and the hosting limit | `b266bcb` | MERGED: `manage.py create_starter_challenge --creator <operator>` (DEPLOY_CHECKLIST §6); the 4th hosted challenge answers 409 `challenge_host_limit`; a challenge an operator hid holds no place (the worker's choice, told to the owner) |
+| S3.1 push payloads, code side | `72489fc` | MERGED: `request_id`, `client_id`, `trainer_id`, `session_id`, `routine_id` added where a page needs them (API_CONTRACT §4). The Firebase credentials on the server are the owner's step |
+
+**Batch C, money** (worker "Road to 10 money", branch `claude/road10-money-bb9d57`):
+
+| Item | Commit | State |
+|---|---|---|
+| S2.7 "do not renew after this month" (D12) | `7c8dc0a` | MERGED (`b906639`): `POST /api/v1/coaching/renewal/` `{renew}`; `stop_renewal`, `ends_at`, `ending_reminder` on `coaching/current/`; push `coaching_ending_soon`; migration `users/0048`. Its own adversarial review found 2 MEDIUM, both fixed before the commit |
+| S2.13 a plan paid from the wallet (D19) | — | IN PROGRESS. Design in the worker's note: one route `POST /api/subscription/v1/subscriptions/{id}/pay-from-wallet/` with an idempotency key, `PaymentService.pay_from_wallet`, `require_purchase_allowed(PLATFORM_SUB)` first (so `play`/`ios` refuse), 100% to the platform, the wallet named LAST in the gateway list |
+
+**Batch B** (worker "Road to 10 batch B", branch `claude/road10-batch-b-*`, cut from `b18fb0b`):
+S2.11 body measurements (D18), S2.4 the free first workout (D10), S2.10 platform starter templates
+(D16). IN PROGRESS.
+
+**Not built:** S2.5 (D2: no), S2.6 (D1: not now), S2.9 (later), S3.2 (the ShamCash rebuild waits for
+`sc-epay-doc.pdf`), S3.3 (the owner's server update), S3.6 (after launch), S3.7 (low priority).
+
+**Owed by the owner:** whether a trainer's request limit rises from 1000 to 1500 an hour now that the
+community is a trainer's too (`training_platform/middleware.py`); the support WhatsApp number; the
+Firebase credentials on the server.
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
