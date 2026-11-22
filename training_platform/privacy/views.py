@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 class PersonalDataExportView(APIView):
     """GET /api/privacy/export/ — everything held about the caller (GDPR Art. 15).
 
+    Every role: the registry's sources are keyed on the person whichever side they
+    are (a trainer's coaching relations included); checked for a trainer 2026-11-22.
+
     Returned as a file download rather than a page: the payload contains the user's
     full health and training history and should not sit in a browser cache.
 
@@ -128,8 +131,10 @@ class PersonalDataEraseView(APIView):
           missing (it answered the status default `bad_request` until the owner's
           decision of 2026-09-24): show the preview and ask the user to confirm.
       409 `trainer_has_active_clients` with `active_clients` — a trainer still
-          coaches someone (the owner's rule: never while he has active clients). End
-          each coaching first: `POST /api/auth/trainer/unassign-client/`, with
+          coaches someone (the owner's rule: never while he has active clients).
+          "Coaches" is an APPROVED relation with the caller as the trainer
+          (`users/trainer_relations.py`); a pending request does not refuse it — it is
+          withdrawn and its hold returned with the account. End each coaching first: `POST /api/auth/trainer/unassign-client/`, with
           `at_period_end` for a paid month, which then ends at the month's end.
       409 `erasure_refused` — a held payment could not be returned, or a trainer's
           verification document could not be deleted from storage (the error says

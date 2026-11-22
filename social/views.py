@@ -1808,6 +1808,10 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     GET /api/social/notifications/?page_size=20
     GET /api/social/notifications/?cursor=<token>&page_size=20
 
+    The inbox of every role: a trainer's is read and marked read the same way, and
+    holds the kinds `GET /api/notifications/preferences/event_types/` lists for the
+    role (`role_event_types`).
+
     `?page=` is 400 `cursor_paginated` (the owner's decision 9, 2026-09-24; it was
     `validation_error`): follow `next`. An unknown or foreign id is 404 `not_found`.
     """

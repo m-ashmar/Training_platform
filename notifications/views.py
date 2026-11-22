@@ -113,13 +113,39 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
     def event_types(self, request):
         """The event types that can be toggled.
 
-        200 `{"event_types": [...push types..., "all"], "email_event_types": [...]}`.
+        200 `{"event_types": [...push types..., "all"], "email_event_types": [...],
+        "role": "trainer", "role_event_types": [...], "role_email_event_types": [...]}`.
         `event_types` is every push type (the FCM registry) and `all`; `email_event_types`
         is the types that also send an email, whose `channels.email` therefore means
         something — one of them, `payment_confirmed`, has no push and is in this list
         only. Same answer on every build.
+
+        `role_event_types` / `role_email_event_types` (additive, Road to 10 S0.4,
+        2026-11-22): the same two lists cut to the kinds the caller's ROLE is ever sent
+        (`notifications/audience.py`, read from each kind's call site), `all` always
+        kept. Draw a settings page from these; any kind of `event_types` is still a valid
+        `event_type` to POST. `role` is the caller's `user_type`.
+
+        A TRAINER's kinds: `client_request_received`, `client_request_cancelled`,
+        `client_unassigned_trainer`, `client_request_approved`, `client_request_rejected`,
+        `coaching_ended`, `coaching_finished`, `coaching_fee_held`,
+        `coaching_fee_released`, `coaching_fee_refunded`, `trainer_verification_approved`,
+        `trainer_verification_rejected`, `withdrawal_requested`, `withdrawal_paid`,
+        `withdrawal_failed` (the three withdrawal kinds also by email),
+        `routine_product_approved`, `routine_product_rejected`, `routine_product_sold`,
+        `routine_product_sale_refunded`, `trainer_weekly_digest`, `chat_message`,
+        `session_completed`, and the social `post_liked`, `comment_created`,
+        `user_followed`, `achievement_awarded`, `challenge_progress`. No AI kind exists.
         """
+        from .audience import kinds_for
         from .channels.email import email_preference_types
         from .channels.fcm import EVENT_CLASS_REGISTRY
-        return Response({'event_types': sorted(EVENT_CLASS_REGISTRY.keys()) + ['all'],
-                         'email_event_types': email_preference_types()})
+
+        every = sorted(EVENT_CLASS_REGISTRY.keys()) + ['all']
+        email = email_preference_types()
+        role = getattr(request.user, 'user_type', None)
+        return Response({'event_types': every,
+                         'email_event_types': email,
+                         'role': role,
+                         'role_event_types': kinds_for(role, every),
+                         'role_email_event_types': kinds_for(role, email)})

@@ -142,7 +142,9 @@ class MyReportsView(APIView):
 class BlockListCreateView(APIView):
     """GET/POST /api/v1/blocks/ — the people this person has hidden.
 
-    Headers: `Authorization: Bearer <access>`, `Accept-Language`.
+    Headers: `Authorization: Bearer <access>`, `Accept-Language`. Every role, the same
+    answers: a trainer blocks and lists exactly as a client does (checked 2026-11-22,
+    Road to 10 S0.4).
 
     GET — 200 `{count, next, previous, results: [{user_id, username, created_at}]}`,
     newest first. Only the blocks this person MADE: a block someone else made is never
@@ -237,6 +239,12 @@ class AIConsentView(APIView):
     `{"granted": false, "policy_version": "", "granted_at": null, "revoked_at": null}`,
     which is how the app tells "has not been asked" from "asked and said no"
     (`revoked_at` set).
+
+    A trainer (checked 2026-11-22, Road to 10 S0.4): the same answers, nothing refuses
+    them — but the question is never theirs. The AI coach is a feature of a CLIENT's
+    plan (`ai_assistant/views.py AI_PERMISSIONS`: `HasAIAdviceAccess`, then consent),
+    no notification kind is about AI, and so a trainer's privacy page offers no AI rows:
+    the app decides that by the account's role, which it already holds.
 
     POST `{granted: true|false, policy_version}` —
       200 the same body as GET, with the new state.
