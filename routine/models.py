@@ -17,7 +17,7 @@ import logging
 from training_platform.model_validation import RowValidationMixin
 # The template's goal is this closed list (`RoutineTemplate.goal`). `product_models`
 # imports nothing from this module, so loading it first is safe.
-from .product_models import ProductGoal
+from .product_models import ProductGoal, ProductPlace
 
 logger = logging.getLogger(__name__)
 
@@ -1338,6 +1338,12 @@ class RoutineTemplate(RowValidationMixin, models.Model):
         max_length=64, unique=True, null=True, blank=True, editable=False,
         help_text="The platform template this row was written from, if any")
     is_public = models.BooleanField(default=False, help_text="Whether this template is visible to all users")
+    #: Where the program is trained, `home` or `gym`; blank while not said (Road to 10
+    #: S2.10: the starter templates come one per goal and place, and the trainer's picker
+    #: «ابدأ من قالب جاهز» filters on it). The same codes as `RoutineProduct.place`.
+    place = models.CharField(max_length=8, choices=ProductPlace.choices, blank=True,
+                             default='',
+                             help_text="Where the program is trained: home or gym")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     #: Moves on every save — the API's, the console's — and a template is saved
     #: whenever its rows are rewritten (`RoutineTemplateSerializer.update`). A routine

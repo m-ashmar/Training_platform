@@ -19,7 +19,7 @@ What it writes, in order (each step in its own transaction):
 | achievements | `achievements/registry.py` | left alone (`sync_achievements` updates) |
 | social achievements | `create_achievements` | left alone |
 | starter exercises | `routine/data/exercise_catalogue.py` | left alone |
-| platform templates | `routine/data/platform_templates.py` (the free first workouts, Road to 10 S2.4) | left alone (found by `platform_key`); one naming a missing exercise is not written |
+| platform templates | `routine/data/platform_templates.py` (the free first workouts, Road to 10 S2.4; the starter templates for trainers, S2.10) | left alone (found by `platform_key`); one naming a missing exercise is not written |
 | food catalogue | `load_food_catalogue --apply` (NEVER `--wipe`) | converged on the file |
 
 Why each is here even though some are ALSO written by a migration: a restore that missed
@@ -242,7 +242,7 @@ class Command(BaseCommand):
 
     def platform_templates(self):
         """The templates the platform writes itself (`routine/platform.py`): the free
-        first workouts. After the starter exercises, which they are made of. A template
+        first workouts and the starter templates. After the starter exercises, which they are made of. A template
         whose key exists is the operator's and is not touched."""
         from routine.platform import ensure_platform_templates
 

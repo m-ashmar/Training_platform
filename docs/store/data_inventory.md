@@ -1081,7 +1081,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Posts, comments and other content you create (`user_content`).
 
-**Fields stored.** `id`, `name`, `name_en`, `name_ar`, `description`, `description_en`, `description_ar`, `goal`, `days`, `weeks`, `created_by`, `platform_key`, `is_public`, `created_at`, `updated_at`, `exercises`.
+**Fields stored.** `id`, `name`, `name_en`, `name_ar`, `description`, `description_en`, `description_ar`, `goal`, `days`, `weeks`, `created_by`, `platform_key`, `is_public`, `place`, `created_at`, `updated_at`, `exercises`.
 
 **In the export.** Every field.
 

@@ -6104,3 +6104,13 @@ msgstr "التمرين الأول المجاني للمتدرّبين."
 #: routine/trial_views.py
 msgid "The free first workout is not offered to you now."
 msgstr "التمرين الأول المجاني غير متاح لك الآن."
+
+#. Road to 10 S2.10: a trainer tried to make their own template public; only the
+#. platform's starter templates are public.
+#: routine/views.py
+msgid ""
+"Public templates are written by the platform. Keep yours private; trainers can "
+"copy the platform's starter templates."
+msgstr ""
+"القوالب العامة تكتبها المنصة. أبقِ قالبك خاصاً؛ ويمكن للمدربين نسخ القوالب "
+"الجاهزة التي تقدّمها المنصة."

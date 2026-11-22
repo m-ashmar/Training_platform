@@ -1913,6 +1913,20 @@ coaching, frozen or unpaid included), `has_program` (a routine is assigned) or
 the week tile. Free on every build. A new server gets the two platform workouts
 (`trial-home`, `trial-gym`) from `manage.py bootstrap_platform`.
 
+**Starter templates for trainers (Road to 10 S2.10, the owner's D16).** No route is new.
+`GET /api/routine/templates/public_templates/` now lists the PLATFORM's starter
+templates: eight, one per goal (`build_muscle`, `strength`, `fat_loss`, `rehab`) and
+place (`home`, `gym`), named in Arabic and English, three training days each, with
+every row in `exercises`. Additive on every template row: `place` (`home` | `gym` | `""`,
+writable; anything else 400 `validation_error`, field code `bad_place`) and
+`by_platform` (read-only; true on the platform's, whose `created_by` is null). Additive
+list filters: `?place=home|gym` and `?by_platform=true|false`. `POST
+templates/{id}/copy/` copies a starter into the trainer's own private library, keeping
+the starter's name (no "Copy of") and its `place`. A trainer's own template cannot be
+made public: `POST`, `PATCH` or `PUT templates/` turning `is_public` on answers 400
+`template_cannot_be_public` with `field: "is_public"`. A new server gets the starters
+from `manage.py bootstrap_platform`. Nothing differs by build.
+
 **What each training day planned against what was done** (the owner, 2026-09-20). Closing
 a day writes one `DayOutcome`, whichever way it closed: `update_progress`
 (`completed` / `skipped`, and `confirmed_unlogged` when the person confirmed the

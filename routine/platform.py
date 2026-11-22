@@ -1,8 +1,9 @@
 """Writing the platform's own templates onto a database (`routine/data/platform_templates.py`).
 
 `manage.py bootstrap_platform` calls `ensure_platform_templates()` after the starter
-exercises, so a new server has the free first workouts (Road to 10 S2.4) from its first
-deploy. Idempotent: a template whose key exists is left exactly as the operator left it.
+exercises, so a new server has the free first workouts (Road to 10 S2.4) and the starter
+templates for trainers (S2.10) from its first deploy. Idempotent: a template whose key
+exists is left exactly as the operator left it.
 """
 from __future__ import annotations
 
@@ -41,14 +42,21 @@ def ensure_platform_templates(templates=None) -> dict:
             texts[f"name_{language}"] = getattr(entry, f"name_{language}", "") or entry.name_en
             texts[f"description_{language}"] = (getattr(entry, f"description_{language}", "")
                                                  or entry.description_en)
+        # Each day's rows in the order written, numbered from 1 within the day.
+        order_in_day: dict = {}
+        lines = []
+        for row in entry.rows:
+            order_in_day[row.day] = order_in_day.get(row.day, 0) + 1
+            lines.append((row, order_in_day[row.day]))
         with transaction.atomic():
             template = RoutineTemplate.objects.create(
                 **texts, goal=entry.goal, days=entry.days, weeks=entry.weeks,
-                is_public=entry.is_public, created_by=None, platform_key=entry.key)
+                place=entry.place, is_public=entry.is_public, created_by=None,
+                platform_key=entry.key)
             RoutineTemplateExercise.objects.bulk_create([
                 RoutineTemplateExercise(template=template, exercise=exercises[row.exercise],
                                         sets=row.sets, reps=row.reps,
                                         rest_time=row.rest_time, day=row.day, order=order)
-                for order, row in enumerate(entry.rows, start=1)])
+                for row, order in lines])
         report["created"].append(entry.key)
     return report

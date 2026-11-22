@@ -2025,6 +2025,16 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     template form and the goals the catalogue filters on. Any case is accepted and the
     code is stored; anything else answers 400 `validation_error` with
     `field_errors.goal[0].code` = `bad_goal`, the code the catalogue's `?goal=` answers.
+
+    Road to 10 S2.10 (additive):
+      `place`        `home` | `gym` | `""` (not said) — where the program is trained, the
+                     codes of a routine product's `place`. Writable; any case is accepted
+                     and the code stored; anything else answers 400 `validation_error`
+                     with `field_errors.place[0].code` = `bad_place`.
+      `by_platform`  read-only: true on a template the PLATFORM wrote (a starter
+                     template; `created_by` is then null), false on a trainer's own.
+    `is_public` cannot be turned on through the API: see `RoutineTemplateViewSet`
+    (`template_cannot_be_public`).
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
@@ -2039,6 +2049,9 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     #: `days` x `weeks`, null while `weeks` is (never a guess). The product form's line
     #: «4 أسابيع · 3 أيام · 12 جلسة» is `weeks` · `days` · `session_count`.
     session_count = serializers.IntegerField(read_only=True, allow_null=True)
+    #: Declared for the same reason as `goal`: any case is accepted, the code stored.
+    place = serializers.CharField(max_length=8, required=False, allow_blank=True)
+    by_platform = serializers.BooleanField(read_only=True)
 
     used_by_count = serializers.SerializerMethodField()
 
@@ -2070,7 +2083,8 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineTemplate
         fields = ['id', 'name', 'description', 'goal', 'days', 'weeks', 'session_count',
-                  'is_public', 'created_by', 'created_at', 'exercises', 'used_by_count']
+                  'is_public', 'created_by', 'created_at', 'exercises', 'used_by_count',
+                  'place', 'by_platform']
 
     def validate_goal(self, value):
         """One of the four goal codes, stored as the code (the owner, 2026-09-28)."""
@@ -2081,6 +2095,16 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 _("Choose the program's goal: build muscle, strength, fat loss or rehab."),
                 code='bad_goal')
+        return code
+
+    def validate_place(self, value):
+        """`home`, `gym` or blank, stored as the code (Road to 10 S2.10)."""
+        from .product_models import ProductPlace
+
+        code = (value or '').strip().lower()
+        if code and code not in ProductPlace.values:
+            raise serializers.ValidationError(
+                _("Choose where the program is trained: home or gym."), code='bad_place')
         return code
 
     def validate(self, attrs):

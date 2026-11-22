@@ -38,7 +38,9 @@ def platform(db):
                      target_muscle=entry.target_muscle, equipment=entry.equipment,
                      difficulty_level=entry.difficulty, created_by=None, is_active=True,
                      catalogue_key=entry.key).save()
-    report = ensure_platform_templates()
+    # The trial workouts alone: since S2.10 the platform also writes starter templates,
+    # made of exercises this fixture does not create, and they are not this file's.
+    report = ensure_platform_templates(TRIAL_WORKOUTS)
     assert not report["missing_exercises"], report
     _bust()
     return report
