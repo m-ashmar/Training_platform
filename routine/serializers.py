@@ -2400,9 +2400,12 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             entry["last_exercises"] = row['exercises']
 
         # This week: sessions per user, and the volume of their set logs. Counted
-        # distinctly because the join to set_logs multiplies the session rows.
-        for row in (WorkoutSession.objects
-                    .filter(user_id__in=ids, status='completed', end_time__date__gte=week_ago)
+        # distinctly because the join to set_logs multiplies the session rows. The free
+        # first workout is history, not the week's training (Road to 10 S2.4,
+        # `routine/outcomes._counted`), here and in the two counts below.
+        from .outcomes import _counted
+        for row in (_counted(WorkoutSession.objects
+                    .filter(user_id__in=ids, status='completed', end_time__date__gte=week_ago))
                     .values('user_id')
                     .annotate(sessions=Count('id', distinct=True),
                               volume=Sum(F('set_logs__weight') * F('set_logs__reps')))):
@@ -2410,8 +2413,8 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             collected[row['user_id']]["week_volume"] = row['volume'] or 0
 
         # This week's routine progress, both counts in one pass.
-        for row in (RoutineProgress.objects
-                    .filter(user_id__in=ids, updated_at__date__gte=week_ago)
+        for row in (_counted(RoutineProgress.objects
+                    .filter(user_id__in=ids, updated_at__date__gte=week_ago))
                     .values('user_id')
                     .annotate(total=Count('id'),
                               completed=Count('id', filter=Q(status='completed')))):

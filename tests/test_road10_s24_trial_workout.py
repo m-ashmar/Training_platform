@@ -349,3 +349,87 @@ def test_bootstrap_writes_the_two_workouts_once_and_leaves_the_operators_edit(db
     home.refresh_from_db()
     assert home.name_en == "Operator's own name"
     assert RoutineTemplate.objects.filter(platform_key__startswith="trial-").count() == 2
+
+
+# ---------------------------------------------------------------- the coach's numbers
+def _finish_the_trial_in_full(api, person, django_capture_on_commit_callbacks):
+    from routine.models import Routine, UserExerciseProgress
+
+    routine_id = api(person).post(URL).json()["routine_id"]
+    session_id = _session(api, person, routine_id)
+    today = timezone.localdate()
+    for row in Routine.objects.get(pk=routine_id).routine_exercises.all():
+        progress, _new = UserExerciseProgress.objects.get_or_create(
+            user=person, exercise=row.exercise, date=today,
+            defaults={"target_sets": row.sets})
+        for number in range(1, row.sets + 1):
+            resp = api(person).post("/api/routine/set-logs/", data=json.dumps(
+                {"user_exercise_progress": progress.pk, "set_number": number,
+                 "reps": row.reps, "date": today.isoformat(),
+                 "workout_session": session_id}), content_type=JSON)
+            assert resp.status_code in (200, 201), resp.content
+    with django_capture_on_commit_callbacks(execute=True):
+        assert api(person).patch(f"/api/routine/workout-sessions/{session_id}/",
+                                 data=json.dumps({"status": "completed"}),
+                                 content_type=JSON).status_code == 200
+    return routine_id
+
+
+def _coach_with_a_programme(make_user, api, person, tag):
+    """A coach approves the client and assigns a programme the client has not trained."""
+    from routine.models import Exercise, Routine, RoutineExercise
+
+    relation = _approved(make_user, person, tag)
+    routine = Routine.objects.create(name=f"Coach's {tag}", created_by=relation.trainer,
+                                     days=3)
+    exercise = Exercise.objects.create(name=f"s24 coach row {tag}", created_by=None)
+    RoutineExercise.objects.create(routine=routine, exercise=exercise, day=1, order=1,
+                                   sets=3, reps=10)
+    routine.assigned_to.add(person)
+    return relation.trainer, routine
+
+
+def test_a_new_coach_reads_zero_for_the_week_after_a_trial(
+        make_user, api, platform, django_capture_on_commit_callbacks):
+    """Integrator review of S2.4 (MEDIUM): the trial was kept out of the client's own
+    streak but counted in the coach's week — roster, client file, digest."""
+    from datetime import timedelta
+
+    from routine.models import DayOutcome
+    from routine.outcomes import adherence, volume_kg, week_totals
+
+    person = _client(make_user, "coach_week")
+    routine_id = _finish_the_trial_in_full(api, person, django_capture_on_commit_callbacks)
+    assert DayOutcome.objects.get(user=person, routine_id=routine_id).complete
+    trainer, _routine = _coach_with_a_programme(make_user, api, person, "coach_week")
+
+    today = timezone.localdate()
+    start = today - timedelta(days=6)
+    assert week_totals([person.pk], start, today) == {}
+    block = adherence(person, start, today, today=today)
+    assert (block["days_closed"], block["perfect_days"], block["sets"]["logged"]) == (0, 0, 0)
+    assert volume_kg(person, start, today) == 0
+    # The coach's own reads of the same week.
+    answer = api(trainer).get(f"/api/routine/analytics/adherence/?period=week"
+                              f"&user_id={person.pk}")
+    assert answer.status_code == 200, answer.content
+    assert (answer.json()["days_closed"], answer.json()["by_day"]) == (0, [])
+    file = api(trainer).get(f"/api/routine/trainer/client-progress/{person.pk}/")
+    assert file.status_code == 200, file.content
+    # The client still sees the workout in their history.
+    history = api(person).get("/api/routine/workout-sessions/").json()["results"]
+    assert [row["routine_id"] if "routine_id" in row else row["routine"]
+            for row in history] == [routine_id]
+
+
+def test_a_client_who_only_did_the_trial_is_never_started_for_the_coach(
+        make_user, api, platform, django_capture_on_commit_callbacks):
+    from routine.outcomes import attention
+
+    person = _client(make_user, "coach_attention")
+    _finish_the_trial_in_full(api, person, django_capture_on_commit_callbacks)
+    trainer, _routine = _coach_with_a_programme(make_user, api, person, "coach_attention")
+
+    (row,) = [r for r in attention(trainer, [person.pk]) if r["client_id"] == person.pk]
+    assert [reason["code"] for reason in row["reasons"]] == ["never_started"], row
+    assert row["last_trained"] is None

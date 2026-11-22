@@ -71,8 +71,11 @@ class TrialWorkoutView(APIView):
                                    unavailable  this server has no trial workout
                                                 (`manage.py bootstrap_platform` writes it)
 
-    A session already running on the copy may still be finished after a coach or a
-    programme arrives; only the offer goes.
+    Once started, the copy is the person's for good: after a coach or a programme
+    arrives it stays readable by id and trainable (a running session can be finished
+    and a new one opened on it — it is free and sells nothing); only the OFFER goes
+    (this route and the home section answer `trial_not_offered`). Its days stay out of
+    every number, theirs and their coach's (`routine/outcomes._counted`).
     """
 
     permission_classes = [IsAuthenticated]

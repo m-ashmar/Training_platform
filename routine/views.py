@@ -3635,6 +3635,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
         left out of the totals for a day logged a whole day at a time (no set is
         recorded, so its reps are unknown) — `approximate` is true when that happened or
         when a day was filled in afterwards. Identical on every build.
+
+        A day of the free first workout (Road to 10 S2.4, `/api/routine/trial-workout/`)
+        is in none of these numbers and not in `by_day`: it is the person's history
+        (`workout-sessions/`), not training against a plan — for them or their coach.
         """
         from datetime import timedelta
 
@@ -3673,8 +3677,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # only to throw it away. The per-day rows are on `routine-progress/`. And a
         # serializer that does not NAME the column, or rendering it loads it back one
         # row at a time (SIDE_BUGS S-072).
+        # The days the totals above count, and no others: the free first workout is
+        # not one of them (Road to 10 S2.4, `outcomes._counted`).
+        from .outcomes import _counted
         body['by_day'] = DayOutcomeSummarySerializer(
-            DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today)
+            _counted(DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today))
             .defer('detail').order_by('date', 'id'), many=True).data
         return Response(body)
 
@@ -3951,17 +3958,21 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # The same window the client's own streak uses: a console page must not read
         # every outcome and every progress row this platform has ever written.
         streak_window = timezone.localdate() - timedelta(days=STREAK_WINDOW_DAYS)
+        # And without the free first workout, as the client's own streak is (Road to 10
+        # S2.4, `outcomes._counted`): neither its outcomes nor its progress rows.
+        from .outcomes import _counted
         broken = set()
-        for row in (DayOutcome.objects.filter(user_id__in=client_ids, date__gte=streak_window)
+        for row in (_counted(DayOutcome.objects.filter(user_id__in=client_ids,
+                                                       date__gte=streak_window))
                     .values('user_id', 'date')
                     .annotate(complete=_Count('id', filter=Q(complete=True)))
                     .filter(complete=0)):
             broken.add((row['user_id'], row['date']))
 
         streak_lookup = {}
-        streak_rows = [row for row in (RoutineProgress.objects
+        streak_rows = [row for row in (_counted(RoutineProgress.objects
                        .filter(user_id__in=client_ids, status='completed',
-                               date__gte=streak_window)
+                               date__gte=streak_window))
                        .values_list('user_id', 'date')
                        .order_by('user_id', 'date')
                        .distinct()) if row not in broken]
@@ -5769,7 +5780,9 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         `slipping` (+`this_week`, `usual` — measured against that client's own four-week
         average, so a steady 70% is not an alarm), `missing_sets` (+`missed`,
         `planned`). A client with nothing to report is left out. Identical on every
-        build; no price and no claim.
+        build; no price and no claim. The free first workout (Road to 10 S2.4) is not
+        training here: a client who did only that reads `never_started`, and it is in
+        none of `this_week`'s numbers.
         """
         from .outcomes import attention as needs_attention
         from users.models import CustomUser
