@@ -42,6 +42,7 @@ SECTION_ORDER = (
     'ai_advice',
     'challenge_rank',
     'featured_trainers',
+    'trial_workout',       # the free first workout (Road to 10 S2.4), HomeNew's order
     'ready_programs',
     'media_banner',
 )
@@ -428,6 +429,28 @@ class HomeView(APIView):
         Same function, same cards, same reason codes as the trainers screen. On `ios`
         today the two price keys are ABSENT — never null, never zero.
 
+    ``trial_workout`` — the free first workout (Road to 10 S2.4, the owner's D10). Only
+    for a client with NO approved coach (a frozen or unpaid coaching is a coach) and NO
+    programme (no routine assigned: a bought one and a former coach's frozen one are
+    programmes, so the freeze rule holds), and only once the server has the platform's
+    trial workouts (`manage.py bootstrap_platform`). The same object
+    `GET /api/routine/trial-workout/` answers::
+
+        {"template_id": 31, "routine_id": 88 | null, "day": 1, "place": "home" | "gym",
+         "name": "Full body in 20 minutes", "description": "…",
+         "exercises": 5, "sets": 11, "estimated_minutes": 20,
+         "equipment": ["bodyweight"], "no_equipment": true,
+         "muscles": ["Front Quads", "Middle Chest", …],
+         "last_done_on": "2026-11-21" | null, "times_done": 0,
+         "session_id": 91}                    only while a session on it is running
+
+        `place` is the one given at onboarding (`training_place`), home when unanswered.
+        `routine_id` is null until the person starts it (`POST
+        /api/routine/trial-workout/` writes their own copy); then it is trained through
+        the ordinary workout routes and kept in history. It is not a programme: no
+        `workout_hero`, no schedule, no streak. It stays offered — done or not — until
+        a coach or a programme arrives. Free on EVERY build: no price, nothing to buy.
+
     ``ready_programs`` — the programmes on sale (routine products, plan step 10), newest
     listing first, at most four. For every client, with a coach or without one (the
     owner, 2026-09-28: it was first-day only before); a programme this client already
@@ -498,6 +521,7 @@ class HomeView(APIView):
       price keys and `money_type` are also asked of `can_show_price(request,
       ROUTINE_PRODUCT)` card by card, and `can_buy` of `require_purchase_allowed`, as
       the catalogue asks them.
+    * `trial_workout` is identical on every build: it is free and sells nothing.
     * Nothing else in this payload carries a price, an amount or a link to the web hub,
       on any build.
 
@@ -638,6 +662,9 @@ class HomeView(APIView):
                 person, routine=routine, plan=plan, coached=coached, pending=pending),
             'featured_trainers': None if coached else first_day.featured_trainers(
                 person, request=request, flags=flags),
+            # The free first workout (Road to 10 S2.4): no coach and no programme.
+            'trial_workout': first_day.trial_workout(person, coached=coached,
+                                                     routine=routine),
             # The programmes on sale are for every client, coached or not (the owner,
             # 2026-09-28): the build decides whether the section exists, and an owned
             # programme's card says `owned: true`, `can_buy: false`.

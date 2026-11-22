@@ -378,21 +378,34 @@ def broken_dates(user, since=None) -> set:
 
     The owner (2026-09-20): a day closed with sets still unlogged does not count as a
     training day, and it BREAKS the streak. A day on which another routine was finished
-    in full still counts.
+    in full still counts. The free first workout neither makes nor breaks a streak
+    (`_counted`).
     """
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, date__gte=_window_start(since))
+    rows = _counted(DayOutcome.objects.filter(user=user, date__gte=_window_start(since)))
     per_date = (rows.values('date')
                 .annotate(complete=Count('id', filter=Q(complete=True)), total=Count('id')))
     return {row['date'] for row in per_date if row['total'] and not row['complete']}
 
 
+def _counted(rows):
+    """Day outcomes that count as training days: not the ones on a person's copy of the
+    platform's FREE FIRST WORKOUT (Road to 10 S2.4, the owner's D10: "without a streak
+    or a programme the person later loses"). That workout is logged and kept like any
+    other — its session, its sets, its outcome, its history — but one free workout on
+    the first day must not start a streak that breaks the next morning, nor fill a week
+    tile of a programme the person does not have."""
+    return rows.exclude(routine__trial=True)
+
+
 def complete_dates(user, since=None) -> set:
-    """Dates with at least one training day finished in full."""
+    """Dates with at least one training day finished in full (the free first workout
+    excepted: `_counted`)."""
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, complete=True, date__gte=_window_start(since))
+    rows = _counted(DayOutcome.objects.filter(user=user, complete=True,
+                                              date__gte=_window_start(since)))
     return set(rows.values_list('date', flat=True))
 
 
@@ -430,6 +443,7 @@ def training_dates(user, since=None) -> tuple:
                    .values_list('date', flat=True))
     legacy = {day for day in RoutineProgress.objects
               .filter(user=user, status='completed', date__gte=start)
+              .exclude(routine__trial=True)
               .values_list('date', flat=True)
               if day is not None and day not in recorded}
     return dates | legacy, bool(legacy)

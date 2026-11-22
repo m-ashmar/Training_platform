@@ -90,6 +90,18 @@ Two more that fail silently (found building `payouts`, 2026-09-24):
   (`MyDietPlansView` and the two plan reads do). A write that retires plans must
   filter `is_active=True`, never "not mine", or it will retire a draft nobody follows.
 
+Two about who owns a routine or a template (Road to 10 S2.4, 2026-11-23):
+
+- **A template can have NO author.** `RoutineTemplate.created_by` is NULL on a template
+  the PLATFORM wrote (`platform_key` set: the free first workouts, the starter templates;
+  `routine/data/platform_templates.py`, written by `bootstrap_platform`). Code that reads
+  `template.created_by.<anything>` crashes on one: test `created_by_id is None` first.
+- **A client can hold a routine nobody assigned.** Their copy of the free first workout is
+  `created_by` the client with `trial=True` and is NEVER in `assigned_to` (an assignment
+  is what makes a routine a programme). `readable_routines` lets its author read it; the
+  `routines/` list, the schedule, home's hero and the streak (`outcomes._counted`) leave
+  it out. A new "the person's programme" read filters `assigned_to`, as every one does.
+
 One about user-written text (found building `build/ugc-filter`, 2026-09-27):
 
 - **The banned-terms list is live in every test that writes through the API.**

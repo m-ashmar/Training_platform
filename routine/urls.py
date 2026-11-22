@@ -8,6 +8,7 @@ from .views import (
     ExerciseImageUploadView, ExerciseAddMediaView, TrainerClientProgressViewSet,
     RoutineTemplateExerciseViewSet, RecentActivityProgressView, InjuryMapView
 )
+from .trial_views import TrialWorkoutView
 
 app_name = 'routine'
 
@@ -46,6 +47,8 @@ urlpatterns = [
     path('trainer/client-progress/attention/', TrainerClientProgressViewSet.as_view({'get': 'attention'}), name='trainer-client-attention'),
     # Injury area -> the target muscles it argues with (BACKEND_BUGS B-105)
     path('injury-map/', InjuryMapView.as_view(), name='injury-map'),
+    # The free first workout (Road to 10 S2.4, the owner's D10)
+    path('trial-workout/', TrialWorkoutView.as_view(), name='trial-workout'),
     # Recent activity progress (7-day workout duration chart)
     path('v1/analytics/recent-progress/', RecentActivityProgressView.as_view(), name='recent-activity-progress'),
     path('', include(router.urls)),  # Registers all ViewSets

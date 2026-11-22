@@ -655,6 +655,11 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     `assigned_to` is display text (`"samer (Client)"`), never an id. All three follow the
     caller: the author or an admin sees every assignee, another trainer only their own
     approved clients, a client only themselves.
+
+    A client's own copy of the platform's FREE FIRST WORKOUT (Road to 10 S2.4,
+    `/api/routine/trial-workout/`) carries `trial: true` (additive; false on every other
+    routine). It is read by id (`GET routines/{id}/`) and is NOT in the list: the list is
+    the person's programmes, and a trial is one workout.
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
@@ -742,7 +747,12 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # definition of the same thing — and two definitions drift.
         from .permissions import readable_routines
 
-        return readable_routines(user, queryset)
+        readable = readable_routines(user, queryset)
+        if self.action == 'list':
+            # The list is the person's PROGRAMMES. Their copy of the free first workout
+            # is a workout, not one (Road to 10 S2.4): read by id, never listed.
+            readable = readable.filter(trial=False)
+        return readable
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""

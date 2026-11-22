@@ -992,6 +992,18 @@ removed; no new route.
   `next` meal or workout on today's timeline turns due when that is sooner, so a meal
   due inside the window is `now` once its time comes. Midnight is not a boundary.
 
+**The free first workout (Road to 10 S2.4, the owner's D10, 2026-11-22).** Additive: a
+13th section type, `trial_workout`, between `featured_trainers` and `ready_programs`
+(HomeNew's order), and one new route, `GET/POST /api/routine/trial-workout/` (Routines
+below). Sent only to a client with no approved coach (a frozen or unpaid coaching is a
+coach) and no programme (no routine assigned), once the server has the platform's
+trial workouts (`manage.py bootstrap_platform`):
+`{template_id, routine_id | null, day: 1, place: home | gym, name, description,
+exercises, sets, estimated_minutes, equipment, no_equipment, muscles, last_done_on |
+null, times_done}` (+ `session_id` while a session on it runs). `place` is the
+onboarding answer (`training_place`), home when unanswered. Identical on every build:
+free, no price, nothing to buy.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/home` | auth | `HomeView` |
@@ -1885,6 +1897,21 @@ storage shortly AFTER it answers, through a background task — a photo URL sign
 the erasure may still load for a few moments.
 
 ### Routines & Workouts
+
+**The free first workout (Road to 10 S2.4, the owner's D10).** `GET
+/api/routine/trial-workout/` answers the object the home section `trial_workout`
+carries; `POST` writes the client's OWN copy of the platform's workout (a private
+one-day routine, `trial: true`, never assigned) and answers the same object with
+`routine_id` set — 201 the first time, 200 after (one copy per person). Then it is
+trained through the ordinary routes (`POST workout-sessions/ {routine: routine_id,
+day: 1}`, sets, finishing the session) and kept in history. Refusals on both: 403
+`not_a_client`; 404 `trial_not_offered` with `reason` `has_coach` (an approved
+coaching, frozen or unpaid included), `has_program` (a routine is assigned) or
+`unavailable` (the server has no trial workout). The copy has no schedule
+(`routines/{id}/schedule/` is 404), is not listed by `GET routines/` (read it by id;
+`trial` is additive on every routine), and its days do not count towards the streak or
+the week tile. Free on every build. A new server gets the two platform workouts
+(`trial-home`, `trial-gym`) from `manage.py bootstrap_platform`.
 
 **What each training day planned against what was done** (the owner, 2026-09-20). Closing
 a day writes one `DayOutcome`, whichever way it closed: `update_progress`
@@ -3493,6 +3520,7 @@ changed meaning, no code renamed. The docstrings named are the contract.
 | `GET` | `/api/routine/trainer/client-progress/attention/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/recent/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/{client_id}/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
+| `GET, POST` | `/api/routine/trial-workout/` | auth | `TrialWorkoutView` |
 | `GET, POST` | `/api/routine/user-exercise-progress/` | auth | `UserExerciseProgressViewSet` |
 | `POST` | `/api/routine/user-exercise-progress/bulk-complete/` | auth | `UserExerciseProgressViewSet` |
 | `GET` | `/api/routine/user-exercise-progress/daily-summary/` | auth | `UserExerciseProgressViewSet` |

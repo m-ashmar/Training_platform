@@ -461,7 +461,14 @@ def readable_routines(requester, base_qs=None):
         on_it = (Routine.assigned_to.through.objects
                  .filter(customuser_id__in=ids).values('routine_id'))
         return qs.filter(Q(created_by=requester) | Q(pk__in=on_it))
-    return qs.filter(assigned_to=requester)
+    # The routines they are on, and their own copy of the platform's free first workout
+    # (Road to 10 S2.4): theirs, never assigned (an assignment is what makes a routine a
+    # programme), so the assignment alone would hide it from the person it was written
+    # for. A bought copy is NOT readable by authorship: a refund unassigns it, and that
+    # revokes it (`routine/products.py`). `pk IN`, like the trainer's branch: no join.
+    on_it = (Routine.assigned_to.through.objects
+             .filter(customuser_id=requester.pk).values('routine_id'))
+    return qs.filter(Q(pk__in=on_it) | Q(created_by=requester, trial=True))
 
 
 # ============================================================================

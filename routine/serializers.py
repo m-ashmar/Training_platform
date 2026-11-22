@@ -625,10 +625,14 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
             'source_template', 'product', 'created_by_id', 'day_names', 'assigned_ids',
+            'trial',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
-        read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template']
+        # `trial` (additive, Road to 10 S2.4): true on the reader's own copy of the
+        # platform's free first workout (`/api/routine/trial-workout/`), false otherwise.
+        read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template',
+                            'trial']
 
     def get_product(self, obj):
         """The routine product this routine is the reader's bought copy of (plan step

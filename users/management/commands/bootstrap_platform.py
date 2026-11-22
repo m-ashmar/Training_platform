@@ -19,6 +19,7 @@ What it writes, in order (each step in its own transaction):
 | achievements | `achievements/registry.py` | left alone (`sync_achievements` updates) |
 | social achievements | `create_achievements` | left alone |
 | starter exercises | `routine/data/exercise_catalogue.py` | left alone |
+| platform templates | `routine/data/platform_templates.py` (the free first workouts, Road to 10 S2.4) | left alone (found by `platform_key`); one naming a missing exercise is not written |
 | food catalogue | `load_food_catalogue --apply` (NEVER `--wipe`) | converged on the file |
 
 Why each is here even though some are ALSO written by a migration: a restore that missed
@@ -66,7 +67,8 @@ QUOTA_FEATURE_DESCRIPTIONS = {
 class Command(BaseCommand):
     help = ("Write what an empty database needs to launch: channel capabilities, quota "
             "features, plans, diet templates, achievements, the starter exercise "
-            "catalogue and the food catalogue. Idempotent; never deletes.")
+            "catalogue, the platform's templates and the food catalogue. Idempotent; "
+            "never deletes.")
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -84,6 +86,7 @@ class Command(BaseCommand):
             self._step("achievements", self.achievements)
             self._step("social achievements", self.social_achievements)
             self._step("starter exercises", self.starter_exercises)
+            self._step("platform templates", self.platform_templates)
             if options["skip_food_catalogue"]:
                 self.rows.append(("food catalogue", "-", "-", "skipped"))
             else:
@@ -236,6 +239,18 @@ class Command(BaseCommand):
             created += 1
         note = f"{adopted} existing exercise(s) adopted by name" if adopted else ""
         return created, len(keyed) + adopted, note
+
+    def platform_templates(self):
+        """The templates the platform writes itself (`routine/platform.py`): the free
+        first workouts. After the starter exercises, which they are made of. A template
+        whose key exists is the operator's and is not touched."""
+        from routine.platform import ensure_platform_templates
+
+        report = ensure_platform_templates()
+        missing = report["missing_exercises"]
+        note = ("; ".join(f"{key} NOT written: no exercise {', '.join(absent)}"
+                          for key, absent in missing.items()) if missing else "")
+        return len(report["created"]), len(report["found"]), note
 
     def food_catalogue(self):
         from diet.models import FoodItem, Recipe

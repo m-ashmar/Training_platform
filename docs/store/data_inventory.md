@@ -1063,7 +1063,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Posts, comments and other content you create (`user_content`); Fitness and training activity (`fitness`).
 
-**Fields stored.** `id`, `name`, `description`, `translations`, `created_by`, `is_active`, `days`, `created_at`, `updated_at`, `source_template`, `purchase`, `start_date`, `end_date`, `day_names`, `difficulty_level`, `estimated_duration`, `assigned_to`, `exercises`.
+**Fields stored.** `id`, `name`, `description`, `translations`, `created_by`, `is_active`, `days`, `created_at`, `updated_at`, `source_template`, `purchase`, `trial`, `start_date`, `end_date`, `day_names`, `difficulty_level`, `estimated_duration`, `assigned_to`, `exercises`.
 
 **In the export.** Every field.
 
@@ -1081,7 +1081,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Posts, comments and other content you create (`user_content`).
 
-**Fields stored.** `id`, `name`, `name_en`, `name_ar`, `description`, `description_en`, `description_ar`, `goal`, `days`, `weeks`, `created_by`, `is_public`, `created_at`, `updated_at`, `exercises`.
+**Fields stored.** `id`, `name`, `name_en`, `name_ar`, `description`, `description_en`, `description_ar`, `goal`, `days`, `weeks`, `created_by`, `platform_key`, `is_public`, `created_at`, `updated_at`, `exercises`.
 
 **In the export.** Every field.
 
