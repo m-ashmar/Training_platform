@@ -226,6 +226,15 @@ class UpdateUserDetailsView(APIView):
     `onboarding_missing`, `assigned_trainer` and `verification_status` (a trainer's
     `not_started` | `pending` | `rejected` | `verified`; null for anyone else — the
     documents are at `GET /api/v1/trainer/verification/`).
+
+    A TRAINER's name and photo (Road to 10 S2.2): `onboarding_missing` names
+    `first_name` / `last_name` while either is empty or only spaces — ask for them before
+    the shell, because a trainer with no first name is not listed or matched
+    (`users/trainer_directory.py listed_trainers`). Write the names here (or on
+    `trainer/profile/`); upload the trainer's OWN photo with
+    `POST /api/auth/user/profile-picture/` (checked, re-encoded, EXIF stripped, the same
+    as everyone's). A profile can be reported (`POST /api/v1/reports/`,
+    `target_type: user`) and an operator removes the picture from the console.
     """
     serializer_class = UserDetailsSerializer
     permission_classes = [IsAuthenticated]

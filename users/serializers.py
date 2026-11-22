@@ -144,7 +144,14 @@ class OnboardingFieldsMixin(serializers.Serializer):
         return attrs
 
     def get_onboarding_missing(self, obj):
-        missing = [f for f in ('first_name', 'last_name', 'date_of_birth') if not getattr(obj, f)]
+        # A name of spaces is no name: the directory leaves such a trainer out
+        # (`users/trainer_directory.py listed_trainers`, Road to 10 S0.3 / S2.2), so
+        # this list must name the field for the app to ask before the shell.
+        def blank(value):
+            return not (value.strip() if isinstance(value, str) else value)
+
+        missing = [f for f in ('first_name', 'last_name', 'date_of_birth')
+                   if blank(getattr(obj, f))]
         if obj.is_client:
             missing += [f for f in ('gender', 'height', 'weight') if not getattr(obj, f)]
             # `activity_level` defaults to Sedentary, so "never asked" and "beginner"

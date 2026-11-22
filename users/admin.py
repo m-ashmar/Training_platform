@@ -59,6 +59,18 @@ def make_available(modeladmin, request, queryset):
 # The bulk "reset to a known password" action is gone. It set every selected account
 # to one shared, source-visible string, which is an account takeover of every user an
 # operator can select. Password recovery goes through the OTP flow like everyone else.
+@admin.action(description="Remove the profile picture of the selected users")
+def remove_profile_pictures(modeladmin, request, queryset):
+    """A reported picture taken down (the owner's D9, 2026-11-22: a trainer uploads their
+    own photo; it can be reported, `target_type: user`, and removed). The file leaves
+    storage through the replace/delete cleanup (`training_platform/signals.py`); the
+    person may upload another, which is checked like the first."""
+    count = bulk_apply(request, queryset.exclude(profile_picture='')
+                       .exclude(profile_picture__isnull=True),
+                       "Profile picture removed via admin action", profile_picture=None)
+    messages.success(request, f"Removed {count} profile pictures.")
+
+
 @admin.action(description="Activate selected users")
 def activate_users(modeladmin, request, queryset):
     count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
@@ -107,9 +119,10 @@ class CustomUserAdmin(UserAdmin):
     inlines = [ClientInline]
     
     actions = [
-        make_available, 
+        make_available,
         activate_users,
-        deactivate_users
+        deactivate_users,
+        remove_profile_pictures,
     ]
     
     fieldsets = (
