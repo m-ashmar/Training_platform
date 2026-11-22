@@ -425,6 +425,18 @@ class SubscriptionUpdateSerializer(serializers.ModelSerializer):
                 self.AUTO_RENEW_READ_ONLY, code='auto_renew_read_only')})
         return data
 
+class WalletPaySerializer(serializers.Serializer):
+    """`POST subscriptions/{id}/pay-from-wallet/` (Road to 10 S2.13). `idempotency_key`:
+    the app's own key for this payment, 1-64 characters, made once per Review screen; a
+    retry with the same key answers the same payment. `amount` / `currency`: REQUIRED,
+    the price the Review screen showed — the money is taken at once, so the person must
+    have seen the exact figure; checked against what this would charge, never charged
+    as sent."""
+    idempotency_key = serializers.CharField(max_length=64, min_length=1)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    currency = serializers.CharField(max_length=3, min_length=3)
+
+
 class SubscriptionCancelSerializer(serializers.Serializer):
     """Serializer for cancelling subscriptions"""
     reason = serializers.CharField(max_length=500, required=False)

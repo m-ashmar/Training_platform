@@ -6093,3 +6093,37 @@ msgstr "ليس لديك مدرب."
 #: users/coaching_views.py
 msgid "This coaching does not renew, so there is nothing to stop."
 msgstr "هذا التدريب لا يتجدد، فلا يوجد ما يمكن إيقافه."
+
+#. Road to 10 S2.13: the wallet as a way to pay for a plan (the gateway list, the
+#. receipt's method).
+#: subscription/receipts.py subscription/views.py
+msgid "Wallet"
+msgstr "المحفظة"
+
+#. `insufficient_balance` (S2.13): `pay-from-wallet/` with too little in the wallet.
+#: subscription/views.py
+msgid "Your wallet balance is not enough for this plan."
+msgstr "رصيد محفظتك لا يكفي لهذه الخطة."
+
+#. `subscription_active` (S2.13): a trial is still running.
+#: subscription/views.py
+msgid "Your trial is still running."
+msgstr "فترتك التجريبية ما زالت سارية."
+
+#. `purchase_refused` (S2.13): the ledger refused the wallet payment.
+#: subscription/views.py
+msgid "The payment could not be made. Nothing was taken."
+msgstr "تعذّر إتمام الدفع. لم يُخصم أي مبلغ."
+
+#. `already_paid` (S2.13): a second wallet payment moments after the first.
+#: subscription/views.py
+msgid "This plan was just paid from your wallet."
+msgstr "دُفعت هذه الخطة للتو من محفظتك."
+
+#. `plan_payment_leg` (S2.13): the operator's reversal of a wallet plan payment's row.
+#: wallet/views.py
+msgid ""
+"This is a plan paid from the wallet and cannot be reversed on its own. Refund "
+"the payment instead."
+msgstr ""
+"هذه خطة مدفوعة من المحفظة ولا يمكن عكسها وحدها. استرد قيمة الدفعة بدلاً من ذلك."

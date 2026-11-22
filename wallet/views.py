@@ -1176,6 +1176,24 @@ def _program_sale_leg(original):
                     status=status.HTTP_409_CONFLICT)
 
 
+def _plan_payment_leg(original):
+    """409 `plan_payment_leg` when `original` is the ledger row of a plan paid from the
+    wallet (Road to 10 S2.13), else None (see `AdminReversalView`).
+
+    That row is the WHOLE payment: reversed on its own, the money went back while the
+    payment stayed `completed` and the plan stayed active — a free plan. Undoing it is
+    the payment's refund, which takes back the cover and puts this row back together.
+    Read off what the row says of itself, which never changes."""
+    metadata = original.metadata or {}
+    if metadata.get("paid_with") != "wallet" or not metadata.get("original_payment_id"):
+        return None
+    return Response({"error": _("This is a plan paid from the wallet and cannot be "
+                                "reversed on its own. Refund the payment instead."),
+                     "code": "plan_payment_leg",
+                     "payment_id": str(metadata["original_payment_id"])},
+                    status=status.HTTP_409_CONFLICT)
+
+
 class AdminReversalView(APIView):
     """`POST /api/wallet/admin/reversal/` — support puts one ledger row back.
 
@@ -1193,6 +1211,7 @@ class AdminReversalView(APIView):
     | 409 | `withdrawal_leg` | it is one leg of a trainer's withdrawal (see below); `withdrawal` `{id, number, state}` names it, or is null if no withdrawal names the row any more |
     | 409 | `routine_product_leg` | it is one leg of a routine product's sale or of its refund (see below); `purchase` `{id, status, paid_with}` names it, or is null if no purchase has that id any more |
     | 409 | `coaching_transfer_leg` | it is the trainer's or the platform's leg of a client's payment to a trainer (see below); `transfer_reference` is the payment's own reference, which reverses it whole |
+    | 409 | `plan_payment_leg` | it is the ledger row of a plan paid from the wallet (Road to 10 S2.13): refund the payment (`payment_id`) instead, which also takes back the cover |
     | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
@@ -1299,6 +1318,10 @@ class AdminReversalView(APIView):
         transfer_leg = _coaching_transfer_leg(original)
         if transfer_leg is not None:
             return transfer_leg
+        # And a plan paid from the wallet (S2.13): its one row is the whole payment.
+        plan_leg = _plan_payment_leg(original)
+        if plan_leg is not None:
+            return plan_leg
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
