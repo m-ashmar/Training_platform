@@ -290,6 +290,17 @@ def bust_home_on_a_subscription(sender, instance, **kwargs):
     bust_home_on_commit(instance.user_id)
 
 
+@receiver(post_save, sender='diet.DailyProgress')
+def bust_home_on_a_meal_confirmed(sender, instance, **kwargs):
+    """A meal or one of its components ticked (or un-ticked) recomputes the day's
+    `DailyProgress` row and saves it (`diet/models.py update_progress`) — the one write
+    every confirm path makes, the trainer's included. Home's «سعرات اليوم» card and the
+    day rail read that day, so the first read after a confirm must not be the cached
+    page (asked by the app session, 2026-11-22). A closed training day was already
+    covered (`DayOutcome`, above)."""
+    bust_home_on_commit(instance.user_id)
+
+
 @receiver(post_save, sender='wallet.Transaction')
 def bust_home_on_a_ledger_row(sender, instance, created, **kwargs):
     """Money written to a person's wallet — a top-up credited, a coaching fee held or

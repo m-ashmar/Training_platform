@@ -503,8 +503,9 @@ class HomeView(APIView):
     client's coaching relation changes (a request sent or answered included), a
     programme is bought, a diet plan of theirs is built or sent to them, their
     subscription row is saved, or money is written to their wallet — the person's own
-    actions (`training_platform/signals.py`; Road to 10 S0.6). Everything else — a meal
-    ticked, a badge earned, a subscription lapsing on its date — shows within the 120 s.
+    actions (`training_platform/signals.py`; Road to 10 S0.6) — and a meal confirmed or
+    un-confirmed (its day's progress row is saved). Everything else — a badge earned, a
+    subscription lapsing on its date — shows within the 120 s.
 
     Days are the SERVER's calendar days (`Asia/Damascus`), not the account's
     `preferred_timezone`: every training date, meal date and outcome in this platform

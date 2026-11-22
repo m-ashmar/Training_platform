@@ -129,3 +129,35 @@ def test_a_subscription_changed_retires_the_home(make_user, fresh_cache,
         sub.status = "cancelled"
         sub.save()
     assert _stamp(client) != created
+
+
+def test_a_meal_confirmed_retires_the_home(make_user, api, fresh_cache,
+                                           django_capture_on_commit_callbacks):
+    """The «سعرات اليوم» card and the day rail (asked by the app session, 2026-11-22): a
+    confirm recomputes and saves the day's `DailyProgress`, and that save retires the
+    page. Fails on the code before the receiver."""
+    from diet.models import Meal
+    from tests.test_home import _diet_day, _subscribe
+
+    client = make_user("s06_meal")
+    _subscribe(client, "s06_meal")
+    _diet_day(client)
+    meal = Meal.objects.filter(diet_plan__user=client, date=timezone.localdate(),
+                               is_completed=False).order_by("id").first()
+    before = _stamp(client)
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = api(client).post(f"/api/diet/v1/client/meals/{meal.pk}/complete/",
+                                {"action": "complete_meal"}, content_type=JSON)
+    assert resp.status_code == 200, resp.content
+    assert _stamp(client) != before
+
+
+def test_a_closed_day_already_retires_the_home(make_user, api, fresh_cache,
+                                               django_capture_on_commit_callbacks):
+    from tests.test_home import _close_day, _program
+
+    _trainer, client, routine, _rows = _program(make_user, "s06_day")
+    before = _stamp(client)
+    with django_capture_on_commit_callbacks(execute=True):
+        assert _close_day(api, client, routine).status_code == 200
+    assert _stamp(client) != before
