@@ -44,6 +44,9 @@ class EntitlementSource(models.TextChoices):
 SOURCE_OF_PAYMENT_METHOD = {
     "shamcash": EntitlementSource.SHAMCASH,
     "manual": EntitlementSource.OPERATOR_GRANT,
+    # A plan paid from the wallet (S2.13): money a person put in their wallet, through an
+    # agent's cash top-up today.
+    "wallet": EntitlementSource.AGENT_WALLET,
 }
 
 

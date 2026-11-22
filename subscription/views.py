@@ -201,6 +201,20 @@ def _checkout_open(payment):
         status=status.HTTP_409_CONFLICT)
 
 
+def _wallet_way_to_pay(user) -> dict:
+    """The wallet as a way to pay for a plan (S2.13), for `GET v1/gateways/`: the caller's
+    balance and currency now. Only called on a build that may sell a plan."""
+    from wallet.models import Wallet
+
+    wallet = Wallet.objects.filter(owner=user).first()
+    currency = wallet.currency if wallet is not None else wallet_currency_for(user)
+    return {'name': 'wallet', 'display_name': _('Wallet'), 'available': True,
+            'kind': 'wallet',
+            'balance': str(wallet.balance) if wallet is not None else '0.00',
+            'currency': currency,
+            'pay_path': '/api/subscription/v1/subscriptions/{id}/pay-from-wallet/'}
+
+
 def gateway_state(gateway_name):
     """`{state, since, last_success_at}` of the gateway a checkout is paid through — the
     spec's "ShamCash is not responding, your payment is safe, we will keep checking"
@@ -674,6 +688,147 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    @action(detail=True, methods=['post'], url_path='pay-from-wallet',
+            throttle_classes=[ChargingRateThrottle])
+    def pay_from_wallet(self, request, pk=None):
+        """Pay this subscription's plan from the caller's own wallet, at once (Road to 10
+        S2.13, the owner's D19 of 2026-11-22) — «ادفع من محفظتك».
+
+        `POST`, authenticated, the subscription's owner only. Headers: `X-App-Channel`
+        (required — it moves money), `X-App-Version`. Body (JSON), every field required:
+        `{"idempotency_key": "<1-64 chars, made once per Review screen>",
+        "amount": "5000.00", "currency": "SYP"}` — `amount`/`currency` are the price the
+        Review screen showed (the money is taken at once, so the person must have seen
+        the exact figure); a mismatch is a 409, never a charge at either figure.
+
+        A first payment (the subscription is `pending` or `cancelled`) starts the plan
+        now; on an `active` or `expired` subscription it is a renewal — the new period
+        follows the cover already held, as a gateway renewal's does. The whole price, in
+        the caller's own currency (the plan's price of record converted at the operator's
+        rate when the two differ, the rate snapshotted on the payment), leaves the wallet
+        for the platform — 100% of a plan stays with the platform — and the payment is
+        `completed` in the same step: invoiced, a receipt like any plan payment
+        (`GET payments/{payment_id}/receipt/`, method `wallet`), the receipt email and the
+        `payment_confirmed` push. A refund puts the same amount back in the wallet.
+
+        The same `idempotency_key` again answers the SAME payment (200, `replayed: true`)
+        and moves nothing, whatever happened since; a double tap with one key waits for
+        the first and then answers it. ANOTHER key within 10 minutes of a wallet payment
+        of this subscription is refused as a repeat (409 `already_paid`), so a second tap
+        that made a fresh key cannot take the price twice.
+
+        200::
+
+            {"payment_id": "<uuid>", "status": "completed", "replayed": false,
+             "kind": "initial" | "renewal", "payment_method": "wallet",
+             "money_type": "PLATFORM_SUB", "amount": "5000.00", "currency": "SYP",
+             "price_of_record": "50.00" | null, "price_of_record_currency": "USD" | null,
+             "exchange_rate": "100.000000" | null,      null when nothing was converted
+             "invoice_number": "INV-...", "completed_at": "<iso>",
+             "receipt_url": "/api/subscription/v1/payments/<uuid>/receipt/",
+             "wallet_reference": "<the ledger row: GET /api/wallet/transactions/{ref}/>",
+             "balance": "1200.00",                      the wallet now, in `currency`
+             "subscription": {"id", "status", "plan_id", "start_date", "end_date"}}
+
+        **Differs by build, and by nothing else.** Only a build that may sell a plan
+        (`apk`, `web`) gets past the first line: `play` and `ios` are refused by the same
+        check that locks plan purchases there (`require_purchase_allowed(PLATFORM_SUB)`;
+        `can_purchase_platform_sub` is store-locked). `GET v1/gateways/` lists the
+        wallet as a way to pay on exactly those builds.
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 400 | `validation_error` | `idempotency_key`, `amount` or `currency` missing or malformed (`field_errors`) |
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `payment_not_required` | the plan is free |
+        | 409 | `subscription_active` | a trial is running (as `POST v1/gateways/` answers it) |
+        | 409 | `checkout_open` | a ShamCash checkout of this subscription is open — the caller may be paying it now; `payment_id`, `status`, `expires_at` |
+        | 409 | `already_paid` | this subscription was paid from the wallet within the last 10 minutes under another key; `payment_id` (its receipt), `end_date` (the cover it bought) |
+        | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
+        | 409 | `price_changed` | the quoted `amount`/`currency` is not what this would charge; `expected_amount`, `expected_currency` |
+        | 402 | `insufficient_balance` | the wallet holds less than the price: `required` (the price), `balance` (the wallet), `currency` (both are in it). Nothing was written; top up and try again with the same key |
+        | 400 | `purchase_refused` | the ledger refused the movement for another reason; nothing moved |
+        | 429 | `throttled` | the rate limiter (`Retry-After`) |
+        """
+        from wallet.models import Wallet
+
+        from .serializers import WalletPaySerializer
+        from .services.payment_service import (AlreadyPaid, NothingToPay, QuoteMismatch,
+                                               WalletShort)
+
+        # FIRST: a build that may not sell plans is told so whatever it sent.
+        require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
+        body = WalletPaySerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+        subscription = self.get_object()
+        quote = (data['amount'], data['currency'])
+        try:
+            payment = PaymentService.pay_from_wallet(
+                subscription, idempotency_key=data['idempotency_key'], quote=quote,
+                by=By.CUSTOMER, actor=request.user, evidence=_opened_from(request))
+        except WalletShort as exc:
+            return Response({'error': _('Your wallet balance is not enough for this plan.'),
+                             'code': 'insufficient_balance',
+                             'required': str(exc.required), 'balance': str(exc.balance),
+                             'currency': exc.currency},
+                            status=status.HTTP_402_PAYMENT_REQUIRED)
+        except QuoteMismatch as exc:
+            return Response({'error': _('The price has changed. Please refresh and try again.'),
+                             'code': 'price_changed', 'expected_amount': str(exc.amount),
+                             'expected_currency': exc.currency},
+                            status=status.HTTP_409_CONFLICT)
+        except ExchangeRateUnavailable as exc:
+            return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+        except CheckoutOpen as exc:
+            return _checkout_open(exc.payment)
+        except AlreadyPaid as exc:
+            return Response({'error': _('This plan was just paid from your wallet.'),
+                             'code': 'already_paid', 'payment_id': str(exc.payment.id),
+                             'end_date': exc.payment.subscription.end_date},
+                            status=status.HTTP_409_CONFLICT)
+        except SubscriptionAlreadyActive:
+            return Response({'error': _('Your trial is still running.'),
+                             'code': 'subscription_active'},
+                            status=status.HTTP_409_CONFLICT)
+        except NothingToPay:
+            return Response({'error': _('This plan does not require a payment'),
+                             'code': 'payment_not_required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            # The ledger's own refusals (a currency it will not cross). Logged, never
+            # shown: nothing moved.
+            logger.warning("Wallet payment for subscription %s refused by the ledger: %s",
+                           subscription.id, exc)
+            return Response({'error': _('The payment could not be made. Nothing was taken.'),
+                             'code': 'purchase_refused'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        sub = payment.subscription
+        wallet = Wallet.objects.filter(owner=request.user).first()
+        return Response({
+            'payment_id': str(payment.id), 'status': payment.status,
+            'replayed': bool(getattr(payment, 'replayed', False)),
+            'kind': (payment.metadata or {}).get('kind') or 'initial',
+            'payment_method': payment.payment_method, 'money_type': payment.money_type,
+            'amount': str(payment.amount), 'currency': payment.currency,
+            'price_of_record': (str(payment.price_amount)
+                                if payment.exchange_rate_id else None),
+            'price_of_record_currency': (payment.price_currency
+                                         if payment.exchange_rate_id else None),
+            'exchange_rate': (str(payment.exchange_rate_value)
+                              if payment.exchange_rate_id else None),
+            'invoice_number': payment.invoice_number, 'completed_at': payment.completed_at,
+            'receipt_url': f"/api/subscription/v1/payments/{payment.id}/receipt/",
+            'wallet_reference': (payment.metadata or {}).get('wallet_reference'),
+            'balance': str(wallet.balance) if wallet is not None else '0.00',
+            'subscription': {'id': str(sub.id), 'status': sub.status,
+                             'plan_id': sub.plan_id, 'start_date': sub.start_date,
+                             'end_date': sub.end_date},
+        })
+
     @action(detail=True, methods=['post'], url_path='change-plan')
     def change_plan(self, request, pk=None):
         """Move a subscription that holds no running cover onto another plan.
@@ -1572,20 +1727,33 @@ class PaymentGatewayView(APIView):
         payment itself; `reviewed` — the customer transfers to the merchant account and
         a person confirms it in the console, within `review_hours`
         (`PAYMENT_REVIEW_HOURS`); null when the gateway is not set up. Sell a plan only
-        when `can_pay` is true, and word the promise from `kind`.
+        when `can_pay` or `can_pay_from_wallet` is true, and word the promise from
+        `kind` (a gateway) or from the wallet.
+
+        THE WALLET (additive, Road to 10 S2.13, the owner's D19), beside the gateways:
+        `"can_pay_from_wallet": true` and `"wallet": {"name": "wallet", "display_name",
+        "available": true, "kind": "wallet", "balance": "1200.00", "currency": "SYP",
+        "pay_path": "/api/subscription/v1/subscriptions/{id}/pay-from-wallet/"}` —
+        `balance` is the caller's wallet now, in `currency` (the caller's; every plan
+        price they are shown is in it). It is `available` whatever the balance: when it is
+        short the Review screen shows what is missing and the top-up screen. Pay with it
+        at `pay_path` (`{id}` = the subscription), never through `POST v1/gateways/`. It
+        is never in `gateways`, and `can_pay` / `reason` still speak of the gateways only.
 
         What differs by build, and nothing else does: a build that may not sell plans
         (`can_purchase_platform_sub` off — `play`, `ios`, no channel) gets `gateways:
-        []`, `can_pay: false`, `reason: "not_available_on_channel"` — how to pay is a
-        payment instruction, never shown there. Otherwise every registered gateway is
-        listed, and `reason` is `no_gateway` when none is available.
+        []`, `can_pay: false`, `reason: "not_available_on_channel"`,
+        `can_pay_from_wallet: false`, `wallet: null` — how to pay is a payment
+        instruction, never shown there. Otherwise every registered gateway is listed, and
+        `reason` is `no_gateway` when none is available.
         """
         try:
             # How to pay is a payment instruction. A build that may not sell plans gets
             # an empty list — the same for every user of that build, reviewer or not.
             if not flags_for_request(request)['can_purchase_platform_sub']:
                 return Response({'success': True, 'can_pay': False,
-                                 'reason': 'not_available_on_channel', 'gateways': []})
+                                 'reason': 'not_available_on_channel', 'gateways': [],
+                                 'can_pay_from_wallet': False, 'wallet': None})
 
             from django.conf import settings as django_settings
 
@@ -1617,7 +1785,14 @@ class PaymentGatewayView(APIView):
                 'success': True,
                 'can_pay': can_pay,
                 'reason': None if can_pay else 'no_gateway',
-                'gateways': gateway_list
+                'gateways': gateway_list,
+                # The caller's own wallet (Road to 10 S2.13, the owner's D19): a way to pay
+                # on every build that may sell a plan — the first line turned the others
+                # away. Beside the gateways, not among them: `can_pay` keeps meaning "a
+                # gateway can take a payment", and a build that picks the first available
+                # gateway still opens a ShamCash checkout.
+                'can_pay_from_wallet': True,
+                'wallet': _wallet_way_to_pay(request.user),
             })
             
         except PASSTHROUGH_EXCEPTIONS:

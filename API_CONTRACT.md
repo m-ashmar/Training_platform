@@ -1743,7 +1743,7 @@ The flags are enforced by the server, not only rendered by the app:
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
-| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/subscriptions/{id}/pay-from-wallet/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
@@ -1757,7 +1757,32 @@ person confirms it in the console), null when unavailable — and `review_hours`
 `reviewed`: within how many hours it is confirmed, `PAYMENT_REVIEW_HOURS`; null
 otherwise); `enabled` equals `available`. The answer's `can_pay` is true when one is
 available, else `reason: "no_gateway"`. Sell only on `can_pay`, and word the promise
-from `kind`. Additive fields:
+from `kind`.
+
+**A plan paid from the wallet** (Road to 10 S2.13, the owner's D19 of 2026-11-22). On a
+build that may sell a plan (`apk`, `web`) `GET v1/gateways/` also answers
+`can_pay_from_wallet: true` and `wallet: {name: "wallet", display_name, available: true,
+kind: "wallet", balance, currency, pay_path}` (the caller's balance, in their currency),
+beside the gateways — never in `gateways`, and `can_pay`/`reason` still speak of the
+gateways only; on the others `can_pay_from_wallet: false`, `wallet: null`. Sell a plan
+when `can_pay` or `can_pay_from_wallet`. `POST v1/subscriptions/{id}/pay-from-wallet/`
+`{idempotency_key, amount, currency}` (all required: the key made once per Review screen,
+and the exact figure the person saw) takes the plan's price in the caller's currency
+(converted at the operator's rate when the plan is priced in the other one, the rate
+snapshotted) out of the wallet for the platform (100%), and the payment is `completed`
+at once: method `wallet`, an invoice, the receipt, `payment_confirmed`. A first payment
+starts the plan now; on an `active`/`expired` subscription it is a renewal. The same key
+again answers the same payment (`replayed: true`) and moves nothing; another key within 10
+minutes of a wallet payment of that subscription is 409 `already_paid` (`payment_id`,
+`end_date`), so a second tap cannot take the price twice. `play`/`ios`: 403
+`not_available_on_channel` (`can_purchase_platform_sub` is store-locked). Codes:
+`validation_error`, `not_found`, `payment_not_required`, `subscription_active` (a trial
+running), `checkout_open` (a ShamCash checkout is open), `already_paid`, `exchange_rate_stale` /
+`exchange_rate_missing`, `price_changed` (`expected_amount`, `expected_currency`), 402
+`insufficient_balance` (`required`, `balance`, `currency`), `purchase_refused`,
+`throttled`. A refund puts the amount back in the wallet.
+
+Additive fields:
 `money_type` on payments and wallet transactions (`PLATFORM_SUB`, `COACHING_1TO1`,
 `ROUTINE_PRODUCT`, `WALLET_MOVE`) and `source` on subscriptions (`shamcash`, `agent_wallet`,
 `operator_grant`, `trial`, reserved: `apple_iap`, `google_play`; blank until entitled).
@@ -2197,7 +2222,9 @@ operator maintains in the console. Four things the app needs:
   trainer's share and the commission go back to escrow and the amount to the client in
   one transaction (`400 insufficient_balance` when the trainer no longer holds the
   share; nothing moves); the trainer's leg or the commission alone is `409
-  coaching_transfer_leg` with `transfer_reference`.
+  coaching_transfer_leg` with `transfer_reference`. The one ledger row of a plan paid
+  from the wallet (Road to 10 S2.13) is `409 plan_payment_leg` with `payment_id`: refund
+  the payment instead, which also takes back the cover.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
@@ -3746,6 +3773,7 @@ delivered, and is handed back.
 | `DELETE, GET, PATCH, PUT` | `/api/subscription/v1/subscriptions/{id}/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/cancel/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/change-plan/` | auth | `SubscriptionViewSet` |
+| `POST` | `/api/subscription/v1/subscriptions/{id}/pay-from-wallet/` | auth | `SubscriptionViewSet` |
 | `GET, POST` | `/api/subscription/v1/subscriptions/{id}/upgrade/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |

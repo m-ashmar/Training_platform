@@ -72,6 +72,12 @@ order continues payment -> product -> purchase -> user row -> wallets). Every ot
 method here treats both alike; where they differ (completion delivers the program
 instead of cover, a refund reverses the sale instead of cover) the method says so. The
 payment step each checkout opens through is an adapter (`subscription/payment_step.py`).
+
+A PLAN PAID FROM THE WALLET (Road to 10 S2.13, the owner's D19) is a payment too, with
+`payment_method='wallet'`: `pay_from_wallet` opens it, moves the money out of the payer's
+wallet into the platform's revenue and completes it in ONE transaction, so it is never
+seen open and no gateway, poller or webhook ever reads it. It is refunded like any plan
+payment (`refund_payment`): the ledger leg goes back to the wallet it came from.
 """
 from __future__ import annotations
 
@@ -150,6 +156,45 @@ class CheckoutOpen(PaymentError):
     def __init__(self, message, payment):
         super().__init__(message)
         self.payment = payment
+
+
+class NothingToPay(PaymentError):
+    """The plan is free: there is no money to take from anywhere."""
+
+
+class QuoteMismatch(PaymentError):
+    """The amount or currency the caller showed the customer is not what this payment
+    would charge now (a price or the rate moved). `amount`/`currency` are what it would."""
+
+    def __init__(self, message, amount, currency):
+        super().__init__(message)
+        self.amount, self.currency = amount, currency
+
+
+class AlreadyPaid(PaymentError):
+    """This subscription was paid from the wallet moments ago under ANOTHER key
+    (`WALLET_REPEAT_WINDOW`): almost always a second tap that minted a fresh key, and
+    paying it would take the price twice. `payment` is the one already made."""
+
+    def __init__(self, message, payment):
+        super().__init__(message)
+        self.payment = payment
+
+
+class WalletShort(PaymentError):
+    """The payer's wallet holds less than the plan's price. `required` and `balance` are
+    in `currency`, the payer's. Nothing was written."""
+
+    def __init__(self, required, balance, currency):
+        super().__init__(f"wallet holds {balance} {currency}, the plan costs {required}")
+        self.required, self.balance, self.currency = required, balance, currency
+
+
+#: How long after a wallet payment another one for the same subscription, under a
+#: different key, is refused as a repeat (`AlreadyPaid`). The money is taken at once, so
+#: the gateway's guard — one checkout in flight — has nothing to hold on to; an app that
+#: mints a key per tap would otherwise charge twice and stack two periods.
+WALLET_REPEAT_WINDOW = timedelta(minutes=10)
 
 
 def _gateway_facts(data: dict | None) -> dict:
@@ -1077,6 +1122,168 @@ class PaymentService:
                 subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
             return cls._checkout_under_lock(locked, open_payments, 'initial', initiate,
                                             by=by, actor=actor, evidence=evidence)
+
+    @classmethod
+    def pay_from_wallet(cls, subscription: Subscription, *, idempotency_key: str,
+                        quote: tuple | None = None, by: str = By.CUSTOMER, actor=None,
+                        evidence: dict | None = None) -> Payment:
+        """Pay the subscription's plan from the payer's own wallet, at once (Road to 10
+        S2.13, the owner's D19 of 2026-11-22). Returns the payment, `replayed` set.
+
+        THE CALLER HAS ALREADY ASKED `require_purchase_allowed(request, PLATFORM_SUB)`:
+        a store build never reaches this. Nothing here reads a build.
+
+        One transaction, the locks in the platform's order — the subscription row, then
+        the payer's user row (FOR KEY SHARE, `users.coaching.lock_wallets`), then the
+        payer's wallet and the platform's revenue wallet in ascending id; this payment's
+        row is created under all of them and nobody else can hold it — and every check is
+        made under them:
+
+        * `idempotency_key` already paid for this subscription: that payment comes back
+          as it is (`replayed`), whatever has happened since, and nothing moves. Two
+          requests with one key queue on the subscription lock; the second finds the
+          first. The unique `(subscription, idempotency_key)` is the backstop.
+        * A running trial: `SubscriptionAlreadyActive`, as the Pay button answers it.
+          Cover running on a paid plan, or lapsed (`active` / `expired`): a RENEWAL — the
+          new period follows the cover held, as a gateway renewal's does. Anything else
+          (`pending`, `cancelled`): a first payment, starting now.
+        * A gateway checkout with a reference is open: `CheckoutOpen`. The customer may be
+          transferring against it right now, and paying both would pay twice.
+        * A wallet payment of this subscription completed within `WALLET_REPEAT_WINDOW`
+          under another key: `AlreadyPaid` — a second tap with a fresh key would take the
+          price twice. (The same key is a replay, above, and is answered, not refused.)
+        * A free plan: `NothingToPay`.
+        * The price: the plan's price of record in the PAYER's currency (`subscription.
+          pricing.charge_for`, through `wallet.exchange` and nothing else), the rate row
+          snapshotted on the payment as a checkout does; `ExchangeRateUnavailable` when it
+          has to cross and the rate is missing or stale. `quote` — `(amount, currency)`
+          the app showed — that differs raises `QuoteMismatch`.
+        * The balance, read on the LOCKED wallet: `WalletShort` (required, balance), and
+          the transaction rolls back — no payment row is left.
+
+        Then the money moves: ONE ledger row, payer's wallet -> the platform's revenue
+        wallet in that currency, for the whole price (a plan stays 100% with the
+        platform, the owner's rule of 2026-09-19), `money_type` PLATFORM_SUB, tagged with
+        `original_payment_id` so a refund (`refund_payment` -> `wallet.signals.
+        unwind_payment`) puts exactly that back. The payment opens (`_opened`) and
+        completes (`_move`) in the same transaction, is invoiced, and grants the period
+        exactly as `complete_payment` grants a gateway's (`_activate_subscription`, source
+        `agent_wallet`). Its payout is settled at once: there is no money to mint, so
+        `payment_completed` — whose wallet receiver mints a gateway payment's top-up — is
+        NOT sent; the customer's `payment_confirmed` notice and the receipt email are, on
+        commit, as for any plan payment.
+        """
+        from users.coaching import lock_wallets
+        from wallet.models import move_funds_atomic, wallet_for
+        from wallet.utils import get_platform_revenue_wallet
+
+        from policy.money import MoneyType
+        from wallet import currency_for as _currency_for
+
+        from ..pricing import charge_for
+
+        with transaction.atomic():
+            locked = (Subscription.objects.select_for_update(of=('self',))
+                      .select_related('plan', 'user').get(pk=subscription.pk))
+            replay = Payment.objects.filter(subscription=locked,
+                                            idempotency_key=idempotency_key).first()
+            if replay is not None:
+                replay.replayed = True
+                return replay
+            if locked.is_active and locked.status != 'active':
+                raise SubscriptionAlreadyActive(
+                    f"Subscription {locked.id} is in a running {locked.status}")
+            kind = 'renewal' if locked.status in ('active', 'expired') else 'initial'
+            checkout = (Payment.objects
+                        .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                        .exclude(gateway_transaction_reference__isnull=True)
+                        .exclude(gateway_transaction_reference='')
+                        .order_by('created_at', 'id').first())
+            if checkout is not None:
+                raise CheckoutOpen(f"Subscription {locked.id} has checkout {checkout.id} "
+                                   f"open", checkout)
+            recent = (Payment.objects
+                      .filter(subscription=locked, payment_method='wallet',
+                              status='completed',
+                              completed_at__gt=timezone.now() - WALLET_REPEAT_WINDOW)
+                      .order_by('-completed_at', '-id').first())
+            if recent is not None:
+                raise AlreadyPaid(f"Subscription {locked.id} was paid from the wallet at "
+                                  f"{recent.completed_at}", recent)
+            plan = locked.plan
+            if plan.price <= 0:
+                raise NothingToPay(f"Plan {plan.id} is free")
+            payer = locked.user
+            priced = charge_for(plan.price, plan.currency, _currency_for(payer))
+            if quote is not None:
+                quoted_amount, quoted_currency = quote
+                if ((quoted_amount is not None
+                     and Decimal(quoted_amount).quantize(Decimal('0.01')) != priced.amount)
+                        or (quoted_currency is not None
+                            and str(quoted_currency).upper() != priced.currency)):
+                    raise QuoteMismatch("the quoted price is not what this would charge",
+                                        priced.amount, priced.currency)
+
+            owner_type = 'trainer' if getattr(payer, 'is_trainer', False) else 'client'
+            payer_wallet = wallet_for(payer, owner_type, priced.currency)
+            platform = get_platform_revenue_wallet(priced.currency)
+            held = lock_wallets(payer.pk, [payer_wallet, platform])[payer_wallet.pk]
+            if held.balance < priced.amount:
+                raise WalletShort(priced.amount, held.balance, priced.currency)
+            # A wallet whose unit is not the charge's cannot pay it: `move_funds_atomic`
+            # refuses that below (`CurrencyMismatch`, a ValueError), never at 1:1.
+
+            metadata = {'plan': plan_snapshot(plan), 'paid_with': 'wallet'}
+            if kind == 'renewal':
+                metadata['kind'] = 'renewal'
+            payment = Payment(
+                subscription=locked, status='pending', payment_method='wallet',
+                money_type=MoneyType.PLATFORM_SUB,
+                amount=priced.amount, currency=priced.currency,
+                price_amount=priced.price_amount, price_currency=priced.price_currency,
+                exchange_rate=priced.rate,
+                exchange_rate_value=getattr(priced.rate, 'rate', None),
+                idempotency_key=idempotency_key, metadata=metadata,
+                description=(f"Renewal for {plan.name}" if kind == 'renewal'
+                             else f"Payment for {plan.name}"))
+            payment.save()
+            cls._opened(payment, by=by, actor=actor, evidence=evidence)
+
+            charge = move_funds_atomic(
+                held, platform, priced.amount, actor_id=payer.pk, currency=priced.currency,
+                tx_type='transfer', money_type=MoneyType.PLATFORM_SUB,
+                metadata={'purpose': 'subscription_revenue', 'paid_with': 'wallet',
+                          'original_payment_id': str(payment.id),
+                          'subscription_id': str(locked.id), 'plan_id': plan.id})
+
+            cls._move(payment, 'completed', by=by, actor=actor,
+                      evidence={'paid_with': 'wallet', 'amount': str(priced.amount),
+                                'currency': priced.currency,
+                                'ledger_reference': charge.reference_id,
+                                **(evidence or {})})
+            payment.metadata = {**payment.metadata, 'wallet_reference': charge.reference_id}
+            payment.invoice_number = cls._generate_invoice_number()
+            payment.completed_at = timezone.now()
+            bought = cls._plan_bought(payment, locked)
+            days = payment.plan_bought()['duration_days'] or bought.duration_days
+            locked.plan = (cls._dearest_running_plan(locked, clearing=payment)
+                           if locked.is_active else bought)
+            payment.covers_from, payment.covers_until = cls._activate_subscription(
+                locked, source_of_payment_method('wallet'), days)
+            # Nothing is owed: the money moved above, in this transaction. Without this
+            # the payout sweep would send `payment_completed`, and its receiver mints.
+            payment.payout_settled_at = timezone.now()
+            payment.save()
+            logger.info("Payment %s paid from the wallet (invoice %s): subscription %s %s "
+                        "until %s", payment.id, payment.invoice_number, locked.id, kind,
+                        locked.end_date)
+
+            recipient_id = payer.pk
+            transaction.on_commit(lambda: cls._notify_confirmed(recipient_id, payment.id),
+                                  robust=True)
+            transaction.on_commit(lambda: cls._queue_receipt_email(payment), robust=True)
+        payment.replayed = False
+        return payment
 
     @classmethod
     def start_upgrade(cls, subscription: Subscription, to_plan: SubscriptionPlan, initiate,

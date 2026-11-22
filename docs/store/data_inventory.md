@@ -1715,7 +1715,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Purchase and payment history (`purchases`).
 
-**Fields stored.** `id`, `subscription`, `buyer`, `routine_product`, `amount`, `currency`, `price_amount`, `price_currency`, `exchange_rate`, `exchange_rate_value`, `status`, `payment_method`, `money_type`, `transaction_id`, `payment_intent_id`, `gateway_response`, `gateway_error`, `gateway_transaction_reference`, `gateway_event_id`, `invoice_number`, `completed_at`, `covers_from`, `covers_until`, `payout_settled_at`, `description`, `metadata`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `subscription`, `buyer`, `routine_product`, `amount`, `currency`, `price_amount`, `price_currency`, `exchange_rate`, `exchange_rate_value`, `status`, `payment_method`, `money_type`, `transaction_id`, `payment_intent_id`, `gateway_response`, `gateway_error`, `gateway_transaction_reference`, `gateway_event_id`, `invoice_number`, `completed_at`, `covers_from`, `covers_until`, `payout_settled_at`, `idempotency_key`, `description`, `metadata`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 

@@ -104,6 +104,14 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             return
         payment = locked
 
+        if payment.payment_method == "wallet":
+            # A plan paid FROM the wallet (S2.13): its money already moved out of the
+            # payer's wallet into the platform's revenue, in the payment's own
+            # transaction (`PaymentService.pay_from_wallet`). Nothing entered the system,
+            # so nothing is minted here — whoever sends this signal for it.
+            _mark_payout_settled(payment)
+            return
+
         if Transaction.objects.filter(
                 tx_type="transfer",
                 metadata__original_payment_id=str(payment.id)).exists():

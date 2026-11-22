@@ -60,6 +60,7 @@ A5_MM = (148, 210)
 METHOD_NAMES = {
     "shamcash": gettext_lazy("ShamCash"),
     "manual": gettext_lazy("Recorded by the platform"),
+    "wallet": gettext_lazy("Wallet"),
     "syriatel_cash": gettext_lazy("Syriatel Cash"),
     "baraka_bank": gettext_lazy("Al-Baraka Bank"),
     "bemo_bank": gettext_lazy("BEMO Bank"),

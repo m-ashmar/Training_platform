@@ -450,6 +450,9 @@ class Payment(RowValidationMixin, models.Model):
         ('shamcash', 'ShamCash'),
         # Manual / admin
         ('manual', 'Manual'),
+        # The payer's own wallet balance (Road to 10 S2.13, the owner's D19): taken and
+        # confirmed in one transaction by `PaymentService.pay_from_wallet`.
+        ('wallet', 'Wallet'),
         # Legacy (retained for historical rows; not selectable via gateway config)
         ('syriatel_cash', 'Syriatel Cash'),
         ('baraka_bank', 'Al-Baraka Bank'),
@@ -576,6 +579,12 @@ class Payment(RowValidationMixin, models.Model):
     # was never paid. Written by `wallet.signals.handle_payment_completed`.
     payout_settled_at = models.DateTimeField(null=True, blank=True)
 
+    #: The app's own key for a WALLET payment (`pay-from-wallet/`, S2.13): a retried
+    #: request with the same key answers the payment it already made, and nothing moves
+    #: twice. Unique per subscription; NULL on every gateway payment, whose identity is
+    #: its reference.
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True)
+
     # Metadata
     description = models.TextField(blank=True)
     metadata = models.JSONField(default=dict, blank=True)
@@ -621,6 +630,13 @@ class Payment(RowValidationMixin, models.Model):
                 fields=['invoice_number'],
                 condition=Q(invoice_number__isnull=False),
                 name='uniq_payment_invoice_number',
+            ),
+            # One wallet payment per key per subscription (S2.13): the backstop of the
+            # replay `PaymentService.pay_from_wallet` decides under the subscription lock.
+            models.UniqueConstraint(
+                fields=['subscription', 'idempotency_key'],
+                condition=Q(idempotency_key__isnull=False),
+                name='uniq_payment_wallet_idempotency_key',
             ),
             models.CheckConstraint(condition=Q(money_type__in=MoneyType.values),
                                    name='payment_money_type_known'),
