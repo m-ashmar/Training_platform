@@ -3485,6 +3485,17 @@ changed meaning, no code renamed. The docstrings named are the contract.
 
 ### Social
 
+**Trainers are members of the community** (Road to 10 S3.8, the owner's D11,
+2026-11-22). A trainer's token is accepted on every route of this section and on
+`/api/v1/reports/`, exactly as a client's: the feed and the post list, posting, editing
+and deleting their own posts and comments, liking, commenting, following, the people
+search, and creating, editing, closing, joining, logging and leaving a challenge and
+reading its `leaderboard/` (`tests/test_road10_s38_trainer_community.py` exercises each
+with a trainer's token). A trainer may also set `audience: "my_clients"`. What a trainer
+may not do answers the same coded refusals as anyone: 403 `not_owner` (someone else's
+post, comment or challenge), 403 `challenge_clients_only` (another coach's clients-only
+challenge). No route refuses by role, and nothing differs by build.
+
 `POST challenges/{id}/leave/` removes the caller's participation, recounts
 `participants_count` and closes the gap in the standing. Codes: `left_challenge` (200),
 `not_participating` (400, you had not joined), `challenge_closed` (400, the challenge

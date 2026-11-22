@@ -419,6 +419,10 @@ class PostViewSet(viewsets.ModelViewSet):
     """
     API endpoints for social posts
 
+    Any member, a TRAINER included (Road to 10 S3.8, the owner's D11): no action here
+    refuses by role, and a trainer reads, posts, edits, deletes and likes as a client
+    does.
+
     What a caller may read is `visible_posts_for` — which, since the owner's decision 8
     (2026-09-24), leaves out every post of a suspended or erased account.
     `PATCH`/`DELETE` of someone else's post is 403 `not_owner` (was
@@ -675,6 +679,9 @@ class CommentViewSet(viewsets.ModelViewSet):
     """
     API endpoints for post comments
 
+    Any member, a TRAINER included (Road to 10 S3.8, the owner's D11): no action here
+    refuses by role.
+
     A comment is listed only when its post is one the caller may read
     (`visible_posts_for`), it is not hidden, its author is not blocked either way, and
     its author's account is publicly visible — a suspended or erased account's comments
@@ -858,7 +865,10 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     """
     API endpoints for community challenges
 
-    Auth required. Nothing differs by build. A challenge row (list, detail, create,
+    Auth required. Nothing differs by build. Any member, a TRAINER included (Road to 10
+    S3.8, the owner's D11): a trainer creates, edits, closes, joins, logs and leaves a
+    challenge and reads its board as a client does; no action refuses by role. A
+    challenge row (list, detail, create,
     update) is `ChallengeSerializer`; since 2026-09-24 it also carries `metric` —
     `manual` | `volume_kg` | `sets` | `workouts` | `training_days` | `exercise_reps` |
     `streak_days` (the last two since B-161, below), writable, default `manual` — and
