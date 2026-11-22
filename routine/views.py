@@ -798,6 +798,82 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return Response(RoutineSerializer(copy, context={'request': request}).data,
                         status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def schedule(self, request, pk=None):
+        """GET /api/routine/routines/{id}/schedule/ — which day of this programme is
+        today, the week it is in, and that week's days (Road to 10 S0.1, BACKEND_BUGS
+        B-197). The ONE rule: home's `workout_hero` reads the same function
+        (`routine/schedule.py`), so Home, Train and the Day screen name the same day,
+        week and minutes.
+
+        Only the person the routine is assigned to (any role; in practice the client —
+        a routine is one client's private copy). Anyone else, the trainer who wrote it
+        included, gets 404 `not_found`, as for a routine that does not exist. 401
+        without a token. No headers needed; nothing differs by build. A frozen, unpaid
+        or ended coaching still READS it (the owner, 2026-09-19) and says so in
+        `refusal`.
+
+        THE RULE (the owner's D15, 2026-11-22): today is the next day not done, never
+        the calendar cycle. A day is closed by its day outcome — complete is `done`,
+        anything else (sets missing, skipped, swept unclosed) is `short`, and a closed
+        day is never offered again. The workout days are done once each per pass; when
+        all are closed the next pass begins. A missed date does not move today: the
+        workout waits. Rest days are kept — after a closed day, the rest days that
+        follow it in the routine are taken one calendar day each — and never owed.
+        A programme past its `end_date`, or whose every day is done when it does not
+        repeat (its days cover its dates, or it has no end date and more than seven
+        days), is `finished`.
+
+        200::
+
+            {"routine_id": 12, "date": "2026-11-22",        the server's day
+             "today": {"day": 3, "state": "today"} | null,
+                      state: today | done | short | rest | not_started
+                      (`done`/`short`: closed today; null: finished, nothing closed
+                      today, or a routine with no exercises)
+             "next_day": 3 | null,                the next day not done; null when
+                                                  finished
+             "week": 4,                           from `start_date`, 1..weeks_total
+             "weeks_total": 9 | null,             from the dates; a bought programme's
+                                                  own weeks; null for a cycle with no end
+             "finished": false,
+             "starts_on": "2026-12-01" | null,    only before the programme starts
+             "days_in_cycle": 63,                 `Routine.days`
+             "slots_week": 1,                     which of the routine's own weeks the
+                                                  slots are (the whole routine when it
+                                                  has 7 days or fewer; a bought
+                                                  programme's sessions a week; else 7)
+             "slots": [{"day": 1, "name": "Push" | null, "muscles": ["Chest"],
+                        "state": "done",
+                        "date": "2026-11-17" | null,    only when the routine's days
+                                                        ARE its dates
+                        "closed_on": "2026-11-17" | null,
+                        "counts": {"exercises": 4, "sets": 14,
+                                   "estimated_minutes": 28}}, ...],
+             "refusal": null | "coaching_frozen" | "coaching_unpaid" |
+                        "coaching_ended" | "product_refunded"}
+
+        Slot `state`: `done`, `short` (closed with something missing), `today`, `upcoming`,
+        `rest` (no exercises that day), `missed` (only in a FINISHED programme: a day it
+        ended without). `muscles` are stored keys, never labels. `estimated_minutes` is
+        the routine's own formula on that day's rows (4 s a rep, the rests between sets,
+        2 min between exercises) — the number home's hero answers for the same day
+        (BACKEND_BUGS B-196). `refusal` is the 403 `code` a training write on this
+        routine would answer now (`users/coaching.py training_refusal`).
+
+        Codes: 404 `not_found`.
+        """
+        from .permissions import readable_routines
+        from .schedule import build
+        from users.coaching import training_refusal
+
+        routine = readable_routines(request.user).filter(pk=pk).first()
+        if routine is None or not routine.assigned_to.filter(pk=request.user.pk).exists():
+            raise NotFound(_('Routine not found.'), code='not_found')
+        body = build(request.user, routine, timezone.localdate()).as_dict()
+        body['refusal'] = training_refusal(request.user, routine)
+        return Response(body)
+
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def copy_week(self, request, pk=None):
         """POST /api/routine/routines/{id}/copy_week/ — one week of this routine written

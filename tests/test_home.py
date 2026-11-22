@@ -36,6 +36,13 @@ JSON = "application/json"
 #: (`routine/recent.py STRENGTH_LIMIT`).
 QUERY_CEILING = 48
 
+#: The minutes of `_program`'s day (one exercise, 3 sets of 10, the model's 60 s rest):
+#: 3 x 10 x 4 s + 2 x 60 s = 240 s. Deliberate contract change (Road to 10 S0.2,
+#: BACKEND_BUGS B-196, 2026-11-22): the hero's `estimated_minutes` is the DAY's, by the
+#: routine's own per-set formula (`routine/schedule.py day_minutes`), the number Train and
+#: the Day screen show; it was the whole routine's `estimated_duration` (60).
+ONE_DAY_MINUTES = 4
+
 #: The first-day list: the sections only a client with NO coach receives.
 #: Deliberate contract change (the owner, 2026-09-28, BACKEND_BUGS B-182):
 #: `ready_programs` left this list — a coached client is also shown the programmes on
@@ -367,7 +374,8 @@ def test_a_full_client_gets_every_section_in_a_sensible_order(make_user, api,
     assert (hero["routine_id"], hero["week"], hero["day"], hero["days_in_cycle"]) == \
         (routine.pk, 1, 1, 1)
     assert hero["muscles"] == ["Triceps"]
-    assert hero["counts"] == {"exercises": 1, "sets": 3, "estimated_minutes": 60}
+    assert hero["counts"] == {"exercises": 1, "sets": 3,
+                              "estimated_minutes": ONE_DAY_MINUTES}
     assert hero["sets"] == {"prescribed": 3, "logged": 3, "unlogged": 0}
     assert (hero["outcome"]["complete"], hero["outcome"]["missed_sets"]) == (True, 0)
     assert hero["cta"] == {"state": "continue"}
@@ -408,10 +416,20 @@ def test_a_rest_day_says_so_and_cannot_be_started(make_user, api):
     """The routine's cycle lands on a day the coach prescribed nothing for."""
     from routine.models import Routine
 
+    from routine.models import DayOutcome
+
     trainer, client, routine, rows = _program(make_user, "rest", days=2)
     # Day 1 has the exercises; start the routine yesterday so today is day 2.
     Routine.objects.filter(pk=routine.pk).update(
         start_date=timezone.localdate() - timedelta(days=1))
+    # Deliberate contract change (the owner's D15, 2026-11-22, BACKEND_BUGS B-197):
+    # today is the next day not done, never the calendar cycle, so a day 1 nobody trained
+    # yesterday is still today's workout. Day 2 is the rest day once day 1 is DONE, as
+    # here: the rest that follows a closed day is kept (`routine/schedule.py`).
+    DayOutcome.objects.create(user=client, routine=routine, day=1,
+                              date=timezone.localdate() - timedelta(days=1),
+                              via="completed", complete=True, planned_sets=3,
+                              logged_sets=3)
 
     hero = _data(_home(api, client), "workout_hero")
     assert (hero["day"], hero["cta"]) == (2, {"state": "rest"})

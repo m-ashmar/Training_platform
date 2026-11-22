@@ -174,9 +174,18 @@ def test_a_closed_day_is_done_on_the_timeline(make_user, api,
 def test_a_rest_day_has_no_workout_on_the_timeline(make_user, api):
     from routine.models import Routine
 
+    from routine.models import DayOutcome
+
     trainer, client, routine, rows = _program(make_user, "tl_rest", days=2)
     Routine.objects.filter(pk=routine.pk).update(
         start_date=timezone.localdate() - timedelta(days=1))     # today is day 2: rest
+    # Deliberate contract change (the owner's D15, 2026-11-22, BACKEND_BUGS B-197): today
+    # is the next day not done, not the calendar cycle, so day 2 is today's rest day only
+    # once day 1 was done — as here, yesterday (`routine/schedule.py`).
+    DayOutcome.objects.create(user=client, routine=routine, day=1,
+                              date=timezone.localdate() - timedelta(days=1),
+                              via="completed", complete=True, planned_sets=3,
+                              logged_sets=3)
     _subscribe(client, "tl_rest")
     _meals(client)
 

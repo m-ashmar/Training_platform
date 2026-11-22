@@ -114,22 +114,22 @@ def pick_current_routine(rows, on_date):
 
 
 def day_of(routine, on_date) -> int:
-    """Which day of the routine `on_date` is: the cycle from the routine's start.
+    """The day of the routine's CALENDAR cycle `on_date` falls on (from `start_date`).
 
-    A routine is N days repeated (`Routine.days`), and nothing in the schema says which
-    calendar day is which routine day, so the count from `start_date` is the rule — the
-    only one that needs no extra column and no guess about the person's week.
+    Not "which day is today": since the owner's D15 (2026-11-22, BACKEND_BUGS B-197) that
+    is `routine/schedule.py` — the next day not done — and the hero reads it there. This
+    is left for the two calendar questions only: which DATES of a week the week strip
+    draws as planned, and how many days a week the routine plans (`week_stats` and the
+    weekly workout goal, the owner's decision 5 of 2026-09-24).
     """
     days = max(routine.days or 1, 1)
     start = routine.start_date or on_date
     return (on_date - start).days % days + 1
 
 
-def week_of(routine, on_date) -> int:
-    """Which week of the program this is, counting from its start date. At least 1."""
-    if routine.start_date is None or on_date < routine.start_date:
-        return 1
-    return (on_date - routine.start_date).days // 7 + 1
+# `week_of` lived here: the week from `start_date` with no upper bound (week 12 of a
+# nine-week programme, BACKEND_BUGS B-197). The week is the schedule's now, bounded by the
+# programme's `weeks_total` (`routine/schedule.py`), and the hero reads it there.
 
 
 def refusal_for(person, routine):
@@ -219,26 +219,21 @@ def workout_hero(person, routine, week, *, on_date, refusal) -> dict | None:
     2026-09-19: never deleted, readable, cannot be used): `cta.state` is `refused` and
     `cta.refusal` carries the code the training writes answer.
     """
-    from routine.models import DayOutcome, RoutineExercise, WorkoutSession
+    from routine.models import DayOutcome, WorkoutSession
     from routine.outcomes import day_counts, day_plan
+    from routine.schedule import build as build_schedule
 
     if routine is None:
         return None
 
-    day = day_of(routine, on_date)
+    # Which day today is, the week and the day's numbers: the schedule's, the ONE rule
+    # (the owner's D15, BACKEND_BUGS B-197) `GET routines/{id}/schedule/` answers too.
+    schedule = build_schedule(person, routine, on_date)
+    day = schedule.day
     plan = day_plan(routine, day)
     counts = day_counts(routine, person, day, on_date, plan=plan) if plan else None
-
-    muscles = []
-    if plan:
-        for key in (RoutineExercise.objects
-                    .filter(routine=routine, day=day)
-                    .order_by('order', 'id')
-                    .values_list('exercise__target_muscle', flat=True)):
-            # The stored key, not its label: the app writes the Arabic. Order kept,
-            # duplicates dropped.
-            if key and key not in muscles:
-                muscles.append(key)
+    # The stored keys, not labels (the app writes the Arabic), in order, no duplicates.
+    muscles = schedule.muscles(day)
 
     closed = (DayOutcome.objects
               .filter(user=person, routine=routine, day=day, date=on_date)
@@ -256,19 +251,22 @@ def workout_hero(person, routine, week, *, on_date, refusal) -> dict | None:
         'routine_id': routine.pk,
         'routine_name': _localised(routine, 'name'),
         'date': on_date.isoformat(),
-        'week': week_of(routine, on_date),
+        'week': schedule.week,
+        'weeks_total': schedule.weeks_total,
+        'finished': schedule.finished,
         'day': day,
         'days_in_cycle': max(routine.days or 1, 1),
         'muscles': muscles,
         'counts': {
             'exercises': len(plan),
             'sets': counts['prescribed'] if counts else 0,
-            # Per routine, not per day: `Routine.estimated_duration` is the only
-            # duration the schema holds (see the report — the owner owes a per-day one).
-            'estimated_minutes': routine.estimated_duration,
+            # THE DAY's minutes, the schedule's number (BACKEND_BUGS B-196): it was the
+            # whole routine's `estimated_duration` on a card that describes one day.
+            'estimated_minutes': schedule.counts(day)['estimated_minutes'],
         },
         'week_strip': _week_strip(person, routine, on_date, week),
-        'cta': _cta(refusal, plan, counts, session, on_date, routine, person=person),
+        'cta': _cta(refusal, plan, counts, session, on_date, routine, person=person,
+                    finished=schedule.finished),
     }
     if counts is not None:
         data['sets'] = {'prescribed': counts['prescribed'], 'logged': counts['logged'],
@@ -346,8 +344,14 @@ def _week_strip(person, routine, on_date, week) -> list:
     return strip
 
 
-def _cta(refusal, plan, counts, session, on_date, routine, *, person=None) -> dict:
-    """What the one button on the hero does: `start`, `continue`, `rest` or `refused`.
+def _cta(refusal, plan, counts, session, on_date, routine, *, person=None,
+         finished=False) -> dict:
+    """What the one button on the hero does: `start`, `continue`, `rest`, `not_started`,
+    `finished` or `refused`.
+
+    `finished` (the owner's D15, 2026-11-22): the programme is past its dates, or every
+    day of a programme that does not repeat is done (`routine/schedule.py`). Nothing is
+    started on it; an open session on it is still `continue`.
 
     An open session the server still lets this person finish is `continue`, even when
     the coaching has since frozen or ended. The set logs and the finishing PATCH of a
@@ -364,6 +368,10 @@ def _cta(refusal, plan, counts, session, on_date, routine, *, person=None) -> di
         # Readable, never startable (the owner, 2026-09-19). The code is the same 403
         # `code` every training write on this routine answers.
         return {'state': 'refused', 'refusal': refusal}
+    if finished:
+        if session is not None:
+            return {'state': 'continue', 'session_id': session['id']}
+        return {'state': 'finished'}
     if routine.start_date and on_date < routine.start_date:
         return {'state': 'not_started', 'starts_on': routine.start_date.isoformat()}
     if not plan:
@@ -654,8 +662,8 @@ def timeline_workout(person, routine, hero, *, on_date, clock) -> dict | None:
     None when today asks for no training.
 
     Built from the hero that was just built (`workout_hero`) — the same routine, the
-    same day of the cycle (`day_of`: `Routine.start_date` over `Routine.days`), the same
-    counts and the same refusal — so the timeline and the hero cannot describe two
+    same day (the schedule's today, `routine/schedule.py`), the same counts and minutes
+    and the same refusal — so the timeline and the hero cannot describe two
     different days. None without a hero, on a rest day (the day prescribes nothing),
     and outside the routine's own window (`_in_program`: before it starts or after it
     ends there is no plan, as the week strip says).

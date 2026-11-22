@@ -155,18 +155,25 @@ class HomeView(APIView):
     ``workout_hero`` — today's training. Omitted when no active routine is assigned::
 
         {"routine_id": 12, "routine_name": "Upper body", "date": "2026-09-20",
-         "week": 3,                           week of the programme, from its start
-         "day": 5, "days_in_cycle": 6,        "day 5 of 6"
+         "week": 3,                           week of the programme from its start,
+                                              never past `weeks_total`
+         "weeks_total": 9 | null,             null for a cycle with no end
+         "finished": false,                   past its dates, or every day of a
+                                              programme that does not repeat is done
+         "day": 5, "days_in_cycle": 6,        "day 5 of 6": TODAY's day by the
+                                              schedule's rule (the next day not done)
          "muscles": ["Upper Chest", "Lateral Deltoid", "Triceps"],
                                               stored keys (`Exercise.target_muscle`),
                                               never labels: the app writes the words
-         "counts": {"exercises": 6, "sets": 21, "estimated_minutes": 60},
-                                              `estimated_minutes` is the ROUTINE's
-                                              estimate, the only one the schema holds:
-                                              there is no per-day duration column yet.
-                                              It is NULL when the coach set none (the
-                                              column is optional) — hide the stat then;
-                                              it is never 0 for "unknown".
+         "counts": {"exercises": 6, "sets": 21, "estimated_minutes": 28},
+                                              `estimated_minutes` is THAT DAY's, the
+                                              routine's own formula on the day's rows
+                                              (BACKEND_BUGS B-196) — the same number
+                                              `routines/{id}/schedule/` answers for the
+                                              slot; 0 on a rest day. Never null now:
+                                              builds written before 2026-11-22 were told
+                                              it is NULL when the coach set none (B-044)
+                                              and hide the stat on null, which stays safe
          "sets": {"prescribed": 21, "logged": 18, "unlogged": 3},   not on a rest day
          "exercises": {"planned": 6, "full": 3, "partial": 1,
                        "untouched": 2, "skipped": 0},               not on a rest day
@@ -178,7 +185,7 @@ class HomeView(APIView):
                         Saturday first],
                                               state: done | today | rest | planned
          "cta": {"state": "start"}}           start | continue | rest | not_started |
-                                              refused
+                                              finished | refused
 
         `cta.state` is the one button. `continue` carries `session_id` when a session
         is open; `not_started` carries `starts_on`; `refused` carries `refusal`, one of
@@ -189,8 +196,16 @@ class HomeView(APIView):
         section stays and only the button changes. One exception, the server's own: a
         session opened while the coaching was paid may still be logged and finished
         after it freezes (those writes are judged at the session's start), so such a
-        session answers `continue` with its `session_id`, not `refused`. Which day of the routine today is,
-        is counted from `Routine.start_date` over `Routine.days`.
+        session answers `continue` with its `session_id`, not `refused`. `finished`
+        (additive, 2026-11-22): the programme is over — nothing to start; write or
+        choose the next one.
+
+        Which day today is, the week and the day's minutes are the schedule's
+        (`GET /api/routine/routines/{id}/schedule/`, `routine/schedule.py`), ONE rule
+        for every screen — the owner's D15 (2026-11-22, BACKEND_BUGS B-197): today is
+        the next day not done, never the calendar cycle; rest days are kept, a missed
+        workout waits. The `week_strip` stays a calendar: which DATES of this week
+        were done, and which the routine's cycle plans.
 
     ``find_trainer_hero`` — the first day. Only for a client with no coach, only once
     they have chosen a goal, and only when there is no `workout_hero` to lead — a

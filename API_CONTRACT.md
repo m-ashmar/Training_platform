@@ -3418,6 +3418,7 @@ changed meaning, no code renamed. The docstrings named are the contract.
 | `POST` | `/api/routine/routines/{id}/assign_to_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/copy/` | auth (the routine's trainer) | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/copy_week/` | auth (the routine's trainer) | `RoutineViewSet` |
+| `GET` | `/api/routine/routines/{id}/schedule/` | auth (the client it is assigned to) | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/unassign_from_client/` | IsTrainerOrAdminForAssignment | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{id}/update_progress/` | auth | `RoutineViewSet` |
 | `POST` | `/api/routine/routines/{pk}/assign_to_client/` | IsTrainerOrAdmin | `RoutineViewSet` |
