@@ -578,10 +578,11 @@ def end_coaching(relation, *, reason):
     Event = CoachingEndedEvent if reason == 'unpaid' else CoachingFinishedEvent
     events = [
         Event(actor_id=trainer.pk, recipient_id=client_user.pk,
-              other_name=trainer.full_name or trainer.username, relation_id=relation_id),
+              other_name=trainer.full_name or trainer.username, relation_id=relation_id,
+              client_id=client_user.pk, trainer_id=trainer.pk),
         Event(actor_id=client_user.pk, recipient_id=trainer.pk,
               other_name=client_user.full_name or client_user.username,
-              relation_id=relation_id),
+              relation_id=relation_id, client_id=client_user.pk, trainer_id=trainer.pk),
     ]
     transaction.on_commit(lambda: [emit_event(e) for e in events])
 

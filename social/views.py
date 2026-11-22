@@ -419,6 +419,10 @@ class PostViewSet(viewsets.ModelViewSet):
     """
     API endpoints for social posts
 
+    Any member, a TRAINER included (Road to 10 S3.8, the owner's D11): no action here
+    refuses by role, and a trainer reads, posts, edits, deletes and likes as a client
+    does.
+
     What a caller may read is `visible_posts_for` — which, since the owner's decision 8
     (2026-09-24), leaves out every post of a suspended or erased account.
     `PATCH`/`DELETE` of someone else's post is 403 `not_owner` (was
@@ -675,6 +679,9 @@ class CommentViewSet(viewsets.ModelViewSet):
     """
     API endpoints for post comments
 
+    Any member, a TRAINER included (Road to 10 S3.8, the owner's D11): no action here
+    refuses by role.
+
     A comment is listed only when its post is one the caller may read
     (`visible_posts_for`), it is not hidden, its author is not blocked either way, and
     its author's account is publicly visible — a suspended or erased account's comments
@@ -858,7 +865,12 @@ class ChallengeViewSet(viewsets.ModelViewSet):
     """
     API endpoints for community challenges
 
-    Auth required. Nothing differs by build. A challenge row (list, detail, create,
+    Auth required. Nothing differs by build. Any member, a TRAINER included (Road to 10
+    S3.8, the owner's D11): a trainer creates, edits, closes, joins, logs and leaves a
+    challenge and reads its board as a client does; no action refuses by role. One
+    member hosts at most `CHALLENGE_HOST_LIMIT` (3) at once: the next create answers 409
+    `challenge_host_limit` with `limit` and `hosting` (Road to 10 S3.4, `create`). A
+    challenge row (list, detail, create,
     update) is `ChallengeSerializer`; since 2026-09-24 it also carries `metric` —
     `manual` | `volume_kg` | `sets` | `workouts` | `training_days` | `exercise_reps` |
     `streak_days` (the last two since B-161, below), writable, default `manual` — and
@@ -1125,6 +1137,42 @@ class ChallengeViewSet(viewsets.ModelViewSet):
         from .challenge_cache import bump
 
         bump(version_key)
+
+    def create(self, request, *args, **kwargs):
+        """`POST challenges/` — any member creates one (the owner's D11), up to
+        `settings.CHALLENGE_HOST_LIMIT` (3, the owner, 2026-11-22) hosted at once: created
+        by them and not over, upcoming or running (`Challenge.hosted_by`; one an
+        operator hid does not count). Past it: 409 `{"error", "code":
+        "challenge_host_limit", "limit", "hosting"}`, checked before the body, so
+        nothing is written — close one (`PATCH {"status": "completed"}`) or wait until
+        one ends. Staff are not limited. Nothing differs by build (Road to 10 S3.4).
+
+        The count and the save run under the creator's row lock, so two creates sent
+        together cannot both take the last place."""
+        with transaction.atomic():
+            refusal = self._host_limit_refusal(request.user)
+            if refusal is not None:
+                return refusal
+            return super().create(request, *args, **kwargs)
+
+    @staticmethod
+    def _host_limit_refusal(user):
+        from django.conf import settings as django_settings
+        from users.models import CustomUser
+
+        limit = django_settings.CHALLENGE_HOST_LIMIT
+        if limit <= 0 or user.is_staff or getattr(user, 'is_admin', False):
+            return None
+        list(CustomUser.objects.select_for_update().filter(pk=user.pk)
+             .values_list('pk', flat=True))
+        hosting = Challenge.hosted_by(user).count()
+        if hosting < limit:
+            return None
+        return Response(
+            {'error': _('You are already hosting %(limit)d challenges, the most at once. '
+                        'Close one or wait until one ends.') % {'limit': limit},
+             'code': 'challenge_host_limit', 'limit': limit, 'hosting': hosting},
+            status=status.HTTP_409_CONFLICT)
 
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)

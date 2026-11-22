@@ -6080,3 +6080,39 @@ msgstr "اختر كلمة مرور مختلفة عن كلمة مرورك الح�
 #: users/password_views.py
 msgid "Your password has been changed. Other devices have been signed out."
 msgstr "تم تغيير كلمة المرور. تم تسجيل الخروج من الأجهزة الأخرى."
+
+#. Road to 10 S3.5: undoing a meal that is not the caller's (service guard).
+#: diet/trainer_services.py
+msgid "You can only undo your own meals"
+msgstr "يمكنك التراجع عن وجباتك فقط"
+
+#. `undo_window_closed` (Road to 10 S3.5): the meal was confirmed on an earlier day.
+#: diet/trainer_services.py
+msgid "A meal can be undone only on the day it was confirmed."
+msgstr "يمكن التراجع عن الوجبة في يوم تأكيدها فقط."
+
+#. `clients_only` on the meal undo route (Road to 10 S3.5).
+#: diet/views.py
+msgid "Only clients can undo meals"
+msgstr "التراجع عن الوجبات متاح للعملاء فقط"
+
+#. Road to 10 S3.5: the meal confirmed today was reopened.
+#: diet/views.py
+msgid "Meal reopened"
+msgstr "أُعيد فتح الوجبة"
+
+#. Road to 10 S3.5: an undo of a meal with nothing confirmed (a second undo).
+#: diet/views.py
+msgid "Nothing to undo"
+msgstr "لا يوجد ما يمكن التراجع عنه"
+
+#. `challenge_host_limit` (Road to 10 S3.4): the member already hosts the most
+#. challenges at once (`CHALLENGE_HOST_LIMIT`, 3).
+#: social/views.py
+#, python-format
+msgid ""
+"You are already hosting %(limit)d challenges, the most at once. Close one or "
+"wait until one ends."
+msgstr ""
+"أنت تستضيف %(limit)d تحديات الآن، وهذا الحد الأقصى. أغلق أحدها أو انتظر حتى "
+"ينتهي أحدها."

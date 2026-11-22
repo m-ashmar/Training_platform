@@ -174,7 +174,7 @@ def test_b161_a_missed_day_breaks_the_streak_and_the_hourly_run_notices(make_use
 
 
 def test_b161_the_exercise_name_is_read_with_the_row_and_its_loss_locks_nothing(
-        make_user, api):
+        make_user, api, settings):
     """`exercise_name` costs no query per row of the list, and an exercise deleted
     later (SET_NULL) leaves the challenge editable and its standing as it stood."""
     from cachalot.api import cachalot_disabled
@@ -182,6 +182,12 @@ def test_b161_the_exercise_name_is_read_with_the_row_and_its_loss_locks_nothing(
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
+    # A deliberate contract change (Road to 10 S3.4, the owner's 3 of 2026-11-22): one
+    # member hosts at most 3 challenges at once. This test needs FOUR rows from one
+    # creator to compare a list of one with a list of four, which is about the query
+    # count, not about hosting; the limit has its own tests
+    # (tests/test_road10_s34_starter_challenge.py).
+    settings.CHALLENGE_HOST_LIMIT = 0
     trainer = make_user("b161n_t", user_type="trainer", trainer_is_verified=True)
     client = make_user("b161n_c")
     first = _global_exercise("b161 dip")

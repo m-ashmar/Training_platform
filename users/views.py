@@ -841,10 +841,11 @@ class AssignClientView(APIView):
             # On commit, like the client-side path beside it: a notification queued
             # inside an open transaction can be delivered before the row exists, or
             # after a rollback for a request that was never saved.
-            _actor, _recipient = request.user.id, client.id
+            _actor, _recipient, _request = request.user.id, client.id, relation.pk
             _name = getattr(request.user, 'full_name', None) or request.user.username
             transaction.on_commit(lambda: emit_event(TrainerAssignmentRequestEvent(
-                actor_id=_actor, recipient_id=_recipient, trainer_name=_name)))
+                actor_id=_actor, recipient_id=_recipient, trainer_name=_name,
+                request_id=_request)))
             logger.info(f"Trainer {request.user.id} requested assignment of client {client.id}")
             
             # Invalidate client cache
@@ -1743,6 +1744,7 @@ class ClientRequestTrainerView(APIView):
                 actor_id=request.user.id,
                 recipient_id=trainer.id,
                 client_name=request.user.full_name or request.user.username,
+                request_id=relation.pk,
             )))
             
             logger.info(f"Client {request.user.id} requested trainer {trainer.id}")

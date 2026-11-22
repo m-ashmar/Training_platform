@@ -643,6 +643,16 @@ class Challenge(models.Model):
         return (~models.Q(status__in=cls.TERMINAL_STATUSES)
                 & models.Q(start_date__lte=now, end_date__gte=now))
 
+    @classmethod
+    def hosted_by(cls, user, now=None):
+        """The challenges `user` HOSTS now (Road to 10 S3.4): created by them and not over
+        — upcoming or running, not closed (completed / cancelled) and not past its end.
+        A challenge an operator hid is not counted: its creator can neither see nor
+        close it, so it must not hold one of their places."""
+        now = now or timezone.now()
+        return cls.objects.filter(creator=user, is_hidden=False).filter(
+            ~models.Q(status__in=cls.TERMINAL_STATUSES), end_date__gte=now)
+
 
 class ChallengeParticipation(models.Model):
     """

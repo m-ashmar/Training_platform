@@ -418,6 +418,12 @@ PAYMENT_POLL_BATCH = 100
 # poll_expired_checkouts): the ShamCash adapter's own lookback, since nothing older
 # could be found on the merchant account anyway.
 PAYMENT_LATE_MONEY_WINDOW_HOURS = 72
+# How many challenges one member may HOST at once (Road to 10 S3.4; the owner set 3 on
+# 2026-11-22): created and not over (upcoming or running). The next create answers 409
+# `challenge_host_limit` with the limit. Staff are not limited (they run the platform's
+# own). 0 turns the limit off. Any member may still create one (the owner's D11).
+CHALLENGE_HOST_LIMIT = get_int_env("CHALLENGE_HOST_LIMIT", 3)
+
 # Within how many hours a person confirms a transfer on a `reviewed` gateway (the
 # merchant account id is set and no API token: nothing reads the account, an operator
 # attaches the transfer in the console). `GET /api/subscription/v1/gateways/` says it

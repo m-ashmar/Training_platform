@@ -3264,6 +3264,90 @@ class MealCompletionView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+class MealUndoView(APIView):
+    """`POST v1/client/meals/<meal_id>/undo/` — reopen a meal the client confirmed TODAY
+    (Road to 10 S3.5, the owner's D11). No body.
+
+    Takes back everything the confirmation wrote: every ticked component of the meal is
+    un-ticked (and the grams the client said they ate are forgotten), the meal is not
+    completed, and the day's totals are recomputed, so the progress reads, home's
+    «سعرات اليوم» card and day rail (its cached page is dropped), the trainer's
+    adherence week, the activity log and the meal-count achievement progress all follow.
+    A rating stays. A badge already awarded stays awarded.
+
+    "Today" is the server's calendar day (`Asia/Damascus`), the calendar of every meal
+    date. The confirmation's day is the day its ticks were made; a meal ticked across two
+    days counts from the earlier one.
+
+    200 `{message, meal_id, reopened, components_reopened, meal_is_completed: false,
+    progress}`. `reopened` is false when nothing was confirmed: undoing twice answers 200
+    again and changes nothing. `progress` is the meal's day after the undo: `{date,
+    meals_completed, total_meals, completion_percentage, calories_consumed,
+    target_calories, calories_percentage, protein_consumed, target_protein,
+    carbs_consumed, target_carbs, fat_consumed, target_fat, is_day_completed}`.
+
+    Refusals, each with its `code`:
+
+    - 403 `clients_only` — the caller is not a client.
+    - 403 `no_entitlement` / `feature_not_in_plan` — no diet access (a frozen
+      subscription is refused, as the confirm is: undoing is a use, not a read).
+    - 404 `not_found` — no such meal, or not this client's.
+    - 409 `plan_superseded` — the meal is on a plan that has been replaced; refresh.
+    - 409 `undo_window_closed` — the meal was confirmed on an earlier day; with
+      `confirmed_on` (YYYY-MM-DD, or null when the confirmation carries no time).
+    - 500 `server_error`.
+
+    Nothing differs by build.
+    """
+    permission_classes = [IsAuthenticated, HasDietAccess]
+
+    def post(self, request, meal_id):
+        from .trainer_services import UndoWindowClosed
+
+        try:
+            if not request.user.is_client:
+                return Response(
+                    {"error": _("Only clients can undo meals"), "code": "clients_only"},
+                    status=status.HTTP_403_FORBIDDEN)
+            meal = get_object_or_404(
+                Meal.objects.filter(diet_plan__user=request.user).select_related('diet_plan'),
+                id=meal_id)
+            if not meal.diet_plan.is_active:
+                return Response(
+                    {"error": _("This plan has been replaced. Refresh to see your "
+                                "current plan."),
+                     "code": "plan_superseded"},
+                    status=status.HTTP_409_CONFLICT)
+            try:
+                result = ClientProgressService(request.user).undo_meal(meal)
+            except UndoWindowClosed as refusal:
+                return Response(
+                    {"error": str(refusal.messages[0]), "code": "undo_window_closed",
+                     "confirmed_on": refusal.confirmed_on},
+                    status=status.HTTP_409_CONFLICT)
+            return Response({
+                "message": (_("Meal reopened") if result['reopened']
+                            else _("Nothing to undo")),
+                "meal_id": meal.id,
+                "reopened": result['reopened'],
+                "components_reopened": result['components_reopened'],
+                "meal_is_completed": False,
+                "progress": result['progress'],
+            })
+        except PASSTHROUGH_EXCEPTIONS:
+            raise
+        except DjangoValidationError as e:
+            refusal = service_refusal(e)
+            if refusal is not None:
+                return refusal
+            raise
+        except Exception:
+            logger.exception("meal undo failed")
+            return Response(
+                {"error": _('Request could not be completed.'), "code": "server_error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 # ============================================================================
 # CLIENT PROGRESS TRACKING ENDPOINTS
 # ============================================================================

@@ -78,6 +78,8 @@ urlpatterns = [
     path('v1/client/meals/interact/', views.ClientMealInteractionView.as_view(), name='v1_client_meal_interaction'),
     path('v1/client/meals/<int:meal_id>/', views.ClientMealDetailsView.as_view(), name='v1_client_meal_details'),
     path('v1/client/meals/<int:meal_id>/complete/', views.MealCompletionView.as_view(), name='v1_client_meal_completion'),
+    # Road to 10 S3.5 (the owner's D11): a meal confirmed today can be undone the same day.
+    path('v1/client/meals/<int:meal_id>/undo/', views.MealUndoView.as_view(), name='v1_client_meal_undo'),
 
     # --- Nutrition detail ---
     path('v1/nutrition/plan/<int:plan_id>/', views.DietPlanNutritionView.as_view(), name='v1_diet_plan_nutrition'),

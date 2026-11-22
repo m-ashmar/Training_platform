@@ -26,6 +26,9 @@ class TrainerAssignmentRequestEvent(BaseDomainEvent):
     actor_id: int = 0
     recipient_id: int = 0
     trainer_name: str = ""
+    #: The invitation's id (the relation), what `client/respond-to-invite/` takes as
+    #: `request_id` (Road to 10 S3.1). 0 on an event queued before the field existed.
+    request_id: int = 0
 
 
 @dataclass
@@ -50,6 +53,9 @@ class ClientRequestReceivedEvent(BaseDomainEvent):
     actor_id: int = 0
     recipient_id: int = 0
     client_name: str = ""
+    #: The request's id (the relation), what `trainer/respond-to-request/` takes as
+    #: `request_id` (Road to 10 S3.1). 0 on an event queued before the field existed.
+    request_id: int = 0
 
 
 @dataclass
@@ -160,6 +166,10 @@ class CoachingEndedEvent(BaseDomainEvent):
     recipient_id: int = 0
     other_name: str = ""
     relation_id: int = 0
+    #: Both sides by role (Road to 10 S3.1), so each page opens without guessing which
+    #: of the two the recipient is. 0 on an event queued before the fields existed.
+    client_id: int = 0
+    trainer_id: int = 0
 
 
 @dataclass
@@ -174,3 +184,6 @@ class CoachingFinishedEvent(BaseDomainEvent):
     recipient_id: int = 0
     other_name: str = ""
     relation_id: int = 0
+    #: As `CoachingEndedEvent` (Road to 10 S3.1).
+    client_id: int = 0
+    trainer_id: int = 0

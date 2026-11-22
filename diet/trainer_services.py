@@ -88,6 +88,36 @@ class MealRefused(ValidationError):
         self.extra = extra
 
 
+class UndoWindowClosed(ValidationError):
+    """A meal confirmed on an earlier day cannot be undone (Road to 10 S3.5).
+    `confirmed_on` is that day, or None when the confirmation carries no time."""
+
+    def __init__(self, confirmed_on):
+        super().__init__(_("A meal can be undone only on the day it was confirmed."),
+                         code="undo_window_closed")
+        self.confirmed_on = confirmed_on
+
+
+def progress_payload(row) -> Dict[str, Any]:
+    """One day's figures, from a `DailyProgress` row or `DailyProgress.figures_for`."""
+    return {
+        'date': row.date,
+        'meals_completed': row.meals_completed,
+        'total_meals': row.total_meals,
+        'completion_percentage': row.completion_percentage,
+        'calories_consumed': row.calories_consumed,
+        'target_calories': row.target_calories,
+        'calories_percentage': row.calories_percentage,
+        'protein_consumed': row.protein_consumed,
+        'target_protein': row.target_protein,
+        'carbs_consumed': row.carbs_consumed,
+        'target_carbs': row.target_carbs,
+        'fat_consumed': row.fat_consumed,
+        'target_fat': row.target_fat,
+        'is_day_completed': row.is_day_completed,
+    }
+
+
 class TrainerDietPlanService:
     """
     Service for trainers to create and manage diet plans for their clients.
@@ -1350,6 +1380,91 @@ class ClientProgressService:
             'meal_completion_percentage': 100.0
         }
     
+    @staticmethod
+    def confirmed_on(meal: Meal, ticked) -> Optional[date]:
+        """The server-calendar day this meal's confirmation was made, or None if unknown.
+
+        A confirmation is the components' ticks (`complete_entire_meal` stamps each one,
+        `MealComponent.complete` stamps its own). A meal ticked across two days was
+        confirmed on the EARLIER one, so it is judged by that day. A tick with no
+        `completed_at` (written before the column was kept, or by hand) has no day we
+        can stand behind: None, and the undo refuses it. A meal flagged complete with no
+        component ticked (a meal with no components) is judged by its own date.
+        """
+        if not ticked:
+            return meal.date
+        stamps = [component.completed_at for component in ticked]
+        if any(stamp is None for stamp in stamps):
+            return None
+        return min(timezone.localtime(stamp).date() for stamp in stamps)
+
+    def undo_meal(self, meal: Meal) -> Dict[str, Any]:
+        """Reopen a meal the client confirmed today (Road to 10 S3.5, the owner's D11).
+
+        Everything the confirmation wrote is taken back, so every figure derived from it
+        follows: the components are un-ticked (with the amount the client said they ate),
+        the meal is not completed, the day's `DailyProgress` is recomputed and saved (its
+        save retires home's cached page, `training_platform/signals.py`), the funnel's
+        COMPLETED `MealEvent` goes, and so do the analytics `meal_completed` row
+        (achievement `meal_count` and the activity log read it) and the AI coach's
+        `meal_completed` behaviour rows for those components. The trainer's adherence
+        week and the client's progress reads compute from the components, so they follow
+        on the next read. A rating (`is_liked`, notes) is not part of a confirmation and
+        stays. An achievement already awarded stays awarded; its progress counts again
+        from the rows.
+
+        "Today" is the SERVER's calendar day (`Asia/Damascus`), the calendar every meal
+        date and every home day uses. Raises `UndoWindowClosed` when the confirmation
+        was made on an earlier day (`confirmed_on`). Nothing confirmed is not an error:
+        undoing twice answers the same, and changes nothing the second time.
+
+        Returns `{reopened, components_reopened, progress}`; `progress` is the day's
+        figures after the undo (`progress_payload`).
+        """
+        if meal.diet_plan.user_id != self.client.pk:
+            raise ValidationError(_("You can only undo your own meals"),
+                                  code="not_meal_completion_owner")
+        from ai_assistant.models import UserBehaviorEvent
+        from analytics.models import UserActivity
+        from .models import MealEvent
+
+        today = timezone.localdate()
+        with transaction.atomic():
+            # The meal's row lock, the one `update_completion_status` and the analytics
+            # listener take, so a tick landing at the same moment is not half undone.
+            locked = Meal.objects.select_for_update().get(pk=meal.pk)
+            ticked = list(MealComponent.objects.select_for_update()
+                          .filter(meal_id=meal.pk, is_completed=True).order_by('id'))
+            if not ticked and not locked.is_completed:
+                figures = DailyProgress.figures_for(self.client, meal.diet_plan, meal.date)
+                return {'reopened': False, 'components_reopened': 0,
+                        'progress': progress_payload(figures)}
+            day = self.confirmed_on(locked, ticked)
+            if day != today:
+                raise UndoWindowClosed(day)
+
+            ids = [component.pk for component in ticked]
+            MealComponent.objects.filter(pk__in=ids).update(
+                is_completed=False, completed_at=None, actual_quantity_consumed=None)
+            Meal.objects.filter(pk=meal.pk).update(is_completed=False)
+            meal.is_completed = False
+            MealEvent.objects.filter(user=self.client, meal_id=meal.pk,
+                                     kind=MealEvent.COMPLETED).delete()
+            # The meal's `meal_completed` row, by both of the keys the analytics listener
+            # recognises (`analytics/signals.py on_meal_completed`): the meal's id, or an
+            # older per-food row named after any of its components.
+            keys = [f"meal-component-{pk}" for pk in
+                    MealComponent.objects.filter(meal_id=meal.pk).values_list('pk', flat=True)]
+            UserActivity.objects.filter(
+                Q(metadata__meal_id=meal.pk) | Q(session_id__in=keys),
+                user_id=self.client.pk, activity_type='meal_completed').delete()
+            UserBehaviorEvent.objects.filter(
+                user_id=self.client.pk, event_type='meal_completed',
+                event_data__component_id__in=ids).delete()
+            row = self._ensure_daily_progress(meal.diet_plan, meal.date)
+        return {'reopened': True, 'components_reopened': len(ids),
+                'progress': progress_payload(row)}
+
     def _ensure_daily_progress(self, diet_plan: DietPlan, on_date: date) -> DailyProgress:
         """Create the day's `DailyProgress` row if it is missing, then recompute it.
 

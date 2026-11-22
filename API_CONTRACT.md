@@ -194,15 +194,15 @@ so parse ids client-side.
 | `user_followed` | `follower_id` |
 | `achievement_awarded` | `achievement_id` |
 | `challenge_progress` | `challenge_id` |
-| `trainer_assignment_request` | `trainer_id` |
+| `trainer_assignment_request` | `trainer_id`, `request_id` — the invitation; answer it with `POST /api/auth/client/respond-to-invite/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
 | `trainer_unassignment` | `trainer_id` |
-| `client_request_received` | `client_id` |
+| `client_request_received` | `client_id`, `request_id` — to the trainer; answer it with `POST /api/auth/trainer/respond-to-request/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
 | `client_request_approved` | `trainer_id` |
 | `client_request_rejected` | `trainer_id` |
-| `client_request_cancelled` | `client_id` |
-| `client_unassigned_trainer` | `client_id` |
-| `routine_assignment` | `related_object_id`, `related_object_type` |
-| `session_completed` | `related_object_id`, `related_object_type` |
+| `client_request_cancelled` | `client_id` — to the trainer; the request is gone, so there is no request to open |
+| `client_unassigned_trainer` | `client_id` — to the trainer; the client left |
+| `routine_assignment` | `related_object_id`, `related_object_type`, `routine_id` (since Road to 10 S3.1; the same id as `related_object_id`) |
+| `session_completed` | `related_object_id`, `related_object_type`, `session_id`, `client_id`, `routine_id` — sent to the client and to each trainer with an approved relation; the trainer opens the review with `GET /api/routine/workout-sessions/{session_id}/?expand=sets` (the three named ids since Road to 10 S3.1) |
 | `session_reminder` | `reason` (`scheduled` \| `drift`), plus `routine_id`+`day` when scheduled, or `days_since_last_workout` when drift |
 | `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
 | `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
@@ -210,8 +210,8 @@ so parse ids client-side.
 | `coaching_renewed` | `trainer_id` — a new month of coaching was charged from the wallet |
 | `coaching_renewal_soon` | `trainer_id` — the paid month ends in a few days |
 | `coaching_payment_due` | `trainer_id`, `status` (`frozen`) — the month ended unpaid, so the coaching is paused; repeated on each reminder step while it stays paused |
-| `coaching_ended` | `user_id` — the other person. The grace period ran out unpaid; sent to both |
-| `coaching_finished` | `user_id` — the other person. Coaching ended for a reason other than money; sent to both |
+| `coaching_ended` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1; `"0"` on a notice queued before). The grace period ran out unpaid; sent to both |
+| `coaching_finished` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1). Coaching ended for a reason other than money; sent to both |
 | `coaching_fee_held` | `period_id`, `month`, `role` (`client` / `trainer`: the recipient's side), `user_id` — the other person. Month 1 was charged into escrow when the trainer accepted; sent to both. The fact only, no amount, on every build |
 | `coaching_fee_released` | `period_id`, `month`, `role`, `user_id` — a month's fee left escrow for the trainer. Month 1 (the first program arrived): sent to both. A renewal: to the trainer only (the client's notice is `coaching_renewed`). The trainer hears it when their share lands: a share owed for a stale exchange rate is announced when it is paid |
 | `coaching_fee_refunded` | `period_id`, `month`, `role`, `user_id` — a held month went back to the client's wallet (declined, left or ended before the first program); sent to both |
@@ -742,12 +742,27 @@ none it can stand behind.
 `client/progress/`, `client/progress/enhanced/` and `client/progress/weekly/` answer 403
 `clients_only` to a caller who is not a client.
 
+**Undo a confirmed meal, the same day** (Road to 10 S3.5, the owner's D11, 2026-11-22).
+`POST client/meals/{meal_id}/undo/`, no body, reopens a meal confirmed TODAY (the
+server's calendar, `Asia/Damascus`): its ticked components are un-ticked, the meal is not
+completed, and the day's totals, the progress reads, home (its cached page is dropped),
+the trainer's adherence week, the activity log and the meal-count achievement progress
+follow. 200 `{message, meal_id, reopened, components_reopened, meal_is_completed: false,
+progress: {date, meals_completed, total_meals, completion_percentage, calories_consumed,
+target_calories, calories_percentage, protein_consumed, target_protein, carbs_consumed,
+target_carbs, fat_consumed, target_fat, is_day_completed}}`; `reopened: false` when
+nothing was confirmed (a second undo is harmless). Refusals: 403 `clients_only`,
+`no_entitlement` / `feature_not_in_plan`; 404 `not_found`; 409 `plan_superseded`; 409
+`undo_window_closed` (new) with `confirmed_on` (YYYY-MM-DD or null) for a meal confirmed
+on an earlier day. Nothing differs by build.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/diet/v1/advice/latest/` | auth, HasDietAccess | `DailyAdviceView` |
 | `POST` | `/api/diet/v1/client/meals/interact/` | auth, HasDietAccess | `ClientMealInteractionView` |
 | `GET` | `/api/diet/v1/client/meals/{meal_id}/` | auth, HasDietAccessOrFrozenRead | `ClientMealDetailsView` |
 | `POST` | `/api/diet/v1/client/meals/{meal_id}/complete/` | auth, HasDietAccess | `MealCompletionView` |
+| `POST` | `/api/diet/v1/client/meals/{meal_id}/undo/` | auth, HasDietAccess | `MealUndoView` |
 | `GET` | `/api/diet/v1/client/progress/` | auth, HasDietAccessOrFrozenRead | `ClientProgressView` |
 | `GET` | `/api/diet/v1/client/progress/enhanced/` | auth, HasDietAccessOrFrozenRead | `EnhancedClientProgressView` |
 | `GET` | `/api/diet/v1/client/progress/weekly/` | auth, HasDietAccessOrFrozenRead | `ClientWeeklyProgressView` |
@@ -3486,6 +3501,27 @@ changed meaning, no code renamed. The docstrings named are the contract.
 | `DELETE, GET, PATCH, PUT` | `/api/routine/workout-sessions/{id}/` | auth | `WorkoutSessionViewSet` |
 
 ### Social
+
+**Trainers are members of the community** (Road to 10 S3.8, the owner's D11,
+2026-11-22). A trainer's token is accepted on every route of this section and on
+`/api/v1/reports/`, exactly as a client's: the feed and the post list, posting, editing
+and deleting their own posts and comments, liking, commenting, following, the people
+search, and creating, editing, closing, joining, logging and leaving a challenge and
+reading its `leaderboard/` (`tests/test_road10_s38_trainer_community.py` exercises each
+with a trainer's token). A trainer may also set `audience: "my_clients"`. What a trainer
+may not do answers the same coded refusals as anyone: 403 `not_owner` (someone else's
+post, comment or challenge), 403 `challenge_clients_only` (another coach's clients-only
+challenge). No route refuses by role, and nothing differs by build.
+
+**How many challenges one member hosts at once** (Road to 10 S3.4, the owner's 3 of
+2026-11-22). Any member may still create a challenge, but one member hosts at most
+`CHALLENGE_HOST_LIMIT` (3) at once: created by them and not over (upcoming or running;
+one an operator hid does not count). The next `POST challenges/` answers 409
+`{"error", "code": "challenge_host_limit", "limit", "hosting"}` (new code), checked
+before the body, and nothing is written; closing one (`PATCH {"status": "completed"}`)
+or its end frees the place. Staff are not limited. Nothing differs by build. The
+platform's own starter challenge is made by an operator with `manage.py
+create_starter_challenge --creator <staff username>` (DEPLOY_CHECKLIST.md §6).
 
 `POST challenges/{id}/leave/` removes the caller's participation, recounts
 `participants_count` and closes the gap in the standing. Codes: `left_challenge` (200),
