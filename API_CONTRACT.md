@@ -735,12 +735,27 @@ none it can stand behind.
 `client/progress/`, `client/progress/enhanced/` and `client/progress/weekly/` answer 403
 `clients_only` to a caller who is not a client.
 
+**Undo a confirmed meal, the same day** (Road to 10 S3.5, the owner's D11, 2026-11-22).
+`POST client/meals/{meal_id}/undo/`, no body, reopens a meal confirmed TODAY (the
+server's calendar, `Asia/Damascus`): its ticked components are un-ticked, the meal is not
+completed, and the day's totals, the progress reads, home (its cached page is dropped),
+the trainer's adherence week, the activity log and the meal-count achievement progress
+follow. 200 `{message, meal_id, reopened, components_reopened, meal_is_completed: false,
+progress: {date, meals_completed, total_meals, completion_percentage, calories_consumed,
+target_calories, calories_percentage, protein_consumed, target_protein, carbs_consumed,
+target_carbs, fat_consumed, target_fat, is_day_completed}}`; `reopened: false` when
+nothing was confirmed (a second undo is harmless). Refusals: 403 `clients_only`,
+`no_entitlement` / `feature_not_in_plan`; 404 `not_found`; 409 `plan_superseded`; 409
+`undo_window_closed` (new) with `confirmed_on` (YYYY-MM-DD or null) for a meal confirmed
+on an earlier day. Nothing differs by build.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/diet/v1/advice/latest/` | auth, HasDietAccess | `DailyAdviceView` |
 | `POST` | `/api/diet/v1/client/meals/interact/` | auth, HasDietAccess | `ClientMealInteractionView` |
 | `GET` | `/api/diet/v1/client/meals/{meal_id}/` | auth, HasDietAccessOrFrozenRead | `ClientMealDetailsView` |
 | `POST` | `/api/diet/v1/client/meals/{meal_id}/complete/` | auth, HasDietAccess | `MealCompletionView` |
+| `POST` | `/api/diet/v1/client/meals/{meal_id}/undo/` | auth, HasDietAccess | `MealUndoView` |
 | `GET` | `/api/diet/v1/client/progress/` | auth, HasDietAccessOrFrozenRead | `ClientProgressView` |
 | `GET` | `/api/diet/v1/client/progress/enhanced/` | auth, HasDietAccessOrFrozenRead | `EnhancedClientProgressView` |
 | `GET` | `/api/diet/v1/client/progress/weekly/` | auth, HasDietAccessOrFrozenRead | `ClientWeeklyProgressView` |
