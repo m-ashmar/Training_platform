@@ -101,7 +101,8 @@ ROAD_TO_10 Part 3:**
 | D1, verified trainers only | **Not now**: unverified trainers stay listed | S2.6 is NOT built; the directory, matches and `featured_trainers` keep today's rule |
 | D3 to D11, D13 to D16, D18 | Yes, as ROAD_TO_10 states them after `62c5b58` (D11: any member may host a challenge; D18: body measurements only, the two-currency wallet of 2026-09-21 stands) | as the items say |
 | D17 | The owner's own (every account has its QR; only the agent reads it) | — |
-| D19, a plan paid from the wallet | Open, the owner's alone | not built |
+| D19, a plan paid from the wallet | Yes (2026-11-22, confirmed in the backend session): "users can charge their wallets and use them to pay to subscribe in app features"; never inside a store build | S2.13 (phase 2): a plan and its renewal paid from the wallet on `apk` and `web` only, refused on `play`/`ios` by the same capability check (`can_purchase_platform_sub` is store-locked); 100% to the platform (2026-09-19); the gateway list names the wallet where it is a way to pay |
+| D13, support contacts | `support@yalagym.com` (support), `admin@yalagym.com` (admin); the WhatsApp number comes before the launch | S2.12: `links.support_email` = support@yalagym.com; `links.support_whatsapp` empty until the owner gives the number |
 
 **Phase 0** (the app does its own phase 0 in parallel; S0.1 first, the app deletes its own schedule
 arithmetic when it lands). Each landed item: its route, fields and codes in the view docstring and
