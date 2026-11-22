@@ -847,6 +847,13 @@ class TrainerClientRelation(models.Model):
     #: month the client is in (owner, 2026-09-19); the renewal then ends the coaching
     #: instead of charging the next month (users/coaching.py).
     ends_at_period_end = models.BooleanField(default=False)
+    #: The CLIENT asked not to renew after the paid month (Road to 10 S2.7, the owner's
+    #: D12): «لا تجدّد بعد هذا الشهر». The renewal then ends the coaching instead of
+    #: charging the next month — nothing is charged or held, and the month already paid
+    #: stays the trainer's. The client sets and unsets it (`POST /api/v1/coaching/
+    #: renewal/`) until the renewal run reaches the month's end; the trainer only reads it.
+    #: Apart from `ends_at_period_end`, which is the trainer's and cannot be withdrawn.
+    client_stops_renewal = models.BooleanField(default=False)
     #: The note sent with the CURRENT request, written by the side `initiated_by` names:
     #: what the client wrote with a request ("introduce yourself", RequestSheet), or what
     #: the trainer wrote with an invitation (TrainerInvite, BACKEND_BUGS B-093). The name
@@ -940,7 +947,8 @@ class CoachingEnding(models.Model):
     transaction that ends it (`record`): the client leaving
     (`client/unassign-trainer/`), the trainer ending it now, or the trainer SCHEDULING
     the end at the month's close (`scheduled`; the relation ends later, in the renewal
-    run, and writes nothing more).
+    run, and writes nothing more). A client's «do not renew» (S2.7) is written by the
+    renewal run when it ends the coaching (`ended_by` client, `scheduled`, no reason).
 
     The owner (2026-09-28): the reason codes are the ones drawn on each sheet; the row
     is seen by OPERATORS only — the console, read-only — never by the trainer, and a
@@ -975,8 +983,10 @@ class CoachingEnding(models.Model):
                                related_name='coaching_endings_as_client')
     ended_by = models.CharField(max_length=8, choices=ENDED_BY_CHOICES)
     reason = models.CharField(max_length=16, choices=REASON_CHOICES, null=True, blank=True)
-    #: The trainer scheduled the end for the close of the running month (the relation
-    #: was still approved when this was written).
+    #: The end came at the close of the running month, not now: the trainer scheduled it
+    #: (written when scheduled, the relation still approved), or the client asked not to
+    #: renew (S2.7; written by the renewal run that ends it, with no reason, because the
+    #: client could withdraw the choice until then).
     scheduled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

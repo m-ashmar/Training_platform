@@ -131,6 +131,24 @@ class CoachingRenewalSoonEvent(BaseDomainEvent):
 
 
 @dataclass
+class CoachingEndingSoonEvent(BaseDomainEvent):
+    """The same reminder for a client who asked not to renew after this month (Road to
+    10 S2.7, the owner's D12): the paid month ends in a few days and the coaching ends
+    with it; nothing is charged. Sent once per month, instead of
+    `CoachingRenewalSoonEvent`, never beside it."""
+    template = NotificationTemplate(
+        title=_("Your coaching ends soon"),
+        body=_("Your month of coaching with %(name)s ends in %(days)s days, and it will "
+               "not renew. Nothing more will be charged."),
+    )
+    actor_id: int = 0          # the trainer
+    recipient_id: int = 0      # the client
+    trainer_name: str = ""
+    days: int = 0
+    period_id: int = 0
+
+
+@dataclass
 class CoachingPaymentDueEvent(BaseDomainEvent):
     """The month ended and the wallet could not cover the next one: the coaching is
     paused (frozen). Sent when it freezes (`step` 0) and again on each step of

@@ -207,10 +207,18 @@ class CustomUserAdmin(UserAdmin):
             # the words of whoever `initiated_by` names, so rewriting the author and
             # keeping the text served the client's own note back to them as the
             # trainer's (the review of B-093).
+            defaults = {'status': 'approved', 'initiated_by': 'trainer',
+                        'client_note': '', 'ends_at_period_end': False}
+            # The client's «do not renew» (S2.7) belongs to a coaching, not to the row:
+            # cleared when this makes a NEW coaching, kept on one already running, or an
+            # operator re-pointing a stale pointer would charge a month the client
+            # stopped.
+            if not TrainerClientRelation.objects.filter(
+                    trainer_id=obj.assigned_trainer_id, client=obj,
+                    status='approved').exists():
+                defaults['client_stops_renewal'] = False
             TrainerClientRelation.objects.update_or_create(
-                trainer_id=obj.assigned_trainer_id, client=obj,
-                defaults={'status': 'approved', 'initiated_by': 'trainer',
-                          'client_note': '', 'ends_at_period_end': False})
+                trainer_id=obj.assigned_trainer_id, client=obj, defaults=defaults)
             TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
                 trainer_id=obj.assigned_trainer_id).update(status='rejected')
         else:
