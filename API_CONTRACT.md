@@ -85,6 +85,12 @@ and locks after **5 failed attempts** per email (counted in Redis, not on the ro
 POST /api/auth/forgot-password/         {email}                       -> 200 (always) | 429 throttled
 POST /api/auth/forgot-password/verify/  {email, otp_code}             -> 200 {reset_token}
                                         | 400 otp_invalid | otp_expired | too_many_attempts
+POST /api/auth/password/change/  {current_password, new_password}  (signed in; S2.8)
+                                        -> 200 {message, access, refresh}: every other
+                                           session ends, store the new pair
+                                        | 400 current_password_wrong | password_unchanged
+                                          | field_errors.new_password (as at sign-up)
+                                        | 429 throttled (5 wrong in 15 min)
 POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200
                                         | 400 field_errors.new_password: password_too_short |
                                           password_too_common | password_entirely_numeric (as at sign-up)
@@ -479,6 +485,7 @@ messages). The same on every build.
 | `POST` | `/api/auth/client/unassign-trainer/` | auth | `ClientUnassignTrainerView` |
 | `GET` | `/api/auth/client/trainer-invites/` | auth | `ClientPendingTrainerInvitesView` |
 | `DELETE, POST` | `/api/auth/device-token/` | auth | `FCMTokenView` |
+| `POST` | `/api/auth/password/change/` | auth | `PasswordChangeView` |
 | `POST` | `/api/auth/forgot-password/` | public | `PasswordResetRequestView` |
 | `POST` | `/api/auth/forgot-password/confirm/` | public | `PasswordResetConfirmView` |
 | `POST` | `/api/auth/forgot-password/verify/` | public | `PasswordResetVerifyView` |

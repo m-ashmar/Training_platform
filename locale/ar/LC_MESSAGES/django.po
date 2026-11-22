@@ -6064,3 +6064,19 @@ msgstr "هذا التحدي مفتوح لعملاء المدرب فقط."
 #, python-format
 msgid "Keep it under %(limit)d characters."
 msgstr "الحد الأقصى %(limit)d حرفاً."
+
+#: users/password_views.py
+msgid "Too many attempts. Try again later."
+msgstr "محاولات كثيرة. حاول مرة أخرى لاحقاً."
+
+#: users/password_views.py
+msgid "Your current password is not correct."
+msgstr "كلمة المرور الحالية غير صحيحة."
+
+#: users/password_views.py
+msgid "Choose a password different from your current one."
+msgstr "اختر كلمة مرور مختلفة عن كلمة مرورك الحالية."
+
+#: users/password_views.py
+msgid "Your password has been changed. Other devices have been signed out."
+msgstr "تم تغيير كلمة المرور. تم تسجيل الخروج من الأجهزة الأخرى."

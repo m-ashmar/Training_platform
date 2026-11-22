@@ -1,4 +1,6 @@
 from django.urls import path
+
+from .password_views import PasswordChangeView
 from .views import (
     CustomLoginView, CustomRegisterView, UpdateUserDetailsView, 
     UserDetailsView, JWTAuthLogoutView, TrainerProfileView, TrainerClientsView,
@@ -65,6 +67,9 @@ urlpatterns = [
     path('client/trainer-invites/', ClientPendingTrainerInvitesView.as_view(), name='client_trainer_invites'),
     path('client/respond-to-invite/', ClientRespondToTrainerInviteView.as_view(), name='client_respond_to_invite'),
     
+    # Changing the password while signed in (Road to 10 S2.8).
+    path('password/change/', PasswordChangeView.as_view(), name='password_change'),
+
     # Password reset endpoints (OTP-based REST API)
     path('forgot-password/', PasswordResetRequestView.as_view(), name='password_reset_request'),
     path('forgot-password/verify/', PasswordResetVerifyView.as_view(), name='password_reset_verify'),
