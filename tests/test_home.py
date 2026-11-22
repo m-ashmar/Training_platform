@@ -548,9 +548,11 @@ def test_a_build_that_may_show_no_fee_is_sent_no_price_at_all(make_user, api):
 def test_the_coaching_fee_follows_the_flag_that_governs_it(make_user, api):
     """A coach is a person-to-person service: the section stays on every build and only
     the fee comes and goes, by `can_show_coaching_prices`."""
+    # Deliberate contract change (Road to 10 S0.3, BACKEND_BUGS B-198, 2026-11-22): a
+    # trainer with no first name is not listed or matched, so a listed coach has one.
     trainer = make_user("hm_fee_t", user_type="trainer", trainer_is_available=True,
                         email_verified=True, trainer_hourly_rate="12000.00",
-                        trainer_goal_focus=["build_muscle"])
+                        trainer_goal_focus=["build_muscle"], first_name="Rami")
     person = make_user("hm_fee_c", training_goal="build_muscle")
 
     shown = _data(_home(api, person, HTTP_X_APP_CHANNEL="play"), "featured_trainers")
@@ -562,10 +564,12 @@ def test_the_coaching_fee_follows_the_flag_that_governs_it(make_user, api):
 
 def test_the_first_day_hero_counts_the_trainers_who_suit_the_goal(make_user, api):
     for index in range(2):
+        # Named: a trainer with no first name is not listed (S0.3, B-198, 2026-11-22).
         make_user(f"hm_match_{index}", user_type="trainer", trainer_is_available=True,
-                  email_verified=True, trainer_goal_focus=["build_muscle"])
+                  email_verified=True, trainer_goal_focus=["build_muscle"],
+                  first_name="Coach")
     make_user("hm_match_other", user_type="trainer", trainer_is_available=True,
-              email_verified=True, trainer_goal_focus=["fat_loss"])
+              email_verified=True, trainer_goal_focus=["fat_loss"], first_name="Coach")
     person = make_user("hm_match_c", training_goal="build_muscle")
 
     body = _home(api, person)

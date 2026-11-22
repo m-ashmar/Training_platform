@@ -76,6 +76,21 @@ def directory_trainers():
     return public_people().filter(user_type='trainer', email_verified=True)
 
 
+def listed_trainers():
+    """The trainers the app LISTS: `directory_trainers()` less any whose first name is
+    empty or blank (Road to 10 S0.3, BACKEND_BUGS B-198, 2026-11-22).
+
+    Sign-up collects no name for a trainer, so one who had only confirmed the e-mail was
+    on the roster, in `trainers/matches` and in home's `featured_trainers` at once, a
+    card with no name. Listing is not existing: the profile (`trainers/{id}/`) still
+    answers a nameless trainer by id, because the trainer's own shell and the chat read
+    it. Whether a trainer is VERIFIED decides nothing here (the owner, D1 "not now").
+    """
+    from django.db.models.functions import Trim
+
+    return directory_trainers().alias(_first=Trim('first_name')).exclude(_first='')
+
+
 def _strings(value) -> list[str]:
     """A trainer-written JSON field as a list of strings, whatever was stored in it.
 
@@ -119,7 +134,7 @@ def matches_for_goal(client) -> int:
     goal = getattr(client, 'training_goal', '') or ''
     if not goal:
         return 0
-    rows = (directory_trainers().filter(trainer_is_available=True)
+    rows = (listed_trainers().filter(trainer_is_available=True)
             .exclude(id__in=blocked_ids(client))
             .values_list('trainer_goal_focus', 'trainer_specializations'))
     return sum(1 for goal_focus, specialities in rows
@@ -378,7 +393,8 @@ def _fit(rank, score):
 def match_trainers(client, request, *, limit=3) -> list[dict]:
     """The trainers who fit `client` best, ranked, each with up to three reasons.
 
-    Candidates: directory trainers who are accepting clients. Ties break by id, so the
+    Candidates: listed trainers (`listed_trainers`: a first name, B-198) who are
+    accepting clients. Ties break by id, so the
     order is stable. The build guide's rule — a trainer cannot be matched FIRST until
     their media kit is complete — moves the best-ranked complete kit to the top whenever
     any candidate has one.
@@ -390,7 +406,7 @@ def match_trainers(client, request, *, limit=3) -> list[dict]:
     # Here rather than in `directory_trainers()` because the roster and the trainer
     # detail page are `AllowAny` and have no caller to compute a block list from;
     # matching is the one candidate source that always has a signed-in client.
-    candidates = list(directory_trainers()
+    candidates = list(listed_trainers()
                       .filter(trainer_is_available=True)
                       .exclude(id__in=blocked_ids(client))
                       .order_by('id'))

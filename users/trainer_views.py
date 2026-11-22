@@ -26,8 +26,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import TRAINER_FOCUS
-from .trainer_directory import (directory_trainers, match_trainers, trainer_cards,
-                                trainer_focus, trainer_profile)
+from .trainer_directory import (directory_trainers, listed_trainers, match_trainers,
+                                trainer_cards, trainer_focus, trainer_profile)
 
 MATCH_LIMIT_DEFAULT, MATCH_LIMIT_MAX = 3, 10
 
@@ -43,7 +43,8 @@ class TrainerRosterView(APIView):
     last name), `page`, `page_size` (max 100). Order: accepting first, then verified,
     then years of experience, then id.
 
-    200 `{count, next, previous, results: [card, ...]}`.
+    200 `{count, next, previous, results: [card, ...]}`. A trainer whose first name is
+    empty is not listed (BACKEND_BUGS B-198); unverified trainers are (the owner, D1).
     400 `invalid_focus` for an unknown focus code.
     """
     authentication_classes = []
@@ -54,7 +55,8 @@ class TrainerRosterView(APIView):
 
         from routine.views import StandardResultsSetPagination
 
-        trainers = directory_trainers()
+        # Listed, not merely visible: a trainer with no first name is left out (B-198).
+        trainers = listed_trainers()
         if request.query_params.get('verified', '').lower() in ('1', 'true', 'yes'):
             trainers = trainers.filter(trainer_is_verified=True)
         search = request.query_params.get('search', '').strip()

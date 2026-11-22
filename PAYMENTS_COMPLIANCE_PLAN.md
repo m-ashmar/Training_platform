@@ -113,7 +113,7 @@ the app session ("Frontend handoff and app build") with the route, fields and co
 |---|---|---|
 | S0.1 one rule for today's programme day (D15: the next day not done; past its dates = `finished`) and a schedule read; `week_of` bounded | B-197 | DONE 2026-11-22: `routine/schedule.py` (the rule, in its docstring), `GET /api/routine/routines/{id}/schedule/`, the hero reads it (`cta.state` `finished` is new). Tests `tests/test_road10_s01_schedule.py`; `test_home.py` / `test_home_records.py` rest-day setups re-expressed under D15 with the reason |
 | S0.2 the home hero's `counts.estimated_minutes` is that day's (the same number S0.1 answers) | B-196 | DONE 2026-11-22: `schedule.day_minutes`, the routine's own formula on the day's rows |
-| S0.3 a trainer with an empty first name is not listed (directory, matches, `featured_trainers`) | B-198 | TODO |
+| S0.3 a trainer with an empty first name is not listed (directory, matches, `featured_trainers`) | B-198 | DONE 2026-11-22: `listed_trainers()`; the profile by id still answers; unverified stay listed (D1). Tests `tests/test_road10_s03_nameless_trainer.py` |
 | S0.4 the account pages answer a trainer correctly (notification kinds, inbox, export, blocked, the delete-account refusal while coaching, no AI consent rows) | — | TODO |
 | S0.5 the gateway list says per gateway `available`, `kind` (`automatic` or `reviewed`) and the hours for `reviewed` (D5) | — | TODO |
 | S0.6 home's cached page is dropped after the person's own action (plan built, request sent or answered, top-up credited, programme bought, subscription changed) | — | TODO |

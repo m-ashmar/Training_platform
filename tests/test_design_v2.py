@@ -64,8 +64,10 @@ def _years_ago(years, days=0):
 
 
 def _coach(make_user, username, **fields):
+    # Deliberate contract change (Road to 10 S0.3, BACKEND_BUGS B-198, 2026-11-22): a
+    # trainer with no first name is not listed or matched, so a listed coach has one.
     base = dict(user_type="trainer", trainer_is_available=True,
-                trainer_hourly_rate=Decimal("12000"))
+                trainer_hourly_rate=Decimal("12000"), first_name="Coach")
     base.update(fields)
     return make_user(username, **base)
 
