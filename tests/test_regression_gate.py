@@ -96,6 +96,9 @@ def test_anonymous_gets_no_5xx_and_reaches_only_public_endpoints(api):
                # from the channel and version headers alone. Both spellings, as
                # capabilities does.
                "/api/v1/config/theme", "/api/v1/config/theme/",
+               # How to reach support (Road to 10 S2.12, 2026-11-22): the Help page is
+               # read before sign-in too, and the answer is the same for everyone.
+               "/api/v1/config/support", "/api/v1/config/support/",
                # Design v2: the intro story plays and the trainer roster is browsed before
                # sign-in (the visitor shell). Neither runs authentication, and neither
                # answer depends on who asks. The media route answers both spellings, as

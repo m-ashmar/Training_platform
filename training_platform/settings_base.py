@@ -237,6 +237,11 @@ OPS_CONSOLE_BASE_URL = get_env("OPS_CONSOLE_BASE_URL", "")
 # (legal/links.py). Empty means the host the API request came to — in development only:
 # production refuses to boot without an https value (BACKEND_BUGS B-174).
 PUBLIC_PAGES_BASE_URL = get_env("PUBLIC_PAGES_BASE_URL", "")
+# Where support is reached (the owner's D13, 2026-11-22; Road to 10 S2.12), answered by
+# `GET /api/v1/config/support/` so the Help page changes without a release. The e-mail is
+# the owner's support address; WhatsApp stays empty until the owner gives a number.
+SUPPORT_EMAIL = get_env("SUPPORT_EMAIL", "").strip() or "support@yalagym.com"
+SUPPORT_WHATSAPP = get_env("SUPPORT_WHATSAPP", "").strip()
 # Returning from the web payment hub to the app (the payments spec, section 5): the
 # Android App Links and iOS Universal Links association files at /.well-known/
 # (releases/app_links.py). Each list is comma-separated. Empty means that file answers

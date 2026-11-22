@@ -270,6 +270,8 @@ the privacy policy (`docs/store/privacy_labels.md`).
 | Variable | | Default | What |
 |---|---|---|---|
 | `PUBLIC_PAGES_BASE_URL` | R | | Where the privacy policy, terms and account-deletion page are reached, e.g. `https://yalagym.com`. The capabilities answer hands these URLs to every build, and the store listings name the same pages. Boot refuses it unset, not https, or a local address (B-174) |
+| `SUPPORT_EMAIL` | | `support@yalagym.com` | The Help page's address (`GET /api/v1/config/support/`) |
+| `SUPPORT_WHATSAPP` | | empty | The Help page's WhatsApp number; empty hides the button (the owner gives the number) |
 | `APP_LINKS_ANDROID_PACKAGES` | | | Comma separated package names. Empty: `/.well-known/assetlinks.json` answers 404 `app_links_not_configured` |
 | `APP_LINKS_ANDROID_SHA256_FINGERPRINTS` | | | The SHA-256 of every release-signing certificate (the direct APK's key, and Play's app-signing key once there is a Play build) |
 | `APP_LINKS_IOS_TEAM_ID`, `APP_LINKS_IOS_BUNDLE_IDS` | | | For `/.well-known/apple-app-site-association` |

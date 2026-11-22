@@ -45,6 +45,30 @@ class CapabilitiesView(APIView):
                          "links": legal_links(request)})
 
 
+class SupportView(APIView):
+    """GET /api/v1/config/support/ — how to reach support (the owner's D13; Road to 10
+    S2.12): the Help page draws what it is sent, so a channel is added or changed without
+    a release.
+
+    Public, like capabilities, and the same answer for every build, version and person.
+    No headers needed. 200 `{"email": "support@yalagym.com", "whatsapp": "+9639..." |
+    null}` — `whatsapp` is null until the owner sets a number (`SUPPORT_WHATSAPP`), spaces
+    taken out; build the chat link from it. No codes.
+
+    Its own route rather than keys inside `capabilities.links`: that body is the build's
+    policy and its legal pages, asserted whole, and support is neither.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.conf import settings
+
+        email = (getattr(settings, 'SUPPORT_EMAIL', '') or '').strip() or None
+        whatsapp = ''.join((getattr(settings, 'SUPPORT_WHATSAPP', '') or '').split())
+        return Response({'email': email, 'whatsapp': whatsapp or None})
+
+
 def _if_none_match(header: str | None) -> set:
     """The ETags a conditional request already holds. `W/` is stripped: this endpoint
     only ever issues strong tags, and a proxy is allowed to weaken one in transit."""

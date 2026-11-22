@@ -1710,6 +1710,16 @@ from `kind`. Additive fields:
 |---|---|---|---|
 | `GET` | `/api/v1/config/theme/` | public | `ThemeView` |
 
+### Support (Road to 10 S2.12)
+
+| Method | Path | Auth | View |
+|---|---|---|---|
+| `GET` | `/api/v1/config/support/` | public | `SupportView` |
+
+`{"email": "support@yalagym.com", "whatsapp": null | "+9639..."}`: how the Help page
+reaches support, the same for every build and person. `whatsapp` is null until the owner
+sets `SUPPORT_WHATSAPP`. Its own route, not keys in `capabilities.links`.
+
 Keyed on `X-App-Channel` and `X-App-Version` and on nothing else — not the account, the
 country, the IP, the device's clock or an experiment bucket. Two users on one build get
 byte-identical bytes.
