@@ -378,21 +378,38 @@ def broken_dates(user, since=None) -> set:
 
     The owner (2026-09-20): a day closed with sets still unlogged does not count as a
     training day, and it BREAKS the streak. A day on which another routine was finished
-    in full still counts.
+    in full still counts. The free first workout neither makes nor breaks a streak
+    (`_counted`).
     """
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, date__gte=_window_start(since))
+    rows = _counted(DayOutcome.objects.filter(user=user, date__gte=_window_start(since)))
     per_date = (rows.values('date')
                 .annotate(complete=Count('id', filter=Q(complete=True)), total=Count('id')))
     return {row['date'] for row in per_date if row['total'] and not row['complete']}
 
 
+def _counted(rows):
+    """Training rows (day outcomes, sessions, progress rows: anything with a `routine`)
+    that count in the platform's NUMBERS: not the ones on a person's copy of the
+    platform's FREE FIRST WORKOUT (Road to 10 S2.4, the owner's D10: "without a streak
+    or a programme the person later loses"). That workout is logged and kept like any
+    other — its session, its sets, its outcome, its history — but one free workout on
+    the first day must not start a streak that breaks the next morning, fill a week tile
+    of a programme the person does not have, or, once a coach arrives, count in the
+    coach's numbers: the roster's week, the client file, the weekly digest, the
+    attention queue (`never_started` stays `never_started`) and the console's streak.
+    Every reader of those numbers filters through here."""
+    return rows.exclude(routine__trial=True)
+
+
 def complete_dates(user, since=None) -> set:
-    """Dates with at least one training day finished in full."""
+    """Dates with at least one training day finished in full (the free first workout
+    excepted: `_counted`)."""
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, complete=True, date__gte=_window_start(since))
+    rows = _counted(DayOutcome.objects.filter(user=user, complete=True,
+                                              date__gte=_window_start(since)))
     return set(rows.values_list('date', flat=True))
 
 
@@ -400,7 +417,8 @@ def last_break(user, since=None):
     """The most recent day that broke the streak, for the app to point at, or None."""
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, complete=False, date__gte=_window_start(since))
+    rows = _counted(DayOutcome.objects.filter(user=user, complete=False,
+                                              date__gte=_window_start(since)))
     broken = broken_dates(user, since=since)
     row = (rows.filter(date__in=broken).order_by('-date', '-missed_sets', '-id')
            .values('date', 'routine_id', 'day', 'missed_sets', 'via',
@@ -430,6 +448,7 @@ def training_dates(user, since=None) -> tuple:
                    .values_list('date', flat=True))
     legacy = {day for day in RoutineProgress.objects
               .filter(user=user, status='completed', date__gte=start)
+              .exclude(routine__trial=True)
               .values_list('date', flat=True)
               if day is not None and day not in recorded}
     return dates | legacy, bool(legacy)
@@ -461,7 +480,7 @@ def adherence(user, start, end, today=None):
     """
     from .models import DayOutcome
 
-    rows = DayOutcome.objects.filter(user=user, date__gte=start, date__lte=end)
+    rows = _counted(DayOutcome.objects.filter(user=user, date__gte=start, date__lte=end))
     totals = rows.aggregate(
         days=Count('id'),
         perfect=Count('id', filter=Q(complete=True)),
@@ -523,8 +542,8 @@ def volume_kg(user, start, end) -> float:
     """
     from .models import DayOutcome
 
-    total = (DayOutcome.objects
-             .filter(user=user, date__gte=start, date__lte=end, reps_known=True)
+    total = (_counted(DayOutcome.objects
+                      .filter(user=user, date__gte=start, date__lte=end, reps_known=True))
              .aggregate(moved=Sum('logged_volume_kg'))['moved'])
     return round(total or 0.0, 2)
 
@@ -536,8 +555,8 @@ def week_totals(user_ids, start, end) -> dict:
     from .models import DayOutcome
 
     collected = {}
-    for row in (DayOutcome.objects
-                .filter(user_id__in=list(user_ids), date__gte=start, date__lte=end)
+    for row in (_counted(DayOutcome.objects
+                         .filter(user_id__in=list(user_ids), date__gte=start, date__lte=end))
                 .values('user_id')
                 .annotate(planned=Sum('planned_sets'), logged=Sum('logged_sets'),
                           missed=Sum('missed_sets'), days=Count('id'),
@@ -589,10 +608,13 @@ def attention(trainer, client_ids, *, today=None, quiet_days=QUIET_DAYS):
 
     week = week_totals(ids, week_start, today)
     month = week_totals(ids, month_start, today)
-    last_trained = dict(WorkoutSession.objects.filter(user_id__in=ids, status='completed')
+    # The free first workout is not training for the coach's programme (`_counted`): a
+    # client who did only that reads `never_started`, not `quiet`.
+    last_trained = dict(_counted(WorkoutSession.objects.filter(user_id__in=ids,
+                                                               status='completed'))
                         .values('user_id').annotate(last=Max('end_time'))
                         .values_list('user_id', 'last'))
-    for user_id, last in (DayOutcome.objects.filter(user_id__in=ids)
+    for user_id, last in (_counted(DayOutcome.objects.filter(user_id__in=ids))
                           .values('user_id').annotate(last=Max('date'))
                           .values_list('user_id', 'last')):
         seen = last_trained.get(user_id)

@@ -12,6 +12,7 @@ from django.utils.translation import gettext_lazy as _
 
 from training_platform.numbers import FiniteFloatField
 from .models import (
+    BODY_MEASUREMENT_UNIT, BODY_MEASUREMENTS,
     UserActivity, PerformanceMetric, UserSession,
     UserGoal, AnalyticsDashboard
 )
@@ -98,7 +99,17 @@ class UserActivitySerializer(serializers.ModelSerializer):
 
 
 class PerformanceMetricSerializer(serializers.ModelSerializer):
-    """Serializer for performance metrics"""
+    """One measurement: `{id, user, metric_type, value, unit, recorded_at, notes,
+    metadata}`. The route's contract is on `PerformanceMetricViewSet`.
+
+    **Body measurements** (Road to 10 S2.11, the owner's D18): `chest`, `arm`, `waist`
+    and `thigh` are circumferences in CENTIMETRES, within the ranges the app's rulers
+    draw (`BOUNDS` below). The server writes `unit: "cm"` on them itself; a `unit` sent
+    with one must be `cm` (or left out, or empty) — anything else is refused rather than
+    stored as centimetres it is not: 400 `validation_error`, field code `unit_not_cm` on
+    `unit`. A value outside its range is 400 `validation_error` on `value` (field code
+    `invalid`, as for every other type).
+    """
 
     #: A real number. DRF's FloatField accepts "NaN", "Infinity" and "1e400", Postgres
     #: stores them, and the row COMMITS before the response is rendered — so the write
@@ -122,6 +133,12 @@ class PerformanceMetricSerializer(serializers.ModelSerializer):
         "weight": (20.0, 400.0),
         "body_fat": (1.0, 75.0),
         "muscle_mass": (5.0, 250.0),
+        # Centimetres, and exactly the app's rulers (`yalla_gym` body_models.dart,
+        # MeasurementKind): the page cannot offer a value the server then refuses.
+        "chest": (60.0, 160.0),
+        "arm": (20.0, 60.0),
+        "waist": (50.0, 160.0),
+        "thigh": (30.0, 100.0),
         "workout_duration": (0.0, 1440.0),
         "calories_burned": (0.0, 20000.0),
         "sets_completed": (0.0, 1000.0),
@@ -141,6 +158,17 @@ class PerformanceMetricSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "value": [_("%(metric)s must be between %(low)s and %(high)s.")
                           % {"metric": metric, "low": low, "high": high}]})
+        if metric in BODY_MEASUREMENTS:
+            # A tape measure reads centimetres here, and the row says so itself: a
+            # reader never has to guess what an empty unit meant, and a number sent as
+            # inches is refused instead of being drawn on a centimetre ruler.
+            sent = attrs.get("unit")
+            if sent is not None and sent.strip().lower() not in ("", BODY_MEASUREMENT_UNIT):
+                raise serializers.ValidationError({
+                    "unit": [serializers.ErrorDetail(
+                        _("Body measurements are recorded in centimetres (cm)."),
+                        code="unit_not_cm")]})
+            attrs["unit"] = BODY_MEASUREMENT_UNIT
         return attrs
 
     def validate_metadata(self, value):

@@ -83,6 +83,15 @@ class UserActivity(models.Model):
         return f"{self.user.username} - {self.get_activity_type_display()} at {self.timestamp}"
 
 
+#: The body circumferences a person logs with a tape measure, always in CENTIMETRES
+#: (Road to 10 S2.11, the owner's D18, 2026-11-22: chest, arm, waist and thigh beside
+#: weight; no body fat at launch). Health data, like weight: registered as
+#: `performance_metrics` in `training_platform/privacy/sources.py`, shown to nobody
+#: but the person, deleted with the account.
+BODY_MEASUREMENTS = ('chest', 'arm', 'waist', 'thigh')
+BODY_MEASUREMENT_UNIT = 'cm'
+
+
 class PerformanceMetric(models.Model):
     """
     Track user performance metrics over time
@@ -91,6 +100,11 @@ class PerformanceMetric(models.Model):
         ('weight', 'Weight'),
         ('body_fat', 'Body Fat Percentage'),
         ('muscle_mass', 'Muscle Mass'),
+        # `BODY_MEASUREMENTS`, in centimetres.
+        ('chest', 'Chest'),
+        ('arm', 'Arm'),
+        ('waist', 'Waist'),
+        ('thigh', 'Thigh'),
         ('workout_duration', 'Workout Duration'),
         ('calories_burned', 'Calories Burned'),
         ('sets_completed', 'Sets Completed'),

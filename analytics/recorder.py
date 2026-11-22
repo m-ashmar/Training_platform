@@ -69,4 +69,5 @@ def _default_unit(metric_type: str) -> str:
     return {
         "weight": "kg", "body_fat": "%", "muscle_mass": "kg",
         "workout_duration": "min", "calories_burned": "kcal",
+        "chest": "cm", "arm": "cm", "waist": "cm", "thigh": "cm",
     }.get(metric_type, "")

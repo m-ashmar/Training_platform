@@ -655,6 +655,11 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     `assigned_to` is display text (`"samer (Client)"`), never an id. All three follow the
     caller: the author or an admin sees every assignee, another trainer only their own
     approved clients, a client only themselves.
+
+    A client's own copy of the platform's FREE FIRST WORKOUT (Road to 10 S2.4,
+    `/api/routine/trial-workout/`) carries `trial: true` (additive; false on every other
+    routine). It is read by id (`GET routines/{id}/`) and is NOT in the list: the list is
+    the person's programmes, and a trial is one workout.
     """
     queryset = Routine.objects.all()
     serializer_class = RoutineSerializer
@@ -742,7 +747,12 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         # definition of the same thing — and two definitions drift.
         from .permissions import readable_routines
 
-        return readable_routines(user, queryset)
+        readable = readable_routines(user, queryset)
+        if self.action == 'list':
+            # The list is the person's PROGRAMMES. Their copy of the free first workout
+            # is a workout, not one (Road to 10 S2.4): read by id, never listed.
+            readable = readable.filter(trial=False)
+        return readable
 
     def get_serializer_class(self):
         """Use different serializers based on user role"""
@@ -3629,6 +3639,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
         left out of the totals for a day logged a whole day at a time (no set is
         recorded, so its reps are unknown) — `approximate` is true when that happened or
         when a day was filled in afterwards. Identical on every build.
+
+        A day of the free first workout (Road to 10 S2.4, `/api/routine/trial-workout/`)
+        is in none of these numbers and not in `by_day`: it is the person's history
+        (`workout-sessions/`), not training against a plan — for them or their coach.
         """
         from datetime import timedelta
 
@@ -3667,8 +3681,11 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # only to throw it away. The per-day rows are on `routine-progress/`. And a
         # serializer that does not NAME the column, or rendering it loads it back one
         # row at a time (SIDE_BUGS S-072).
+        # The days the totals above count, and no others: the free first workout is
+        # not one of them (Road to 10 S2.4, `outcomes._counted`).
+        from .outcomes import _counted
         body['by_day'] = DayOutcomeSummarySerializer(
-            DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today)
+            _counted(DayOutcome.objects.filter(user=user, date__gte=start, date__lte=today))
             .defer('detail').order_by('date', 'id'), many=True).data
         return Response(body)
 
@@ -3945,17 +3962,21 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # The same window the client's own streak uses: a console page must not read
         # every outcome and every progress row this platform has ever written.
         streak_window = timezone.localdate() - timedelta(days=STREAK_WINDOW_DAYS)
+        # And without the free first workout, as the client's own streak is (Road to 10
+        # S2.4, `outcomes._counted`): neither its outcomes nor its progress rows.
+        from .outcomes import _counted
         broken = set()
-        for row in (DayOutcome.objects.filter(user_id__in=client_ids, date__gte=streak_window)
+        for row in (_counted(DayOutcome.objects.filter(user_id__in=client_ids,
+                                                       date__gte=streak_window))
                     .values('user_id', 'date')
                     .annotate(complete=_Count('id', filter=Q(complete=True)))
                     .filter(complete=0)):
             broken.add((row['user_id'], row['date']))
 
         streak_lookup = {}
-        streak_rows = [row for row in (RoutineProgress.objects
+        streak_rows = [row for row in (_counted(RoutineProgress.objects
                        .filter(user_id__in=client_ids, status='completed',
-                               date__gte=streak_window)
+                               date__gte=streak_window))
                        .values_list('user_id', 'date')
                        .order_by('user_id', 'date')
                        .distinct()) if row not in broken]
@@ -4046,8 +4067,24 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     - Clients can see:
       * Public templates from all trainers
     - Other trainers cannot see private templates from other trainers
-    
-    TODO: Add tag filtering, search, usage metrics
+
+    **The platform's starter templates** (Road to 10 S2.10, the owner's D16): public
+    templates the PLATFORM wrote (`by_platform: true`, `created_by` null), one per goal
+    (`build_muscle`, `strength`, `fat_loss`, `rehab`) and place (`home`, `gym`), named in
+    Arabic and English. Every trainer lists them in `public_templates/` and copies one
+    into their own library with `{id}/copy/` («ابدأ من قالب جاهز»). Written onto a new
+    server by `manage.py bootstrap_platform` (`routine/data/platform_templates.py`).
+
+    List filters (here and on `public_templates/`, `my_templates/`): `?goal=`,
+    `?is_public=`, `?created_by=`, `?search=`, and (additive, S2.10) `?place=home|gym`
+    and `?by_platform=true|false`. A value that names nothing simply matches nothing.
+
+    **A trainer's own template cannot be made public** (S2.10, the owner's D16: the public
+    templates are the platform's alone, until the owner opens it): `POST` with
+    `is_public: true`, or a `PATCH`/`PUT` that turns it on, answers 400
+    `template_cannot_be_public` with `field: "is_public"`, and nothing is written. Sending
+    `false`, leaving it out, or re-sending the value the template already holds is
+    accepted. Nothing here differs by build.
     """
     queryset = RoutineTemplate.objects.all()
     serializer_class = RoutineTemplateSerializer
@@ -4093,6 +4130,14 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         is_public = self.request.query_params.get('is_public')
         if is_public is not None:
             qs = qs.filter(is_public=(is_public.lower() == 'true'))
+
+        # Road to 10 S2.10: where it is trained, and who wrote it.
+        place = (self.request.query_params.get('place') or '').strip().lower()
+        if place:
+            qs = qs.filter(place=place)
+        by_platform = self.request.query_params.get('by_platform')
+        if by_platform is not None:
+            qs = qs.filter(created_by__isnull=(by_platform.strip().lower() == 'true'))
         
         # Filter by creator if specified
         created_by = self.request.query_params.get('created_by')
@@ -4117,6 +4162,41 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Override to assign the template to the creator."""
         serializer.save(created_by=self.request.user)
+
+    @staticmethod
+    def _turns_public(request, instance=None) -> bool:
+        """Whether this write would make a template public that is not (S2.10). A value
+        that is not a boolean is left to the serializer, which answers it."""
+        raw = request.data.get('is_public') if hasattr(request.data, 'get') else None
+        if raw is None:
+            return False
+        try:
+            wanted = serializers.BooleanField().to_internal_value(raw)
+        except serializers.ValidationError:
+            return False
+        return bool(wanted) and not (instance is not None and instance.is_public)
+
+    @staticmethod
+    def _public_refused():
+        return Response({'error': _('Public templates are written by the platform. Keep '
+                                    'yours private; trainers can copy the platform\'s '
+                                    'starter templates.'),
+                         'code': 'template_cannot_be_public', 'field': 'is_public'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    def create(self, request, *args, **kwargs):
+        """`POST /api/routine/templates/` — 201 with the template. 400
+        `template_cannot_be_public` (+ `field`) for `is_public: true` (S2.10)."""
+        if self._turns_public(request):
+            return self._public_refused()
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """`PATCH`/`PUT /api/routine/templates/{id}/` — 400 `template_cannot_be_public`
+        (+ `field`) when it would turn `is_public` on (S2.10)."""
+        if self._turns_public(request, self.get_object()):
+            return self._public_refused()
+        return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         """`DELETE /api/routine/templates/{id}/` — 204, or 409 `template_listed_for_sale`
@@ -4347,6 +4427,12 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         Copying your own template answered 400 "Cannot copy your own template", so a
         trainer could not make a variant of their own program to reuse.
 
+        A copy of one of the PLATFORM's starter templates (Road to 10 S2.10,
+        `by_platform: true`) keeps the starter's own name in both languages, without
+        "Copy of": it is the trainer's first program, not a variant of their own. Every
+        copy carries the source's `place` (additive) and is the caller's own
+        (`by_platform: false`).
+
         The copy's `goal` is one of the four codes (`ProductGoal`), like every template
         (wave-1 review R-5: it copied the source's text unchecked, so a console's
         "Hypertrophy" spread). A template stored before the closed list is copied with
@@ -4368,7 +4454,9 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         for language, _label in settings.LANGUAGES:
             with override(language):
                 original = getattr(template, f'name_{language}', None) or template.name
-                names[f'name_{language}'] = (_('Copy of %(name)s') % {'name': original})[:255]
+                names[f'name_{language}'] = (
+                    original if template.by_platform
+                    else _('Copy of %(name)s') % {'name': original})[:255]
         with transaction.atomic():
             new_template = RoutineTemplate.objects.create(
                 **names,
@@ -4379,6 +4467,7 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                 goal=goal_code(template.goal) or template.goal,
                 days=template.days,
                 weeks=template.weeks,
+                place=template.place,
                 is_public=False,  # Always private when copied
                 created_by=request.user,
             )
@@ -4410,9 +4499,14 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def public_templates(self, request):
-        """
-        Get all public templates from all trainers.
-        Available to all authenticated users.
+        """`GET /api/routine/templates/public_templates/` — every public template, newest
+        first, paginated (`{count, next, previous, results}`). Any signed-in account.
+
+        Since Road to 10 S2.10 these are the PLATFORM's starter templates (a trainer's
+        own cannot be made public): `by_platform: true`, `created_by: null`, `goal` one of
+        the four, `place` `home` or `gym`, `days`, `weeks`, `session_count` and every row
+        in `exercises`. `?by_platform=true` lists those alone; `?goal=` and `?place=`
+        narrow them. Copy one with `POST templates/{id}/copy/`. Nothing differs by build.
         """
         # Every public template on the platform, from every trainer. This is the one
         # that grows without bound as the platform grows, and it returned the whole
@@ -5690,7 +5784,9 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         `slipping` (+`this_week`, `usual` — measured against that client's own four-week
         average, so a steady 70% is not an alarm), `missing_sets` (+`missed`,
         `planned`). A client with nothing to report is left out. Identical on every
-        build; no price and no claim.
+        build; no price and no claim. The free first workout (Road to 10 S2.4) is not
+        training here: a client who did only that reads `never_started`, and it is in
+        none of `this_week`'s numbers.
         """
         from .outcomes import attention as needs_attention
         from users.models import CustomUser

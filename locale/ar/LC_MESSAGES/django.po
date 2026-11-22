@@ -3120,11 +3120,11 @@ msgstr "يجب أن تأتي النهاية بعد البداية."
 #: policy/theme_tokens.py
 #, python-format
 msgid ""
-"%(name)s takes a colour for each theme, like {\"dark\": \"#FF5A1F\", \"light"
-"\": \"#F5511A\"}."
+"%(name)s takes a colour for each theme, like {\"dark\": \"#FF5A1F\", "
+"\"light\": \"#F5511A\"}."
 msgstr ""
-"%(name)s يأخذ لوناً لكل سمة، مثل {\"dark\": \"#FF5A1F\", \"light\": \"#F5511A"
-"\"}."
+"%(name)s يأخذ لوناً لكل سمة، مثل {\"dark\": \"#FF5A1F\", \"light\": "
+"\"#F5511A\"}."
 
 #: policy/theme_tokens.py
 #, python-format
@@ -6145,3 +6145,37 @@ msgstr "ليس لديك مدرب."
 #: users/coaching_views.py
 msgid "This coaching does not renew, so there is nothing to stop."
 msgstr "هذا التدريب لا يتجدد، فلا يوجد ما يمكن إيقافه."
+
+#. Road to 10 S2.11: chest, arm, waist and thigh are logged in centimetres; a
+#. measurement sent with another unit is refused.
+#: analytics/serializers.py
+msgid "Body measurements are recorded in centimetres (cm)."
+msgstr "تُسجَّل قياسات الجسم بالسنتيمتر (سم)."
+
+#. metrics/?latest_for= (Road to 10 S2.11): a name that is not a metric type.
+#: analytics/views.py
+#, python-format
+msgid "latest_for must be one or more of: %(types)s."
+msgstr "يجب أن يكون latest_for واحدًا أو أكثر من: %(types)s."
+
+#. Road to 10 S2.4: the free first workout, asked for by a trainer, an agent or an
+#. operator.
+#: routine/trial_views.py
+msgid "The free first workout is for clients."
+msgstr "التمرين الأول المجاني للمتدرّبين."
+
+#. Road to 10 S2.4: the free first workout is offered only with no coach and no
+#. programme.
+#: routine/trial_views.py
+msgid "The free first workout is not offered to you now."
+msgstr "التمرين الأول المجاني غير متاح لك الآن."
+
+#. Road to 10 S2.10: a trainer tried to make their own template public; only the
+#. platform's starter templates are public.
+#: routine/views.py
+msgid ""
+"Public templates are written by the platform. Keep yours private; trainers "
+"can copy the platform's starter templates."
+msgstr ""
+"القوالب العامة تكتبها المنصة. أبقِ قالبك خاصاً؛ ويمكن للمدربين نسخ القوالب "
+"الجاهزة التي تقدّمها المنصة."

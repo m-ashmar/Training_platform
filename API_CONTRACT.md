@@ -472,6 +472,22 @@ messages). The same on every build.
 | `POST` | `/api/analytics/sessions/end_session/` | auth | `UserSessionViewSet` |
 | `DELETE, GET, PATCH, PUT` | `/api/analytics/sessions/{id}/` | auth | `UserSessionViewSet` |
 
+**Body measurements (Road to 10 S2.11, the owner's D18).** `POST /api/analytics/metrics/`
+`{metric_type, value, unit?, notes?}` takes four circumferences beside `weight`, in
+CENTIMETRES, each within its ruler: `chest` 60-160, `arm` 20-60, `waist` 50-160, `thigh`
+30-100. The row answers `unit: "cm"` whatever was sent. No route is new. Refusals, all 400
+`validation_error` with `field_errors`: `value` field code `invalid` (outside the range);
+`unit` field code `unit_not_cm` (a unit other than `cm` on one of the four);
+`metric_type` field code `invalid_choice`. `body_fat` is not part of the launch.
+
+`GET /api/analytics/metrics/?latest_for=weight,chest,arm,waist,thigh` answers the CALLER's
+newest row of each named type, in the list's own shape (`{count, next, previous,
+results}`, newest first; a type never logged has no row). 400 `bad_metric_type`
+(+ `field`: `latest_for`) for a name that is not a metric type or an empty list.
+`current_metrics/` and `metric_trends/?metric_type=` answer the new types as they answer
+weight. Health data: the person's own, read by nobody else, in their export, deleted with
+the account. Nothing differs by build.
+
 ### Authentication & Users
 
 | Method | Path | Auth | View |
@@ -991,6 +1007,18 @@ removed; no new route.
   `refresh_after_seconds` (and its cache entry) is 120, or the seconds until the first
   `next` meal or workout on today's timeline turns due when that is sooner, so a meal
   due inside the window is `now` once its time comes. Midnight is not a boundary.
+
+**The free first workout (Road to 10 S2.4, the owner's D10, 2026-11-22).** Additive: a
+13th section type, `trial_workout`, between `featured_trainers` and `ready_programs`
+(HomeNew's order), and one new route, `GET/POST /api/routine/trial-workout/` (Routines
+below). Sent only to a client with no approved coach (a frozen or unpaid coaching is a
+coach) and no programme (no routine assigned), once the server has the platform's
+trial workouts (`manage.py bootstrap_platform`):
+`{template_id, routine_id | null, day: 1, place: home | gym, name, description,
+exercises, sets, estimated_minutes, equipment, no_equipment, muscles, last_done_on |
+null, times_done}` (+ `session_id` while a session on it runs). `place` is the
+onboarding answer (`training_place`), home when unanswered. Identical on every build:
+free, no price, nothing to buy.
 
 | Method | Path | Auth | View |
 |---|---|---|---|
@@ -1899,6 +1927,35 @@ storage shortly AFTER it answers, through a background task — a photo URL sign
 the erasure may still load for a few moments.
 
 ### Routines & Workouts
+
+**The free first workout (Road to 10 S2.4, the owner's D10).** `GET
+/api/routine/trial-workout/` answers the object the home section `trial_workout`
+carries; `POST` writes the client's OWN copy of the platform's workout (a private
+one-day routine, `trial: true`, never assigned) and answers the same object with
+`routine_id` set — 201 the first time, 200 after (one copy per person). Then it is
+trained through the ordinary routes (`POST workout-sessions/ {routine: routine_id,
+day: 1}`, sets, finishing the session) and kept in history. Refusals on both: 403
+`not_a_client`; 404 `trial_not_offered` with `reason` `has_coach` (an approved
+coaching, frozen or unpaid included), `has_program` (a routine is assigned) or
+`unavailable` (the server has no trial workout). The copy has no schedule
+(`routines/{id}/schedule/` is 404), is not listed by `GET routines/` (read it by id;
+`trial` is additive on every routine), and its days do not count towards the streak or
+the week tile. Free on every build. A new server gets the two platform workouts
+(`trial-home`, `trial-gym`) from `manage.py bootstrap_platform`.
+
+**Starter templates for trainers (Road to 10 S2.10, the owner's D16).** No route is new.
+`GET /api/routine/templates/public_templates/` now lists the PLATFORM's starter
+templates: eight, one per goal (`build_muscle`, `strength`, `fat_loss`, `rehab`) and
+place (`home`, `gym`), named in Arabic and English, three training days each, with
+every row in `exercises`. Additive on every template row: `place` (`home` | `gym` | `""`,
+writable; anything else 400 `validation_error`, field code `bad_place`) and
+`by_platform` (read-only; true on the platform's, whose `created_by` is null). Additive
+list filters: `?place=home|gym` and `?by_platform=true|false`. `POST
+templates/{id}/copy/` copies a starter into the trainer's own private library, keeping
+the starter's name (no "Copy of") and its `place`. A trainer's own template cannot be
+made public: `POST`, `PATCH` or `PUT templates/` turning `is_public` on answers 400
+`template_cannot_be_public` with `field: "is_public"`. A new server gets the starters
+from `manage.py bootstrap_platform`. Nothing differs by build.
 
 **What each training day planned against what was done** (the owner, 2026-09-20). Closing
 a day writes one `DayOutcome`, whichever way it closed: `update_progress`
@@ -3507,6 +3564,7 @@ changed meaning, no code renamed. The docstrings named are the contract.
 | `GET` | `/api/routine/trainer/client-progress/attention/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/recent/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
 | `GET` | `/api/routine/trainer/client-progress/{client_id}/` | IsTrainerOrAdmin | `TrainerClientProgressViewSet` |
+| `GET, POST` | `/api/routine/trial-workout/` | auth | `TrialWorkoutView` |
 | `GET, POST` | `/api/routine/user-exercise-progress/` | auth | `UserExerciseProgressViewSet` |
 | `POST` | `/api/routine/user-exercise-progress/bulk-complete/` | auth | `UserExerciseProgressViewSet` |
 | `GET` | `/api/routine/user-exercise-progress/daily-summary/` | auth | `UserExerciseProgressViewSet` |

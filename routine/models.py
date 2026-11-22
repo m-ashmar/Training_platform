@@ -17,7 +17,7 @@ import logging
 from training_platform.model_validation import RowValidationMixin
 # The template's goal is this closed list (`RoutineTemplate.goal`). `product_models`
 # imports nothing from this module, so loading it first is safe.
-from .product_models import ProductGoal
+from .product_models import ProductGoal, ProductPlace
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +506,17 @@ class Routine(RowValidationMixin, models.Model):
         'RoutinePurchase', null=True, blank=True, on_delete=models.PROTECT,
         related_name='routine', editable=False,
         help_text="The routine-product purchase this is the buyer's copy of, if any")
+    #: The person's own copy of the platform's FREE FIRST WORKOUT (Road to 10 S2.4, the
+    #: owner's D10; `routine/trial.py`). Like a buyer's copy it is `created_by` the
+    #: person, so no coaching ever freezes it and no trainer reads it; unlike one it is
+    #: never ASSIGNED: an assignment is what makes a routine the person's programme
+    #: (home's hero, the schedule, reminders, the nightly sweep, the coach's lists),
+    #: and a trial is one workout, not a programme they would later lose. Its days do
+    #: not count as training days for the streak (`routine/outcomes.complete_dates`).
+    #: At most one per person (`routine_one_trial_per_person`).
+    trial = models.BooleanField(
+        default=False, editable=False,
+        help_text="The person's own copy of the platform's free first workout")
     start_date = models.DateField(default=date.today, help_text="Start date for the routine")
     end_date = models.DateField(blank=True, null=True, db_index=True, help_text="End date for the routine")
 
@@ -555,6 +566,12 @@ class Routine(RowValidationMixin, models.Model):
         # `id` tiebreaker: a single non-unique sort column is not a total order, so LIMIT/OFFSET
         # paging repeated and hid rows whenever two records shared the value.
         ordering = ['-created_at', '-id']
+        constraints = [
+            # One free first workout per person: a second start answers the first copy
+            # (`routine/trial.py start`), and two racing starts cannot both write one.
+            models.UniqueConstraint(fields=['created_by'], condition=models.Q(trial=True),
+                                    name='routine_one_trial_per_person'),
+        ]
 
     def __str__(self):
         # The name, and nothing that needs the database. This ran two queries — the first
@@ -577,10 +594,11 @@ class Routine(RowValidationMixin, models.Model):
         `RoutineSerializer._validate_client_assignments`, against the approved
         trainer-client relation rather than a mutable pointer on the user.
 
-        The one routine a non-trainer holds as `created_by` is their own copy of a
-        routine product they bought (`purchase` is set; see that field).
+        The routines a non-trainer holds as `created_by` are their own copy of a routine
+        product they bought (`purchase` is set) and their own copy of the platform's
+        free first workout (`trial`; Road to 10 S2.4). See those fields.
         """
-        if not self.created_by.is_trainer and self.purchase_id is None:
+        if not self.created_by.is_trainer and self.purchase_id is None and not self.trial:
             raise ValidationError(_("Only trainers can create routines"), code="trainer_required")
         # The SHAPE of `day_names` is this row's own business; whether a day is still
         # inside `days` is not checked here, so shortening a routine never makes it
@@ -1305,8 +1323,27 @@ class RoutineTemplate(RowValidationMixin, models.Model):
         null=True, blank=True,
         validators=[MinValueValidator(1), MaxValueValidator(52)],
         help_text="How many weeks the program runs (1-52); empty when not declared")
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_templates')
+    #: The trainer who wrote it, or NULL for a template written by the PLATFORM (Road to
+    #: 10 S2.4 and S2.10: the free first workouts and the starter templates), the way a
+    #: global exercise has no owner. A platform template always has a `platform_key`.
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                   related_name='created_templates', null=True, blank=True,
+                                   help_text="The trainer who wrote it; empty for the "
+                                             "platform's own")
+    #: How `manage.py bootstrap_platform` finds a platform template again
+    #: (`routine/data/platform_templates.py`): a contract with the database, never
+    #: renamed or reused, like `Exercise.catalogue_key`. NULL on every trainer's template.
+    #: Written once; after that the row is the operator's to edit in the console.
+    platform_key = models.CharField(
+        max_length=64, unique=True, null=True, blank=True, editable=False,
+        help_text="The platform template this row was written from, if any")
     is_public = models.BooleanField(default=False, help_text="Whether this template is visible to all users")
+    #: Where the program is trained, `home` or `gym`; blank while not said (Road to 10
+    #: S2.10: the starter templates come one per goal and place, and the trainer's picker
+    #: «ابدأ من قالب جاهز» filters on it). The same codes as `RoutineProduct.place`.
+    place = models.CharField(max_length=8, choices=ProductPlace.choices, blank=True,
+                             default='',
+                             help_text="Where the program is trained: home or gym")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     #: Moves on every save — the API's, the console's — and a template is saved
     #: whenever its rows are rewritten (`RoutineTemplateSerializer.update`). A routine
@@ -1328,7 +1365,13 @@ class RoutineTemplate(RowValidationMixin, models.Model):
         ordering = ['-created_at', '-id']
 
     def __str__(self):
-        return f"{self.name} ({self.goal}) by {self.created_by.username}"
+        author = self.created_by.username if self.created_by_id else "the platform"
+        return f"{self.name} ({self.goal}) by {author}"
+
+    @property
+    def by_platform(self) -> bool:
+        """Written by the platform, not by a trainer (S2.4, S2.10)."""
+        return self.created_by_id is None
 
     @property
     def session_count(self):
@@ -1364,7 +1407,12 @@ class RoutineTemplate(RowValidationMixin, models.Model):
         return False
 
     def clean(self):
-        """Validate template data."""
+        """Validate template data: a trainer's, or the platform's (no author, a key)."""
+        if self.created_by_id is None:
+            if not self.platform_key:
+                raise ValidationError(_("Only trainers can create templates"),
+                                      code="trainer_required")
+            return
         if not self.created_by.is_trainer:
             raise ValidationError(_("Only trainers can create templates"), code="trainer_required")
 

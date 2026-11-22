@@ -170,7 +170,7 @@ def _template_text(template, field, language):
 
 def routine_from_template(template, *, created_by, days, customizations=None,
                           name=None, start_date=None, end_date=None, source=True,
-                          purchase=None):
+                          purchase=None, trial=False):
     """Write a private copy of `template` as a new routine with no assignee.
 
     `days` may be longer than the template: client day N uses template day
@@ -182,6 +182,9 @@ def routine_from_template(template, *, created_by, days, customizations=None,
     product was bought (`routine/products.py`). It is PROVENANCE only — the link that
     lets a buyer, not a trainer, be `created_by` (`Routine.clean`). Nothing here reads a
     price or moves money: the sale is made, and paid for, before this is called.
+
+    `trial`: this is the person's own copy of the platform's free first workout
+    (`routine/trial.py`, Road to 10 S2.4), which they hold as `created_by` too.
     """
     from django.conf import settings
 
@@ -233,6 +236,7 @@ def routine_from_template(template, *, created_by, days, customizations=None,
         'created_by': created_by,
         'source_template': template if source else None,
         'purchase': purchase,
+        'trial': trial,
     }
     if start_date:
         values['start_date'] = start_date

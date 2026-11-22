@@ -144,6 +144,25 @@ def featured_trainers(person, *, request, flags) -> dict | None:
     return {'trainers': matches}
 
 
+def trial_workout(person, *, coached, routine) -> dict | None:
+    """The free first workout (Road to 10 S2.4, the owner's D10), or nothing.
+
+    For a client with no coach and no programme — `routine` is home's current routine,
+    so a bought programme or a former coach's frozen one is a programme and the freeze
+    rule holds — and only on a server that has the platform's trial workout
+    (`bootstrap_platform`). The same object `GET /api/routine/trial-workout/` answers
+    (`routine/trial.py`). Free on every build: no price, and no flag is asked.
+    """
+    from routine import trial
+
+    if coached or routine is not None:
+        return None
+    try:
+        return trial.offer(person, coached=False, programme=False)
+    except trial.NotOffered:
+        return None
+
+
 def ready_programs(person, *, request, flags) -> dict | None:
     """Ready-made programmes: the routine products on sale (plan step 10), newest
     listing first.

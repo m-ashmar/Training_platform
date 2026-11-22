@@ -625,10 +625,14 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
             'created_at', 'updated_at', 'routine_exercises', 'assigned_to', 'assigned_usernames',
             'created_by', 'client_count', 'estimated_duration_minutes', 'target_muscles',
             'source_template', 'product', 'created_by_id', 'day_names', 'assigned_ids',
+            'trial',
         ]
         # `source_template`: the template this private copy was generated from, or null.
         # A copy, not a link — set by `templates/{id}/generate/`, never by a write here.
-        read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template']
+        # `trial` (additive, Road to 10 S2.4): true on the reader's own copy of the
+        # platform's free first workout (`/api/routine/trial-workout/`), false otherwise.
+        read_only_fields = ['created_at', 'updated_at', 'created_by', 'source_template',
+                            'trial']
 
     def get_product(self, obj):
         """The routine product this routine is the reader's bought copy of (plan step
@@ -2021,6 +2025,16 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     template form and the goals the catalogue filters on. Any case is accepted and the
     code is stored; anything else answers 400 `validation_error` with
     `field_errors.goal[0].code` = `bad_goal`, the code the catalogue's `?goal=` answers.
+
+    Road to 10 S2.10 (additive):
+      `place`        `home` | `gym` | `""` (not said) — where the program is trained, the
+                     codes of a routine product's `place`. Writable; any case is accepted
+                     and the code stored; anything else answers 400 `validation_error`
+                     with `field_errors.place[0].code` = `bad_place`.
+      `by_platform`  read-only: true on a template the PLATFORM wrote (a starter
+                     template; `created_by` is then null), false on a trainer's own.
+    `is_public` cannot be turned on through the API: see `RoutineTemplateViewSet`
+    (`template_cannot_be_public`).
     """
     exercises = RoutineTemplateExerciseSerializer(source='routinetemplateexercise_set', many=True)
     created_by = serializers.SerializerMethodField()
@@ -2035,6 +2049,9 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     #: `days` x `weeks`, null while `weeks` is (never a guess). The product form's line
     #: «4 أسابيع · 3 أيام · 12 جلسة» is `weeks` · `days` · `session_count`.
     session_count = serializers.IntegerField(read_only=True, allow_null=True)
+    #: Declared for the same reason as `goal`: any case is accepted, the code stored.
+    place = serializers.CharField(max_length=8, required=False, allow_blank=True)
+    by_platform = serializers.BooleanField(read_only=True)
 
     used_by_count = serializers.SerializerMethodField()
 
@@ -2066,7 +2083,8 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoutineTemplate
         fields = ['id', 'name', 'description', 'goal', 'days', 'weeks', 'session_count',
-                  'is_public', 'created_by', 'created_at', 'exercises', 'used_by_count']
+                  'is_public', 'created_by', 'created_at', 'exercises', 'used_by_count',
+                  'place', 'by_platform']
 
     def validate_goal(self, value):
         """One of the four goal codes, stored as the code (the owner, 2026-09-28)."""
@@ -2077,6 +2095,16 @@ class RoutineTemplateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 _("Choose the program's goal: build muscle, strength, fat loss or rehab."),
                 code='bad_goal')
+        return code
+
+    def validate_place(self, value):
+        """`home`, `gym` or blank, stored as the code (Road to 10 S2.10)."""
+        from .product_models import ProductPlace
+
+        code = (value or '').strip().lower()
+        if code and code not in ProductPlace.values:
+            raise serializers.ValidationError(
+                _("Choose where the program is trained: home or gym."), code='bad_place')
         return code
 
     def validate(self, attrs):
@@ -2372,9 +2400,12 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             entry["last_exercises"] = row['exercises']
 
         # This week: sessions per user, and the volume of their set logs. Counted
-        # distinctly because the join to set_logs multiplies the session rows.
-        for row in (WorkoutSession.objects
-                    .filter(user_id__in=ids, status='completed', end_time__date__gte=week_ago)
+        # distinctly because the join to set_logs multiplies the session rows. The free
+        # first workout is history, not the week's training (Road to 10 S2.4,
+        # `routine/outcomes._counted`), here and in the two counts below.
+        from .outcomes import _counted
+        for row in (_counted(WorkoutSession.objects
+                    .filter(user_id__in=ids, status='completed', end_time__date__gte=week_ago))
                     .values('user_id')
                     .annotate(sessions=Count('id', distinct=True),
                               volume=Sum(F('set_logs__weight') * F('set_logs__reps')))):
@@ -2382,8 +2413,8 @@ class RecentActivitySerializer(serializers.ModelSerializer):
             collected[row['user_id']]["week_volume"] = row['volume'] or 0
 
         # This week's routine progress, both counts in one pass.
-        for row in (RoutineProgress.objects
-                    .filter(user_id__in=ids, updated_at__date__gte=week_ago)
+        for row in (_counted(RoutineProgress.objects
+                    .filter(user_id__in=ids, updated_at__date__gte=week_ago))
                     .values('user_id')
                     .annotate(total=Count('id'),
                               completed=Count('id', filter=Q(status='completed')))):
