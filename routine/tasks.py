@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
     max_retries=3,
 )
 def send_async_notification(user_id, notif_type, message, related_object_id=None,
-                            related_object_type=None, event_id=None):
+                            related_object_type=None, event_id=None, extra_data=None):
     """
     Asynchronously create a routine notification.
 
@@ -56,6 +56,11 @@ def send_async_notification(user_id, notif_type, message, related_object_id=None
             'type': notif_type,
             'related_object_id': str(related_object_id) if related_object_id is not None else None,
             'related_object_type': related_object_type,
+            # The ids the app's page opens with, by name (Road to 10 S3.1): a finished
+            # session carries `session_id`, `client_id`, `routine_id`. Never overrides
+            # the three keys above. A task queued before this argument existed has none.
+            **{k: v for k, v in (extra_data or {}).items()
+               if k not in ('type', 'related_object_id', 'related_object_type')},
         },
     }
     NotificationService.create_and_send(

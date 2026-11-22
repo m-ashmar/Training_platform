@@ -188,15 +188,15 @@ so parse ids client-side.
 | `user_followed` | `follower_id` |
 | `achievement_awarded` | `achievement_id` |
 | `challenge_progress` | `challenge_id` |
-| `trainer_assignment_request` | `trainer_id` |
+| `trainer_assignment_request` | `trainer_id`, `request_id` — the invitation; answer it with `POST /api/auth/client/respond-to-invite/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
 | `trainer_unassignment` | `trainer_id` |
-| `client_request_received` | `client_id` |
+| `client_request_received` | `client_id`, `request_id` — to the trainer; answer it with `POST /api/auth/trainer/respond-to-request/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
 | `client_request_approved` | `trainer_id` |
 | `client_request_rejected` | `trainer_id` |
-| `client_request_cancelled` | `client_id` |
-| `client_unassigned_trainer` | `client_id` |
-| `routine_assignment` | `related_object_id`, `related_object_type` |
-| `session_completed` | `related_object_id`, `related_object_type` |
+| `client_request_cancelled` | `client_id` — to the trainer; the request is gone, so there is no request to open |
+| `client_unassigned_trainer` | `client_id` — to the trainer; the client left |
+| `routine_assignment` | `related_object_id`, `related_object_type`, `routine_id` (since Road to 10 S3.1; the same id as `related_object_id`) |
+| `session_completed` | `related_object_id`, `related_object_type`, `session_id`, `client_id`, `routine_id` — sent to the client and to each trainer with an approved relation; the trainer opens the review with `GET /api/routine/workout-sessions/{session_id}/?expand=sets` (the three named ids since Road to 10 S3.1) |
 | `session_reminder` | `reason` (`scheduled` \| `drift`), plus `routine_id`+`day` when scheduled, or `days_since_last_workout` when drift |
 | `progress_milestone` | `milestone` (e.g. `streak-7`, `sessions-100`) |
 | `custom` | `message_id`, `trainer_id` — a message from the user's trainer |
@@ -204,8 +204,8 @@ so parse ids client-side.
 | `coaching_renewed` | `trainer_id` — a new month of coaching was charged from the wallet |
 | `coaching_renewal_soon` | `trainer_id` — the paid month ends in a few days |
 | `coaching_payment_due` | `trainer_id`, `status` (`frozen`) — the month ended unpaid, so the coaching is paused; repeated on each reminder step while it stays paused |
-| `coaching_ended` | `user_id` — the other person. The grace period ran out unpaid; sent to both |
-| `coaching_finished` | `user_id` — the other person. Coaching ended for a reason other than money; sent to both |
+| `coaching_ended` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1; `"0"` on a notice queued before). The grace period ran out unpaid; sent to both |
+| `coaching_finished` | `user_id` — the other person; `client_id`, `trainer_id` — both sides by role (since Road to 10 S3.1). Coaching ended for a reason other than money; sent to both |
 | `coaching_fee_held` | `period_id`, `month`, `role` (`client` / `trainer`: the recipient's side), `user_id` — the other person. Month 1 was charged into escrow when the trainer accepted; sent to both. The fact only, no amount, on every build |
 | `coaching_fee_released` | `period_id`, `month`, `role`, `user_id` — a month's fee left escrow for the trainer. Month 1 (the first program arrived): sent to both. A renewal: to the trainer only (the client's notice is `coaching_renewed`). The trainer hears it when their share lands: a share owed for a stale exchange rate is announced when it is paid |
 | `coaching_fee_refunded` | `period_id`, `month`, `role`, `user_id` — a held month went back to the client's wallet (declined, left or ended before the first program); sent to both |

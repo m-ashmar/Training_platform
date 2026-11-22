@@ -3261,13 +3261,17 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # Notify client (self), in their own language (BACKEND_BUGS B-030).
         from .services import in_recipients_language, routine_name_for
         client = instance.user
+        # The ids both sides' pages open with (Road to 10 S3.1): the trainer's review is
+        # `workout-sessions/{session_id}/?expand=sets` on the client's card.
+        opens = {'session_id': instance.pk, 'client_id': client.pk,
+                 'routine_id': instance.routine_id}
         send_notification(
             user=client,
             notif_type="session_completed",
             message=in_recipients_language(client, lambda: _(
                 "Well done! You finished a workout on %(routine)s.")
                 % {'routine': routine_name_for(instance.routine, client)}),
-            related_object=instance
+            related_object=instance, data=opens
         )
         # Notify the trainer this client actually has an APPROVED relation with.
         # Reading `assigned_trainer` would tell a dismissed trainer what their former
@@ -3285,7 +3289,7 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                     % {'name': f"{client.first_name or ''} {client.last_name or ''}".strip()
                                or client.username,
                        'routine': routine_name_for(instance.routine, trainer)}),
-                related_object=instance
+                related_object=instance, data=opens
             )
 
         # Milestones. Deferred to on_commit so a rolled-back completion cannot

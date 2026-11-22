@@ -498,9 +498,10 @@ class Command(BaseCommand):
                 quote_agreed_price(relation, trainer)
                 relation.save()
                 if role == "prospect":
-                    transaction.on_commit(lambda c=client: emit_event(
+                    transaction.on_commit(lambda c=client, r=relation.pk: emit_event(
                         ClientRequestReceivedEvent(actor_id=c.id, recipient_id=trainer.id,
-                                                   client_name=c.full_name or c.username)))
+                                                   client_name=c.full_name or c.username,
+                                                   request_id=r)))
                     self._note("request prospect", "sent")
                     continue
             elif role == "prospect" or relation.status == "approved":

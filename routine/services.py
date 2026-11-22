@@ -16,7 +16,7 @@ from .tasks import send_async_notification
 REPEATABLE_TYPES = frozenset({"routine_assignment", "custom"})
 
 
-def send_notification(user, notif_type, message, related_object=None):
+def send_notification(user, notif_type, message, related_object=None, data=None):
     """
     Service function to create a notification for a user asynchronously.
     Args:
@@ -25,6 +25,9 @@ def send_notification(user, notif_type, message, related_object=None):
             which is also what GET /api/notifications/event-types/ returns
         message: str (notification message)
         related_object: Optional model instance (Routine, WorkoutSession, etc.)
+        data: Optional `{key: id}` added to the push's `data` beside `related_object_id`
+            and `related_object_type`: the ids the app's page opens with, by name
+            (Road to 10 S3.1). Values are sent as strings, as FCM requires.
     Returns:
         None (Async execution)
 
@@ -45,6 +48,7 @@ def send_notification(user, notif_type, message, related_object=None):
         related_object_id,
         related_object_type,
         event_id=event_id,
+        extra_data={k: str(v) for k, v in (data or {}).items()} or None,
     ))
     return None
 
@@ -82,5 +86,5 @@ def notify_assignment(client, routine):
         "A new routine, %(routine)s, has been assigned to you.")
         % {'routine': routine_name_for(routine, client)})
     send_notification(user=client, notif_type="routine_assignment", message=message,
-                      related_object=routine)
+                      related_object=routine, data={'routine_id': routine.pk})
 

@@ -43,7 +43,9 @@ def handle_trainer_assignment_request(event: TrainerAssignmentRequestEvent):
 
         metadata = {
             'context': {'name': event.trainer_name},
-            'data': {'type': 'trainer_assignment_request', 'trainer_id': event.actor_id},
+            # `request_id` (Road to 10 S3.1): the invitation, what the answer route takes.
+            'data': {'type': 'trainer_assignment_request', 'trainer_id': event.actor_id,
+                     'request_id': event.request_id},
         }
 
         NotificationService.create_and_send(
@@ -105,7 +107,9 @@ def handle_client_request_received(event: ClientRequestReceivedEvent):
 
         metadata = {
             'context': {'name': event.client_name},
-            'data': {'type': 'client_request_received', 'client_id': event.actor_id},
+            # `request_id` (Road to 10 S3.1): the request, what the answer route takes.
+            'data': {'type': 'client_request_received', 'client_id': event.actor_id,
+                     'request_id': event.request_id},
         }
 
         NotificationService.create_and_send(
@@ -297,11 +301,14 @@ def handle_coaching_payment_due(event: CoachingPaymentDueEvent):
 def handle_coaching_ended(event: CoachingEndedEvent):
     _send_coaching(event, event_type='coaching_ended', related_id=event.relation_id,
                    context={'name': event.other_name},
-                   data={'type': 'coaching_ended', 'user_id': event.actor_id})
+                   # `client_id` / `trainer_id` beside `user_id` (Road to 10 S3.1).
+                   data={'type': 'coaching_ended', 'user_id': event.actor_id,
+                         'client_id': event.client_id, 'trainer_id': event.trainer_id})
 
 
 @subscribe(CoachingFinishedEvent)
 def handle_coaching_finished(event: CoachingFinishedEvent):
     _send_coaching(event, event_type='coaching_finished', related_id=event.relation_id,
                    context={'name': event.other_name},
-                   data={'type': 'coaching_finished', 'user_id': event.actor_id})
+                   data={'type': 'coaching_finished', 'user_id': event.actor_id,
+                         'client_id': event.client_id, 'trainer_id': event.trainer_id})
