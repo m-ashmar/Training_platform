@@ -233,7 +233,7 @@ so parse ids client-side.
 | `routine_product_purchased` | `product_id`, `purchase_id`, `routine_id` — to the buyer; `routine_id` is their own copy, or `""` (empty, never null: push data is strings) when no copy exists any more — then open the program by `product_id` |
 | `routine_product_refunded` | `product_id`, `purchase_id` — to the buyer: the price is back in the wallet and the copy is gone |
 | `routine_product_sale_refunded` | `product_id`, `purchase_id` — to the trainer: a sale was refunded and their share went back |
-| `wallet_topped_up` | `reference_id`, `amount`, `currency` — an agent credited the client's wallet with cash; `reference_id` opens the row (`GET wallet/transactions/{reference_id}/`). Every build: a cash top-up is WALLET_MOVE, and the text names the shop, never the amount (BACKEND_BUGS B-115) |
+| `wallet_topped_up` | `reference_id`, `amount`, `currency` — an agent credited the client's wallet with cash; `reference_id` opens the row (`GET wallet/transactions/{reference_id}/`). Sent whatever the CLIENT's build: a cash top-up is WALLET_MOVE, and the text names the shop, never the amount (BACKEND_BUGS B-115). Making the top-up is a question of the AGENT's build: `POST wallet/agent/topup/proxy/` is refused where `can_transfer_wallet` is off (the first `ios` build, BACKEND_BUGS B-199); the signed `agent/topup/` reads no build |
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
@@ -2276,6 +2276,18 @@ operator maintains in the console. Four things the app needs:
 **The agent shell** (plan step 9; the spec, section 8 "Agents"; BACKEND_BUGS B-113..B-118,
 B-124, 2026-09-24). The screens are `16-agent-operator/`. The view docstrings carry every
 field and code; in short:
+
+- **By build** (BACKEND_BUGS B-199, 2026-11-24). Every path that moves WALLET_MOVE money
+  reads the build of the request that moves it, `can_transfer_wallet`: the agent's app
+  top-up (`agent/topup/proxy/`) the AGENT's, a transfer the client's, a withdrawal and
+  its cancel the trainer's. On for `apk`, `web` and `play`; off for the first `ios`
+  build by the spec's table (`403 not_available_on_channel`; no known `X-App-Channel`
+  is `400 app_channel_required`). The person credited is never asked: a client on any
+  build is topped up by an agent on a build that allows it. The signed `agent/topup/`
+  (the agent's server) reads no build. Every read is identical on every build. There is
+  no operator top-up: an operator records settlements in the console. Pinned by
+  `tests/test_b199_wallet_move_by_build.py`; whether the first `ios` build should run
+  the agent's job is the owner's open question.
 
 - **Caps per agent and per currency, fail closed** (`wallet/agents.py`): one top-up
   (`per_transaction_limit`; empty = none of its own), a local day, a calendar month, and

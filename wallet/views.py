@@ -1630,7 +1630,15 @@ class AgentTopUpProxyView(APIView):
 
     A top-up posts the cash to the agent's receivable, stamps the active key's
     `last_signature_at`, and pushes the client `wallet_topped_up` (API_CONTRACT §4).
-    WALLET_MOVE: `require_purchase_allowed` decides by build, and every build allows it.
+    WALLET_MOVE: `require_purchase_allowed` decides by the AGENT's build, the request
+    that moves the money: `can_transfer_wallet`, on for `apk`, `web` and `play` and OFF
+    for the first `ios` build by the spec's table (`policy/defaults.py`), which answers
+    403 `not_available_on_channel` above. It said "every build allows it", which the
+    table never did (BACKEND_BUGS B-199; which of the two is meant is the owner's
+    question, and until he answers the flag stands). The client being credited sends
+    no request: their build is never read, and a client on any build is topped up by an
+    agent on a build that allows it. The signed `agent/topup/` reads no build at all.
+    Pinned by tests/test_b199_wallet_move_by_build.py.
     """
     permission_classes = [IsAuthenticated, IsAgent]
     throttle_classes = [ChargingRateThrottle]
