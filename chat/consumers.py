@@ -49,7 +49,9 @@ with `trainer_id` ...), or one of this socket's own:
       unknown_type    a `type` this protocol does not have
       auth            the credential died since connect: the access token expired,
                       or the account was suspended. The socket closes with 4001 right
-                      after; reconnect with a fresh token.
+                      after; reconnect with a fresh token. Expiry is also checked
+                      before every frame the server sends, so a socket that only
+                      listens closes too, at the first event after its token expired.
       rate_limited    the same hourly allowance the REST routes share
                       (`training_platform.middleware.RateLimitMiddleware`, 1500 an hour
                       for a client): every `message.send` and `message.read` frame
@@ -64,6 +66,7 @@ caller's conversation.
 """
 import json
 import logging
+import time
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -71,7 +74,7 @@ from django.utils.translation import gettext as _
 from rest_framework.exceptions import APIException
 
 from training_platform.i18n import LanguageContext
-from training_platform.ws_auth import authenticate_scope
+from training_platform.ws_auth import authenticate_scope, token_expires_at
 
 from . import services
 from .events import group_name
@@ -93,6 +96,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.user = None
         self.conversation = None
         self.group = None
+        #: When the token this socket connected with expires (see `_out`).
+        self.expires_at = None
 
     async def connect(self):
         self.user = await database_sync_to_async(authenticate_scope)(self.scope)
@@ -107,6 +112,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.close(code=4004)
             return
         self.group = group_name(self.conversation.pk)
+        self.expires_at = token_expires_at(self.scope)
         await self.channel_layer.group_add(self.group, self.channel_name)
         await self.accept()
 
@@ -212,6 +218,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # --- plumbing -----------------------------------------------------------------
 
     async def _out(self, kind, event):
+        # A socket that only LISTENS never sends a frame, so the per-frame check in
+        # `receive` never ran for it: it went on receiving the thread after its access
+        # token expired — so after a logout and after a password change, which end the
+        # session only as far as the access token's own expiry (the batch A review,
+        # 2026-11-23). Every frame OUT now checks that expiry first, with no database
+        # read: past it, the same `auth` error and 4001 a sending socket gets.
+        if self.expires_at is not None and time.time() >= self.expires_at:
+            await self._error('auth', _('Your session has expired. Please sign in again.'))
+            await self.close(code=4001)
+            return
         payload = {k: v for k, v in event.items() if k != 'type'}
         await self.send(text_data=json.dumps({'type': kind, **payload}, default=str))
 

@@ -108,7 +108,8 @@ class PasswordChangeView(APIView):
 
     200 `{message, access, refresh}`: the password is changed, EVERY refresh token the
     account held is blacklisted (each other device is signed out when its access token
-    expires, within minutes), and this device gets a fresh pair — store both, the old
+    expires, within the hour — `ACCESS_TOKEN_LIFETIME`, 60 minutes — an open chat socket
+    included, at its first event past that), and this device gets a fresh pair — store both, the old
     refresh token no longer works. Failed sign-in counts are cleared.
 
     | status | `code` | when |

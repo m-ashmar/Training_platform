@@ -704,8 +704,9 @@ program card; a media message sent
 over REST reaches both sockets as `message.new`. A socket send runs the same checks and the same
 serializer as the REST route, and `detail` is in the reader's language. The socket's
 own codes: `invalid_frame`, `unknown_type`, `server_error`, `auth` (the token expired or
-the account was suspended since connect — re-checked on every frame; the socket then
-closes with 4001) and `rate_limited` (with `retry_after` seconds: `message.send` and
+the account was suspended since connect — re-checked on every frame; the token's expiry
+also before every frame the server sends, so a socket that only listens closes too; the
+socket then closes with 4001) and `rate_limited` (with `retry_after` seconds: `message.send` and
 `message.read` frames spend the same hourly allowance as the REST routes — 1500 an hour
 for a client). Close codes: 4001 no usable token (at connect, or after `auth`), 4004 not
 your conversation.
