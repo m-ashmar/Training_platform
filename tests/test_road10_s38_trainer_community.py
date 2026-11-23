@@ -234,7 +234,7 @@ def test_what_a_trainer_may_not_do_answers_with_a_code(people, api, make_user):
 # a trainer as it answers a client (no route refuses by role); this sweep holds that.
 
 
-def test_every_other_route_answers_a_trainer(people, api,
+def test_every_other_route_answers_a_trainer(people, api, make_user,
                                              django_capture_on_commit_callbacks):
     from achievements.models import Achievement, UserAchievement
     from notifications.models import Notification
@@ -243,8 +243,9 @@ def test_every_other_route_answers_a_trainer(people, api,
     trainer, client = people
     coach = api(trainer)
 
-    # The API's own root.
-    assert _coded(coach.get("/api/social/")).status_code == 200
+    # The API's own root: it lists the community's routes.
+    root = _coded(coach.get("/api/social/"))
+    assert root.status_code == 200 and {"posts", "challenges", "follows"} <= set(root.json())
 
     # Badges: one, and the trainer's own earned list.
     badge = Achievement.objects.create(
@@ -299,12 +300,18 @@ def test_every_other_route_answers_a_trainer(people, api,
     listed = _coded(coach.get("/api/social/follows/")).json()
     rows = listed["results"] if isinstance(listed, dict) else listed
     assert fid in {row["id"] for row in rows}
-    assert _coded(coach.get(f"/api/social/follows/{fid}/")).status_code == 200
-    put = _coded(coach.put(f"/api/social/follows/{fid}/", {"following_id": client.pk},
+    one = _coded(coach.get(f"/api/social/follows/{fid}/"))
+    assert one.status_code == 200 and one.json()["id"] == fid, one.content
+    # PUT and PATCH each move the follow to another person, and it is stored.
+    other = make_user(_name("o"), first_name="Huda", email_verified=True)
+    put = _coded(coach.put(f"/api/social/follows/{fid}/", {"following_id": other.pk},
                            content_type=JSON))
     assert put.status_code == 200, put.content
-    patch = _coded(coach.patch(f"/api/social/follows/{fid}/", {}, content_type=JSON))
+    assert UserFollow.objects.get(pk=fid).following_id == other.pk
+    patch = _coded(coach.patch(f"/api/social/follows/{fid}/", {"following_id": client.pk},
+                               content_type=JSON))
     assert patch.status_code == 200, patch.content
+    assert UserFollow.objects.get(pk=fid).following_id == client.pk
     assert coach.delete(f"/api/social/follows/{fid}/").status_code == 204
     assert not UserFollow.objects.filter(pk=fid).exists()
 
@@ -313,21 +320,30 @@ def test_every_other_route_answers_a_trainer(people, api,
     with django_capture_on_commit_callbacks(execute=True):
         assert api(client).post("/api/social/follows/follow_user/", {"user_id": trainer.pk},
                                 content_type=JSON).status_code == 201
-    note = Notification.objects.filter(recipient=trainer).order_by("-id").first()
-    assert note is not None
+    note = Notification.objects.get(recipient=trainer, event_type="user_followed")
     inbox = _coded(coach.get("/api/social/notifications/")).json()
     rows = inbox["results"] if isinstance(inbox, dict) else inbox
     assert str(note.pk) in {row["id"] for row in rows}
-    assert _coded(coach.get(f"/api/social/notifications/{note.pk}/")).status_code == 200
-    assert _coded(coach.get("/api/social/notifications/unread_count/")).status_code == 200
+    read = _coded(coach.get(f"/api/social/notifications/{note.pk}/"))
+    assert read.status_code == 200 and read.json()["id"] == str(note.pk), read.content
+    assert read.json()["notification_type"] == "user_followed"
+    unread = _coded(coach.get("/api/social/notifications/unread_count/")).json()["unread_count"]
+    assert unread >= 1
     assert _coded(coach.post(f"/api/social/notifications/{note.pk}/mark_read/", {},
-                             content_type=JSON)).status_code == 200
-    assert _coded(coach.post("/api/social/notifications/mark_all_read/", {},
                              content_type=JSON)).status_code == 200
     note.refresh_from_db()
     assert note.is_read is True
+    assert _coded(coach.get("/api/social/notifications/unread_count/")).json()[
+        "unread_count"] == unread - 1
+    assert _coded(coach.post("/api/social/notifications/mark_all_read/", {},
+                             content_type=JSON)).status_code == 200
+    assert _coded(coach.get("/api/social/notifications/unread_count/")).json()[
+        "unread_count"] == 0
 
     # Public profiles: the list and one person.
-    assert _coded(coach.get("/api/social/users/public-profile/")).status_code == 200
+    people = _coded(coach.get("/api/social/users/public-profile/"))
+    assert people.status_code == 200, people.content
+    rows = people.json()["results"] if isinstance(people.json(), dict) else people.json()
+    assert isinstance(rows, list)
     profile = _coded(coach.get(f"/api/social/users/public-profile/{client.pk}/"))
     assert profile.status_code == 200 and profile.json()["id"] == client.pk, profile.content
