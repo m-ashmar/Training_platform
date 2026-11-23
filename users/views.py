@@ -1192,6 +1192,14 @@ class AvailableTrainersView(APIView):
     it, and a trainer's address is never on a card (`users/trainer_directory.py`). It
     was every trainer's address, to any signed-in client (SIDE_BUGS S-152).
 
+    Who is listed is the directory's rule (the phase 0 review, 2026-11-23):
+    `users/trainer_directory.py listed_trainers()` — an enabled account shown to other
+    people, a confirmed address and a FIRST NAME (Road to 10 S0.3, B-198) — of the
+    trainers accepting clients. It chose by its own filter and still offered a trainer
+    with no name. `client_count` is the number of the trainer's clients from 5 up, null
+    below (the owner's privacy rule, B-154's `BUYERS_SHOWN_FROM`, as for a programme's
+    buyers); it was the raw count.
+
     403 `clients_only` when the caller is not a client (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
     """
@@ -1205,16 +1213,17 @@ class AvailableTrainersView(APIView):
         # Get all available trainers with client count annotated
         # Use Count('clients') to get the number of reverse relationships
         from django.db.models import Count, Q
+        from routine.products import buyers_shown
         from routine.views import StandardResultsSetPagination
-        
-        # Verified as well as enabled; see PublicTrainersListView.
+
+        from .trainer_directory import listed_trainers
+
+        # Listed by the directory's rule (a first name, a confirmed address, an account
+        # shown to other people), and accepting clients; see the class docstring.
         # Blocked either way is not listed: a trainer this client cannot ask, and a
         # trainer who has blocked them, are not "available" to them.
-        trainers = CustomUser.objects.filter(
-            user_type='trainer',
+        trainers = listed_trainers().filter(
             trainer_is_available=True,
-            is_active=True,
-            email_verified=True,
         ).exclude(
             id__in=blocked_ids(request.user)
         ).annotate(
@@ -1258,7 +1267,7 @@ class AvailableTrainersView(APIView):
                     'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
                     'coaching_currency': prices.trainer_rate(trainer)[1],
                     'trainer_is_verified': trainer.trainer_is_verified,
-                    'client_count': trainer.client_count_anno,
+                    'client_count': buyers_shown(trainer.client_count_anno),
                 })
             return paginator.get_paginated_response({
                 'client_id': request.user.id,
@@ -1284,7 +1293,7 @@ class AvailableTrainersView(APIView):
                 'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
                 'coaching_currency': prices.trainer_rate(trainer)[1],
                 'trainer_is_verified': trainer.trainer_is_verified,
-                'client_count': trainer.client_count_anno,
+                'client_count': buyers_shown(trainer.client_count_anno),
             })
         
         return Response({

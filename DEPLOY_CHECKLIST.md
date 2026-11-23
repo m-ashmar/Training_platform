@@ -609,6 +609,45 @@ docker compose exec -u appuser web python manage.py createsuperuser
 docker compose logs -f --tail=100 web worker beat
 ```
 
+**The store reviewers' accounts** (section 6's last line; ROAD_TO_10 R5; the review notes,
+`docs/store/review_notes.md` section 3). The password is typed at a hidden prompt and
+handed to the container by NAME (`-e VAR` with no value takes it from this shell), so it
+is never on the command line, in the shell history or in the process list. Run it after
+`bootstrap_platform`, and again shortly before each store submission:
+```bash
+read -rs REVIEW_ACCOUNTS_PASSWORD && export REVIEW_ACCOUNTS_PASSWORD
+export REVIEW_ACCOUNTS_EMAIL='appreview+{role}@your-domain'
+docker compose exec -u appuser -e REVIEW_ACCOUNTS_EMAIL -e REVIEW_ACCOUNTS_PASSWORD \
+    web python manage.py seed_review_accounts
+docker compose exec -u appuser web python manage.py seed_review_accounts --list
+unset REVIEW_ACCOUNTS_PASSWORD
+```
+- It refuses, writing nothing, without both variables, with a weak password, on a
+  database `bootstrap_platform` has not prepared, or when an address already belongs to
+  an account that is not a review account. Use the SAME address pattern every time: a
+  second run with another pattern is refused rather than making a second set.
+- A second run soon after changes nothing (`review accounts ready: nothing to change`).
+  A later one keeps the accounts alive: the Premium grant is extended below 30 days, a
+  new 7-day meal plan is made when none covers today, each programme's end date is moved
+  on below 14 days (a programme past its dates reads `finished` since D15), and a coached
+  client whose month has run out, or ends within the reminder's 3 days, is topped up by
+  the review agent and the month renewed — the agent stays suspended. A new password
+  rotates it and signs out every session taken with the old one.
+- Give the reviewers `client` and `trainer` only (the review notes say why).
+
+### 12.4 What is different from Fly.io
+| | Fly.io (sections 2, 5, 10) | One server |
+|---|---|---|
+| Secrets | `fly secrets set`, write-only | `deploy/.env`, mode 600, readable by root on the server. The vault copy is still the one that matters (section 4) |
+| Database | Managed, PITR | The `pgdata` volume. Turn on the provider's server backups, AND take section 9's `pg_dump` off the server: `docker compose exec -T db pg_dump -U yallagym --format=custom yallagym > yallagym-$(date -u +%F).dump` |
+| Redis | Managed, `noeviction` | The `redis` service, started with `--maxmemory-policy noeviction` and a password |
+| TLS | Fly's edge | Caddy, Let's Encrypt only. The certificate lives in the `caddy_data` volume |
+| Client IP | `NUM_PROXIES=1` (Fly's edge) | `NUM_PROXIES=1` (Caddy). 2 if a CDN is put in front |
+| Staging and production | Two apps | Two servers, each with its OWN `deploy/.env`: never copy keys between them |
+
+Not automated yet: the off-server database dump (a cron job on the host), and a
+restore drill on this layout.
+
 ### 12.5 Updating a running server
 
 Every update, from the `deploy/` directory of the server's checkout, wherever 12.3's clone
@@ -659,19 +698,6 @@ containers still serving; the dump is the way back. Then run the update's own co
     show 0.
   - `create_starter_challenge` opens the community's starter challenge (section 6). It
     creates nothing while one is upcoming or running.
-
-### 12.4 What is different from Fly.io
-| | Fly.io (sections 2, 5, 10) | One server |
-|---|---|---|
-| Secrets | `fly secrets set`, write-only | `deploy/.env`, mode 600, readable by root on the server. The vault copy is still the one that matters (section 4) |
-| Database | Managed, PITR | The `pgdata` volume. Turn on the provider's server backups, AND take section 9's `pg_dump` off the server: `docker compose exec -T db pg_dump -U yallagym --format=custom yallagym > yallagym-$(date -u +%F).dump` |
-| Redis | Managed, `noeviction` | The `redis` service, started with `--maxmemory-policy noeviction` and a password |
-| TLS | Fly's edge | Caddy, Let's Encrypt only. The certificate lives in the `caddy_data` volume |
-| Client IP | `NUM_PROXIES=1` (Fly's edge) | `NUM_PROXIES=1` (Caddy). 2 if a CDN is put in front |
-| Staging and production | Two apps | Two servers, each with its OWN `deploy/.env`: never copy keys between them |
-
-Not automated yet: the off-server database dump (a cron job on the host), and a
-restore drill on this layout.
 
 ## 13. Coaching off on Google Play (Road to 10 R8)
 The `play` build sells one thing: a month with a personal trainer, paid from the wallet,

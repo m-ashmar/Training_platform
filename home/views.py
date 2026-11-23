@@ -186,7 +186,11 @@ class HomeView(APIView):
                      "started_at": "..."},    only while a session is open
          "week_strip": [{"date": "2026-09-19", "weekday": 6, "state": "done"}, …7,
                         Saturday first],
-                                              state: done | today | rest | planned
+                                              state: done | today | rest | planned;
+                                              a BOUGHT programme (sessions, no dates):
+                                              `planned` only on the next dates still
+                                              owed this week, `rest` elsewhere
+                                              (SIDE_BUGS S-262, 2026-11-23)
          "cta": {"state": "start"}}           start | continue | rest | not_started |
                                               finished | refused
 
@@ -321,7 +325,10 @@ class HomeView(APIView):
         {"workouts": {"done": 4, "planned": 6},       this week, Saturday to today;
                                               `planned` is how many days of this week
                                               the routine's cycle asks for work, and is
-                                              null when no routine is assigned
+                                              null when no routine is assigned; for a
+                                              bought programme, its sessions a week,
+                                              capped at those left in it (S-262) — the
+                                              weekly goal's target, the same number
          "volume_kg": {"logged": 14250.0, "previous": 13200.0, "change_percent": 8.0},
          "streak": {"current": 12, "longest": 20},
          "approximate": false}                a day was filled in afterwards, so the
