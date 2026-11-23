@@ -1064,75 +1064,72 @@ class ClientProfileView(APIView):
         return Response({'message': _('Client profile updated successfully!')}, status=status.HTTP_200_OK)
 
 class PublicTrainersListView(APIView):
-    """Public view to get all available trainers without authentication"""
+    """GET /api/auth/trainers/public/ — the older twin of the trainer directory
+    (`GET /api/v1/trainers/`, which the app reads), kept for builds that still call it.
+
+    `AllowAny`, like the directory: no token needed; with one, the answer is the same.
+    Headers: `X-App-Channel` and `X-App-Version` decide only whether a fee is shown.
+    `?search=` filters on first name and last name, as the directory's does (it also
+    matched the username, which let anyone confirm whose account a username is);
+    `page`, `page_size` (max 100). Ordered by id.
+
+    WHO IS LISTED (the phase 0 review, 2026-11-23): the directory's own rule,
+    `users/trainer_directory.py listed_trainers()` — an enabled account shown to other
+    people, a confirmed address, and a first name (Road to 10 S0.3, B-198) — of the
+    trainers accepting clients. It chose by its own filter before, and still listed the
+    nameless trainer S0.3 took off the directory, the matches and home.
+
+    200 `{count, next, previous, results: {"available_trainers": [row, ...],
+    "trainer_count": n}}`, each row::
+
+        {"id", "first_name", "last_name", "profile_picture" | null, "trainer_bio",
+         "trainer_specializations", "trainer_certifications", "trainer_experience_years",
+         "trainer_hourly_rate": "20000.00" | null, "coaching_currency": "SYP" | null,
+         "trainer_is_verified",
+         "username": null,          kept for old builds, always null: the directory never
+                                    shows an account's username
+         "client_count": 7 | null}  how many clients the trainer has, from 5 up; null
+                                    below (the owner's privacy rule, B-154's
+                                    `BUYERS_SHOWN_FROM`, as for a programme's buyers)
+
+    No gender, no e-mail, no follower list. `trainer_hourly_rate` and
+    `coaching_currency` are in the READER's currency and only on a build that may show a
+    coaching fee (`policy.services.can_show_price`): null on `ios` and when no channel is
+    sent. 400 `validation_error` naming `page_size` or `page` for a bad page parameter.
+    """
     permission_classes = [AllowAny]
-    
+
     def get(self, request):
-        """Get all available trainers (public endpoint). Supports ?search=name to filter by name."""
         from django.db.models import Count, Q
+        from routine.products import buyers_shown
         from routine.views import StandardResultsSetPagination
-        
-        # Enabled AND verified. `is_active` alone used to hide unverified signups
-        # because registration wrote them inactive; a pending signup is enabled now, so
-        # without `email_verified` anyone could register as a trainer with an address
-        # they do not own and be offered to clients before proving it.
-        trainers = CustomUser.objects.filter(
-            user_type='trainer',
-            trainer_is_available=True,
-            is_active=True,
-            email_verified=True,
-        ).annotate(
-            client_count_anno=Count('clients')
-        )
-        
-        # Name search filter: ?search=<name>
+
+        from .trainer_directory import listed_trainers
+
+        trainers = (listed_trainers().filter(trainer_is_available=True)
+                    .annotate(client_count_anno=Count('clients')))
         search_query = request.query_params.get('search', '').strip()
         if search_query:
             trainers = trainers.filter(
                 Q(first_name__icontains=search_query) |
-                Q(last_name__icontains=search_query) |
-                Q(username__icontains=search_query)
+                Q(last_name__icontains=search_query)
             )
-        
         trainers = trainers.order_by('id')
 
-        
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(trainers, request, view=self)
-        
-        if page is not None:
-            # In the reader's currency, with the unit beside it (SIDE_BUGS S-041): one
-            # wallet query and at most one rate query for the page.
-            prices = CoachingPriceBook(request, [t.pk for t in page])
-            trainer_data = []
-            for trainer in page:
-                trainer_data.append({
-                    'id': trainer.id,
-                    'username': trainer.username,
-                    'first_name': trainer.first_name,
-                    'last_name': trainer.last_name,
-                    'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
-                    'trainer_bio': trainer.trainer_bio,
-                    'trainer_specializations': trainer.trainer_specializations,
-                    'trainer_certifications': trainer.trainer_certifications,
-                    'trainer_experience_years': trainer.trainer_experience_years,
-                    'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
-                    'coaching_currency': prices.trainer_rate(trainer)[1],
-                    'trainer_is_verified': trainer.trainer_is_verified,
-                    'client_count': trainer.client_count_anno,
-                })
-            return paginator.get_paginated_response({
-                'available_trainers': trainer_data,
-                'trainer_count': trainers.count()
-            })
-            
-        trainers = list(trainers)
-        prices = CoachingPriceBook(request, [t.pk for t in trainers])
+        shown = list(page) if page is not None else list(trainers)
+        # In the reader's currency, with the unit beside it (SIDE_BUGS S-041): one
+        # wallet query and at most one rate query for the page; nothing on a build that
+        # may not show a coaching fee.
+        prices = CoachingPriceBook(request, [t.pk for t in shown])
         trainer_data = []
-        for trainer in trainers:
+        for trainer in shown:
+            rate, currency = prices.trainer_rate(trainer)
             trainer_data.append({
                 'id': trainer.id,
-                'username': trainer.username,
+                # Never an account's username to a stranger: the key stays for old builds.
+                'username': None,
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
                 'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
@@ -1140,12 +1137,16 @@ class PublicTrainersListView(APIView):
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
                 'trainer_experience_years': trainer.trainer_experience_years,
-                'trainer_hourly_rate': prices.trainer_rate(trainer)[0],
-                'coaching_currency': prices.trainer_rate(trainer)[1],
+                'trainer_hourly_rate': rate,
+                'coaching_currency': currency,
                 'trainer_is_verified': trainer.trainer_is_verified,
-                'client_count': trainer.client_count_anno,
+                'client_count': buyers_shown(trainer.client_count_anno),
             })
-        
+        if page is not None:
+            return paginator.get_paginated_response({
+                'available_trainers': trainer_data,
+                'trainer_count': trainers.count()
+            })
         return Response({
             'available_trainers': trainer_data,
             'trainer_count': len(trainer_data)

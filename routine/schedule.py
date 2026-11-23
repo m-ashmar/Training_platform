@@ -47,7 +47,12 @@ THE RULE.
 
 THE WEEK. `week` is the week of the programme counted from `start_date` (the same count
 the trainer's queue uses for "week N of M", `users/attention_queue.py`), now bounded by
-`weeks_total`: never week 12 of a 9-week programme. `weeks_total` comes from the dates when
+`weeks_total`: never week 12 of a 9-week programme. A buyer's copy is the exception: its
+days are SESSIONS, not dates, so its week is the one its slots are, the block of
+sessions today's day falls in (`slots_week`) — three weeks after buying with two
+sessions done it is week 1, not 3 (the phase 0 review, 2026-11-23: by the calendar one
+answer said week 3 over week 1's slots, and D15 is that a missed day does not move the
+programme on). `weeks_total` comes from the dates when
 both are set (`ceil((end - start + 1) / 7)`), else from a buyer's copy's template
 (`weeks`), else `ceil(days / 7)` for a routine longer than a week, else null (a cycle with
 no end). `slots` are the routine's own week holding today's day: the whole routine when it
@@ -335,6 +340,10 @@ def build(person, routine, on_date) -> Schedule:
 
     names = routine.day_names if isinstance(routine.day_names, dict) else {}
     block = (shown_day - 1) // per_week
+    if template_days:
+        # A buyer's copy: its week is where the person is in its sessions, not the
+        # calendar since the purchase (the module's THE WEEK).
+        week = block + 1 if weeks_total is None else min(block + 1, weeks_total)
     slots = []
     for day in range(block * per_week + 1, min((block + 1) * per_week, days) + 1):
         closed = shown.get(day)
