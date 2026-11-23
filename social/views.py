@@ -107,6 +107,13 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     `not_your_follow` (was `permission_denied`); `POST follows/` with your own id is
     400 `validation_error` with the field code `cannot_follow_yourself` on
     `following_id`, and a follow you already have is 400 `already_following`.
+
+    A follow is never edited (the routes review, 2026-11-23): `PUT`/`PATCH
+    follows/{id}/` of your own follow answers 400 `follow_not_editable` and changes
+    nothing. It re-pointed the follow with `following_id` — onto someone who had blocked
+    you (the block is checked only when a follow is made), or onto a person you already
+    follow, which was a 500. To follow someone else, unfollow, then follow them. A row
+    you cannot see is still 404 `not_found`, someone else's 403 `not_your_follow`.
     """
     serializer_class = UserFollowSerializer
     permission_classes = [IsFollowParticipant]
@@ -121,6 +128,18 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             # Both sides, for the same reason: the caller is one of them, and the other
             # is not shown while their account is suspended (decision 8).
             public_q('follower'), public_q('following'))
+
+    def update(self, request, *args, **kwargs):
+        """PUT and PATCH (`partial_update` comes here): refused, see the class docstring.
+
+        `get_object()` first, so a follow the caller cannot see is 404 and someone else's
+        is 403 `not_your_follow`, exactly as before."""
+        self.get_object()
+        return Response(
+            {'error': _('A follow cannot be changed. Unfollow, then follow the other '
+                        'person.'),
+             'code': 'follow_not_editable'},
+            status=status.HTTP_400_BAD_REQUEST)
 
     def perform_create(self, serializer):
         target = serializer.validated_data.get('following')

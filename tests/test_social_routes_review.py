@@ -4,6 +4,9 @@ proven by a probe before its fix and failing on the code before it:
   HIGH    GET users/public-profile/ (the plain list) paged every active account — staff,
           top-up agents and unverified sign-ups included — which `search/` never lists
           (the owner's decision 7)
+  MEDIUM  PUT/PATCH follows/{id}/ re-pointed a follow with `following_id`: onto someone
+          who had blocked the caller (the block is checked on create only), or onto a
+          pair the caller already had — a 500
 """
 import uuid
 
@@ -70,3 +73,44 @@ def test_the_list_and_search_list_the_same_people(make_user, api):
     listed = {i for i in _every_page(api, viewer, f"{PROFILES}?page_size=100")}
     found = {i for i in _every_page(api, viewer, f"{PROFILES}search/?q=srr_zz&page_size=100")}
     assert found and found <= listed
+
+
+# ------------------------------------------------------------------ follows
+@pytest.mark.parametrize("method", ["patch", "put"])
+def test_a_follow_is_not_re_pointed_onto_someone_who_blocked_you(make_user, api, method):
+    from moderation.models import Block
+    from social.models import UserFollow
+
+    me, friend, blocker = (make_user(_name(t)) for t in ("me", "friend", "blocker"))
+    follow = UserFollow.objects.create(follower=me, following=friend)
+    Block.objects.create(blocker=blocker, blocked=me)
+
+    resp = getattr(api(me), method)(f"/api/social/follows/{follow.pk}/",
+                                     {"following_id": blocker.pk}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (400, "follow_not_editable")
+    follow.refresh_from_db()
+    assert follow.following_id == friend.pk
+    assert not UserFollow.objects.filter(follower=me, following=blocker).exists()
+
+
+@pytest.mark.parametrize("method", ["patch", "put"])
+def test_a_follow_re_pointed_onto_a_pair_you_have_is_no_500(make_user, api, method):
+    from social.models import UserFollow
+
+    me, a, b = (make_user(_name(t)) for t in ("me2", "a", "b"))
+    first = UserFollow.objects.create(follower=me, following=a)
+    UserFollow.objects.create(follower=me, following=b)
+    resp = getattr(api(me), method)(f"/api/social/follows/{first.pk}/",
+                                     {"following_id": b.pk}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (400, "follow_not_editable")
+    assert UserFollow.objects.filter(follower=me).count() == 2
+
+
+def test_someone_elses_follow_is_still_not_yours(make_user, api):
+    from social.models import UserFollow
+
+    follower, followed = make_user(_name("f")), make_user(_name("g"))
+    follow = UserFollow.objects.create(follower=follower, following=followed)
+    resp = api(followed).patch(f"/api/social/follows/{follow.pk}/", {}, content_type=JSON)
+    assert (resp.status_code, resp.json()["code"]) == (403, "not_your_follow")
+    assert api(follower).delete(f"/api/social/follows/{follow.pk}/").status_code == 204
