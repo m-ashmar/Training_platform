@@ -133,6 +133,16 @@ def handle_client_request_received(event: ClientRequestReceivedEvent):
         raise
 
 
+def _answer_ids(event_type, event):
+    """The `data` of an answer to a coaching request: the relation's trainer and client,
+    whichever of them answered (Road to 10 S3.1, the phase-3 review). An event queued
+    before the two fields existed carries its actor as `trainer_id`, as it did then,
+    and `client_id` 0."""
+    return {'type': event_type,
+            'trainer_id': event.trainer_id or event.actor_id,
+            'client_id': event.client_id}
+
+
 @subscribe(ClientRequestApprovedEvent)
 def handle_client_request_approved(event: ClientRequestApprovedEvent):
     try:
@@ -140,8 +150,8 @@ def handle_client_request_approved(event: ClientRequestApprovedEvent):
         recipient = User.objects.get(id=event.recipient_id)
 
         metadata = {
-            'context': {'name': event.trainer_name},
-            'data': {'type': 'client_request_approved', 'trainer_id': event.actor_id},
+            'context': {'name': event.answered_by_name or event.trainer_name},
+            'data': _answer_ids('client_request_approved', event),
         }
 
         NotificationService.create_and_send(
@@ -171,8 +181,8 @@ def handle_client_request_rejected(event: ClientRequestRejectedEvent):
         recipient = User.objects.get(id=event.recipient_id)
 
         metadata = {
-            'context': {'name': event.trainer_name},
-            'data': {'type': 'client_request_rejected', 'trainer_id': event.actor_id},
+            'context': {'name': event.answered_by_name or event.trainer_name},
+            'data': _answer_ids('client_request_rejected', event),
         }
 
         NotificationService.create_and_send(

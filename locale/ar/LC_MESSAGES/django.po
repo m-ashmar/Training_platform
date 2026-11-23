@@ -6219,3 +6219,13 @@ msgstr ""
 #: social/views.py
 msgid "A follow cannot be changed. Unfollow, then follow the other person."
 msgstr "لا يمكن تعديل المتابعة. ألغِ المتابعة، ثم تابع الشخص الآخر."
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "%(name)s accepted the coaching request."
+msgstr "قبِل %(name)s طلب التدريب."
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "%(name)s declined the coaching request."
+msgstr "رفض %(name)s طلب التدريب."

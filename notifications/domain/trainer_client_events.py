@@ -60,26 +60,40 @@ class ClientRequestReceivedEvent(BaseDomainEvent):
 
 @dataclass
 class ClientRequestApprovedEvent(BaseDomainEvent):
-    """Trainer approves a client's request."""
+    """A coaching request answered yes, told to the one who asked: the CLIENT when the
+    trainer accepts the client's request, the TRAINER when the client accepts the
+    trainer's invitation (`actor_id` is whoever answered).
+
+    `trainer_id` / `client_id` are the relation's two people on both paths, and
+    `answered_by_name` the one who answered (Road to 10 S3.1, the phase-3 review: the
+    trainer was handed the client's id as `trainer_id` and a text naming himself). An
+    event queued before they existed has 0 / "" and falls back to the actor and
+    `trainer_name`, what it carried then."""
     template = NotificationTemplate(
         title=_("Request Approved"),
-        body=_("Your request to trainer %(name)s has been approved."),
+        body=_("%(name)s accepted the coaching request."),
     )
     actor_id: int = 0
     recipient_id: int = 0
     trainer_name: str = ""
+    trainer_id: int = 0
+    client_id: int = 0
+    answered_by_name: str = ""
 
 
 @dataclass
 class ClientRequestRejectedEvent(BaseDomainEvent):
-    """Trainer rejects a client's request."""
+    """A coaching request answered no; both ways, as `ClientRequestApprovedEvent`."""
     template = NotificationTemplate(
         title=_("Request Rejected"),
-        body=_("Your request to trainer %(name)s has been rejected."),
+        body=_("%(name)s declined the coaching request."),
     )
     actor_id: int = 0
     recipient_id: int = 0
     trainer_name: str = ""
+    trainer_id: int = 0
+    client_id: int = 0
+    answered_by_name: str = ""
 
 
 @dataclass

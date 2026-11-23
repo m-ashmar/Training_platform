@@ -3185,12 +3185,17 @@ class MealCompletionView(APIView):
             if action == 'complete_meal':
                 # Complete entire meal
                 client_service = ClientProgressService(request.user)
-                result = client_service.complete_entire_meal(meal)
-                # One COMPLETED event per meal. The endpoint is otherwise idempotent,
-                # so a retry on a flaky connection answered 200 again and inflated the
-                # funnel with a second completion.
-                MealEvent.objects.get_or_create(
-                    user=request.user, meal=meal, kind=MealEvent.COMPLETED)
+                # The event in the confirm's own transaction, under the meal's lock
+                # `complete_entire_meal` takes: written after it, an undo landing in
+                # between deleted nothing and the funnel kept a completion of a meal
+                # that was open again (Road to 10 S3.5, the phase-3 review).
+                with transaction.atomic():
+                    result = client_service.complete_entire_meal(meal)
+                    # One COMPLETED event per meal. The endpoint is otherwise idempotent,
+                    # so a retry on a flaky connection answered 200 again and inflated
+                    # the funnel with a second completion.
+                    MealEvent.objects.get_or_create(
+                        user=request.user, meal=meal, kind=MealEvent.COMPLETED)
 
                 return Response({
                     "message": _("Meal completed successfully"),

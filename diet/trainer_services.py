@@ -1353,22 +1353,32 @@ class ClientProgressService:
         # "I ate this" button recorded nothing anywhere downstream: adherence metrics
         # and the meal-tracking achievement could only be earned by ticking components
         # one at a time. Written per row, in one transaction, so the listeners run.
+        #
+        # All of it under the MEAL's row lock, taken first: the lock `undo_meal` takes
+        # (Road to 10 S3.5). The ticks were one transaction and the meal's flag a write
+        # after it, unlocked, so an undo landing in between reopened the foods and the
+        # confirm then marked the meal completed: eaten, with none of its foods eaten,
+        # and the day counting it (the phase-3 review). Now a confirm and an undo of one
+        # meal run one after the other, and the components are read after the lock, so
+        # a tick an undo has just taken back is ticked again rather than skipped.
         now = timezone.now()
         with transaction.atomic():
+            list(Meal.objects.select_for_update().filter(pk=meal.pk)
+                 .values_list('pk', flat=True))
             for component in MealComponent.objects.filter(meal=meal).select_related('food'):
                 if component.is_completed:
                     continue
                 component.is_completed = True
                 component.completed_at = now
                 component.save(update_fields=['is_completed', 'completed_at'])
-        
-        # Update parent meal status explicitly
-        Meal.objects.filter(id=meal.id).update(is_completed=True)
-        meal.is_completed = True # Update local instance for consistency
-        
-        # A write: the client just ate, so the day's row is created if it is not there
-        # yet and recomputed under its lock.
-        self._ensure_daily_progress(meal.diet_plan, meal.date)
+
+            # Update parent meal status explicitly
+            Meal.objects.filter(id=meal.id).update(is_completed=True)
+            meal.is_completed = True # Update local instance for consistency
+
+            # A write: the client just ate, so the day's row is created if it is not
+            # there yet and recomputed under its lock.
+            self._ensure_daily_progress(meal.diet_plan, meal.date)
         
         total_components = MealComponent.objects.filter(meal=meal).count()
         

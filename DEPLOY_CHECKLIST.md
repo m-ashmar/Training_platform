@@ -28,6 +28,7 @@ read that block first: it names the variable.
 | 10 | Staging |
 | 11 | CI, the image, the lock |
 | 12 | One server instead of Fly.io (`deploy/`): what replaces sections 2, 5 and 10 |
+| 13 | Coaching off on Google Play: the one row, if Google objects (Road to 10 R8) |
 
 ## 1. What the owner chooses first
 
@@ -671,3 +672,45 @@ containers still serving; the dump is the way back. Then run the update's own co
 
 Not automated yet: the off-server database dump (a cron job on the host), and a
 restore drill on this layout.
+
+## 13. Coaching off on Google Play (Road to 10 R8)
+The `play` build sells one thing: a month with a personal trainer, paid from the wallet,
+which the build treats as a service between two people. If Google reads it otherwise,
+the answer is one change in the server's table. No release and no deploy are needed;
+the change holds from the next request.
+
+**The step.** In the operator console (`/dj-admin/`), open **Policy → Channel
+capabilities** and filter on `play`. On **every** `play` row, untick
+`can_pay_coaching_in_app` and `can_show_coaching_prices`, leave every other box as it
+is, and save. A build gets the row with the highest `min_version` it has reached, so
+unticking only the `0.0.0` row leaves every build at or above a newer row still selling
+coaching. If the list shows no `play` row, the built-in defaults are in force (coaching
+on). In that case run `python manage.py bootstrap_platform` first: it writes the missing
+base rows and changes nothing that exists. Then untick the row it wrote. Each save is
+recorded under **Capability change log** with the operator's name and the old and new
+values. Ticking the two boxes again turns coaching back on the same way.
+
+**Check it.**
+```bash
+curl -fsS -H 'X-App-Channel: play' -H 'X-App-Version: <the live Play version>' \
+     https://api.your-domain/api/v1/config/capabilities
+```
+It must say `"can_pay_coaching_in_app": false` and `"can_show_coaching_prices": false`.
+The same call with `apk`, `web` and `ios` answers exactly what it did before.
+
+**What it does, and what it deliberately does not.** No coaching payment can START from
+a `play` build. A paid request, accepting a paid invitation, `renew: true` and a
+transfer to a coach each answer 403 `not_available_on_channel`, and nothing moves.
+Every read the `play` build makes carries no coaching price. The wallet still lists
+coaching money the person already paid, as it does on `ios`. Two things keep running
+(the manager's ruling of 2026-11-23, the status quo; a stricter cut is the owner's
+question):
+
+- A paid request ALREADY SENT can still be approved by the trainer, from any build.
+- A coaching already running keeps renewing from the wallet every month. The client
+  stops it with `renew: false` (`POST /api/v1/coaching/renewal/`), which every build
+  accepts. The monthly renewal runs with no request and so no build, and nothing in it
+  may depend on anything but the build.
+
+`tests/test_road10_r8_play_coaching_off.py` flips the row through this console form and
+proves all of the above.
