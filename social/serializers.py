@@ -300,6 +300,14 @@ class UserFollowSerializer(serializers.ModelSerializer):
         fields = ['id', 'follower', 'following', 'following_id', 'created_at']
         read_only_fields = ['id', 'created_at']
 
+    def update(self, instance, validated_data):
+        # Who is followed is fixed when the follow is made (the routes review,
+        # 2026-11-23): the view refuses PUT/PATCH, and this keeps any other caller of
+        # the serializer from re-pointing the row past the block check that runs only
+        # on create.
+        validated_data.pop('following', None)
+        return super().update(instance, validated_data)
+
     def validate_following_id(self, value):
         request = self.context.get('request')
         if request and request.user.is_authenticated and value.pk == request.user.pk:

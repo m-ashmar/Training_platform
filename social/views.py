@@ -107,6 +107,13 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     `not_your_follow` (was `permission_denied`); `POST follows/` with your own id is
     400 `validation_error` with the field code `cannot_follow_yourself` on
     `following_id`, and a follow you already have is 400 `already_following`.
+
+    A follow is never edited (the routes review, 2026-11-23): `PUT`/`PATCH
+    follows/{id}/` of your own follow answers 400 `follow_not_editable` and changes
+    nothing. It re-pointed the follow with `following_id` — onto someone who had blocked
+    you (the block is checked only when a follow is made), or onto a person you already
+    follow, which was a 500. To follow someone else, unfollow, then follow them. A row
+    you cannot see is still 404 `not_found`, someone else's 403 `not_your_follow`.
     """
     serializer_class = UserFollowSerializer
     permission_classes = [IsFollowParticipant]
@@ -121,6 +128,18 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             # Both sides, for the same reason: the caller is one of them, and the other
             # is not shown while their account is suspended (decision 8).
             public_q('follower'), public_q('following'))
+
+    def update(self, request, *args, **kwargs):
+        """PUT and PATCH (`partial_update` comes here): refused, see the class docstring.
+
+        `get_object()` first, so a follow the caller cannot see is 404 and someone else's
+        is 403 `not_your_follow`, exactly as before."""
+        self.get_object()
+        return Response(
+            {'error': _('A follow cannot be changed. Unfollow, then follow the other '
+                        'person.'),
+             'code': 'follow_not_editable'},
+            status=status.HTTP_400_BAD_REQUEST)
 
     def perform_create(self, serializer):
         target = serializer.validated_data.get('following')
@@ -1942,6 +1961,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only public user profiles with non-sensitive fields and social counts.
 
+    GET /api/social/users/public-profile/                      (paginated, `list` below)
     GET /api/social/users/public-profile/{id}/
     GET /api/social/users/public-profile/by_username/?username=<exact username>
     GET /api/social/users/public-profile/search/?q=<text>      (paginated, below)
@@ -1983,6 +2003,16 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         """Every account this viewer may see: publicly visible (`users/visibility.py`,
         the account is active), and neither side blocking."""
         return public_people().exclude(id__in=self._hidden())
+
+    def _listable(self):
+        """The people a LIST may show this viewer: what `_visible_people` allows, less the
+        caller, and only verified members (`client`, `trainer`). Staff, top-up agents and
+        sign-ups that never verified keep a profile that opens by id, but are never
+        listed (the owner's decision 7, 2026-09-24). `search/` and the plain list both
+        read this, so they cannot drift apart."""
+        return (self._visible_people()
+                .filter(email_verified=True, user_type__in=self.SEARCH_USER_TYPES)
+                .exclude(pk=self.request.user.pk))
 
     def _with_follow_figures(self, queryset):
         """`is_following` and `followers_count`, for the whole page in its own query."""
@@ -2038,6 +2068,25 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             Prefetch('earned_achievements', queryset=featured_badges_queryset(user),
                      to_attr='featured_badges'),
         )
+
+    def list(self, request, *args, **kwargs):
+        """GET /api/social/users/public-profile/ — the people `search/` may list, paged.
+
+        Auth required; no body; nothing differs by build. Nothing in the app calls it.
+        It inherited the viewset's queryset, so any signed-in person could page every
+        active account — staff, top-up agents and unverified sign-ups among them — which
+        the people search was written not to do (the owner's decision 7; the routes
+        review, 2026-11-23). It now lists exactly the set `search/` may show (`_listable`:
+        active, verified `client` and `trainer` accounts other than the caller, no block
+        either way), ordered by username, then id. A row is the full public profile, as
+        it always was. Paginated `{count, next, previous, results}`, 25 a page
+        (`page_size` up to 100). No codes of its own; a bad `page` / `page_size` is the
+        paginator's 400.
+        """
+        people = self.get_queryset().filter(pk__in=self._listable().values('pk'))
+        page = self.paginate_queryset(people.order_by('username', 'id'))
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def by_username(self, request):
@@ -2108,9 +2157,7 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
                  'code': 'query_too_short', 'min_length': self.SEARCH_MIN_LENGTH},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        people = (self._visible_people()
-                  .filter(email_verified=True, user_type__in=self.SEARCH_USER_TYPES)
-                  .exclude(pk=request.user.pk)
+        people = (self._listable()
                   .annotate(search_name=Concat('first_name', Value(' '), 'last_name'))
                   .filter(Q(username__istartswith=query)
                           | Q(first_name__istartswith=query)
