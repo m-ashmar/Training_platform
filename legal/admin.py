@@ -6,10 +6,15 @@ from then on it is the version the public page shows and it is read-only — the
 wording is a new version, started with the "Start a new draft from this version" action
 (it copies the text). Drafts may be deleted; published versions never are.
 
-**Account-deletion requests.** The queue, oldest first. Nothing here deletes an account:
-the operator confirms, by writing to the address, that the requester owns it, erases the
-account through the existing erasure, and then closes the request with one of the three
-actions, which stamp who and when. The page shows whether an active account uses the
+**Account-deletion requests.** The queue, oldest first. The operator confirms, by writing
+to the address, that the requester owns it, then runs "Erase the matching account, then
+close as erased" (Road to 10 R4, 2026-11-23): the one erasure (`CustomUser.retire()`),
+and the request closed in the same transaction. Before it, nothing here could delete an
+account and the console had no page that could, so a web request could not be finished
+without a shell. A request for no active account, an operator account, a trainer still
+coaching, or an erasure refused stays open with the reason; the money the account still
+holds is named, for support to return. The other three actions only close a request,
+stamping who and when. The page shows whether an active account uses the
 address — for the operator only; the public page never says. Nobody adds or deletes a
 request here: the page writes them, and retention removes them 180 days after they are
 handled (`training_platform/privacy/sources.py`).
@@ -107,7 +112,7 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
     search_fields = ("email",)
     ordering = ("created_at", "id")
     date_hierarchy = "created_at"
-    actions = ["mark_erased", "mark_no_account", "mark_declined"]
+    actions = ["erase_and_close", "mark_erased", "mark_no_account", "mark_declined"]
     # The requester's words are evidence and stay as sent; the status moves by action.
     readonly_fields = ("email", "reason", "status", "matching_account", "handled_at",
                        "handled_by", "created_at")
@@ -162,6 +167,80 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
             log_admin_action(request, row, f"status -> {status}")
             closed += 1
         self.message_user(request, f"{closed} request(s) closed: {label}.",
+                          messages.SUCCESS)
+
+    def _money_note(self, money):
+        """The money a deleted account leaves, in the operator's words: what support now
+        returns to the requester (the privacy policy: "contact us first to get it back")."""
+        parts = [f"its wallet holds {row['amount']} {row['currency']}"
+                 for row in money["wallet"]]
+        parts += [f"it still holds {row['amount']} {row['currency']} of the platform's "
+                  f"cash (not settled)" for row in money["agent_cash"]]
+        return "; ".join(parts)
+
+    @admin.action(description="Erase the matching account, then close as erased",
+                  permissions=["change"])
+    def erase_and_close(self, request, queryset):
+        """The web path's last step, in the console (Road to 10 R4, 2026-11-23). The
+        queue could only be CLOSED: the erasure it pointed to had no console page, so an
+        operator could not finish a request without a shell. After confirming ownership
+        by writing to the address, this erases the active account that uses it, through
+        the one erasure (`CustomUser.retire()`, the registry), and closes the request.
+
+        Row by row, each in its own transaction. A row stays OPEN, with the reason in
+        plain words, when: no active account uses the address (close it "no account");
+        the account is staff or a superuser (an operator account is never erased from
+        this queue); the account is a trainer who still coaches someone (the owner's
+        rule — the trainer ends each coaching first); or the erasure was refused (a held
+        payment or a verification document could not be removed — try again later).
+        Money the account still holds is named in the message, for support to return.
+        """
+        from django.db import transaction
+
+        from training_platform.privacy.registry import ErasureRefused
+        from training_platform.privacy.views import money_left
+        from users.models import CustomUser
+
+        erased = 0
+        for row in queryset.filter(status=DeletionRequestStatus.OPEN).order_by("id"):
+            label = f"Request #{row.pk} ({row.email})"
+            person = (CustomUser.objects.filter(email__iexact=row.email, is_active=True)
+                      .first() if row.email else None)
+            if person is None:
+                self.message_user(request, f"{label}: no active account uses this address. "
+                                  "Close it with 'no account'.", messages.WARNING)
+                continue
+            if person.is_staff or person.is_superuser:
+                self.message_user(request, f"{label}: account #{person.pk} is an operator "
+                                  "account and is not erased from this queue.",
+                                  messages.ERROR)
+                continue
+            try:
+                with transaction.atomic():
+                    person.retire(reason=f"web deletion request {row.pk}")
+                    row.status = DeletionRequestStatus.ERASED
+                    row.handled_at = timezone.now()
+                    row.handled_by = request.user
+                    row.save(update_fields=["status", "handled_at", "handled_by"])
+            except ErasureRefused as exc:
+                if exc.code == "trainer_has_active_clients":
+                    reason = (f"the trainer still coaches {exc.extra.get('active_clients', 0)} "
+                              "client(s); they must end each coaching first")
+                else:
+                    reason = ("a held payment or a verification document could not be "
+                              "removed; nothing was changed, try again later")
+                self.message_user(request, f"{label}: account #{person.pk} was NOT erased: "
+                                  f"{reason}. The request stays open.", messages.ERROR)
+                continue
+            log_admin_action(request, person, f"erased: web deletion request {row.pk}")
+            log_admin_action(request, row, "status -> erased (account erased)")
+            erased += 1
+            # Read after the erasure: a held month has been returned into the wallet.
+            note = self._money_note(money_left(person))
+            if note:
+                self.message_user(request, f"{label}: account #{person.pk} erased, but "
+                                  f"{note}. Return it to {row.email}.", messages.WARNING)
+        self.message_user(request, f"{erased} account(s) erased and request(s) closed.",
                           messages.SUCCESS)
 
     @admin.action(description="Close: the account was erased", permissions=["change"])

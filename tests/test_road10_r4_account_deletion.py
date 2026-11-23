@@ -5,6 +5,7 @@ code. Each finding fixed here failed on the code before it:
 
   an erased (or suspended) agent stayed in the clients' cash directory
   deletion said nothing of the money the account still held (`money`, every answer)
+  a web request could not be finished: the console could only close it, not erase
 """
 import uuid
 from decimal import Decimal
@@ -154,3 +155,83 @@ def test_an_agent_holding_the_platforms_cash_is_told_it_is_not_settled(make_user
     assert done.status_code == 200 and done.json()["money"]["agent_cash"] == owed
     # Deleting settled nothing: the platform's claim is still on record.
     assert _receivable(profile) == Decimal("5000.00")
+
+
+# ------------------------------------------------------------------ the web path
+QUEUE = "/dj-admin/legal/accountdeletionrequest/"
+
+
+def _requested(api, person):
+    from legal.models import AccountDeletionRequest
+
+    posted = api().post("/legal/delete-account/", {"email": person.email})
+    assert posted.status_code == 303
+    return AccountDeletionRequest.objects.get(email=person.email)
+
+
+def _operator_runs(client, make_user, row):
+    client.force_login(make_user(_name("op"), user_type="admin"))
+    resp = client.post(QUEUE, {"action": "erase_and_close", "_selected_action": [row.pk]},
+                       follow=True)
+    assert resp.status_code == 200
+    return [str(m) for m in resp.context["messages"]]
+
+
+@pytest.mark.parametrize("role", ["client", "agent", "trainer"])
+def test_a_web_request_is_finished_in_the_console_for_every_role(make_user, api, client,
+                                                                 role):
+    from legal.models import DeletionRequestStatus
+
+    person = make_user(_name(f"web_{role}"), user_type=role, email_verified=True)
+    row = _requested(api, person)
+    said = _operator_runs(client, make_user, row)
+
+    person.refresh_from_db()
+    row.refresh_from_db()
+    assert person.is_active is False, said
+    assert row.status == DeletionRequestStatus.ERASED and row.handled_by_id
+    assert any("1 account(s) erased" in line for line in said), said
+
+
+def test_a_web_request_for_a_trainer_still_coaching_stays_open_and_says_why(
+        make_user, api, client):
+    from legal.models import DeletionRequestStatus
+    from tests.test_coaching_months import _accepted
+
+    trainer, _client, _relation = _accepted(make_user, api, _name("webtr"))
+    row = _requested(api, trainer)
+    said = _operator_runs(client, make_user, row)
+
+    trainer.refresh_from_db()
+    row.refresh_from_db()
+    assert trainer.is_active and row.status == DeletionRequestStatus.OPEN
+    assert any("still coaches 1 client" in line for line in said), said
+
+
+def test_the_operator_is_told_the_money_to_return(make_user, api, client):
+    from tests.test_coaching_months import _fund
+
+    person = make_user(_name("webmoney"), email_verified=True)
+    _fund(person, "750.00")
+    said = _operator_runs(client, make_user, _requested(api, person))
+    assert any("750.00 SYP" in line and person.email in line for line in said), said
+
+
+def test_no_account_and_an_operator_account_are_left_open(make_user, api, client):
+    from legal.models import AccountDeletionRequest, DeletionRequestStatus
+
+    api().post("/legal/delete-account/", {"email": "nobody-here@gate.test"})
+    nobody = AccountDeletionRequest.objects.get(email="nobody-here@gate.test")
+    staff = make_user(_name("webstaff"), user_type="admin", email_verified=True)
+    staff_row = _requested(api, staff)
+    client.force_login(make_user(_name("op2"), user_type="admin"))
+    resp = client.post(QUEUE, {"action": "erase_and_close",
+                               "_selected_action": [nobody.pk, staff_row.pk]}, follow=True)
+    said = [str(m) for m in resp.context["messages"]]
+    staff.refresh_from_db()
+    assert staff.is_active
+    for row in (nobody, staff_row):
+        row.refresh_from_db()
+        assert row.status == DeletionRequestStatus.OPEN
+    assert any("no active account" in line for line in said), said
+    assert any("operator account" in line for line in said), said
