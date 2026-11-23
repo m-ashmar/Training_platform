@@ -605,6 +605,32 @@ docker compose exec -u appuser web python manage.py createsuperuser
 docker compose logs -f --tail=100 web worker beat
 ```
 
+**The store reviewers' accounts** (section 6's last line; ROAD_TO_10 R5; the review notes,
+`docs/store/review_notes.md` section 3). The password is typed at a hidden prompt and
+handed to the container by NAME (`-e VAR` with no value takes it from this shell), so it
+is never on the command line, in the shell history or in the process list. Run it after
+`bootstrap_platform`, and again shortly before each store submission:
+```bash
+read -rs REVIEW_ACCOUNTS_PASSWORD && export REVIEW_ACCOUNTS_PASSWORD
+export REVIEW_ACCOUNTS_EMAIL='appreview+{role}@your-domain'
+docker compose exec -u appuser -e REVIEW_ACCOUNTS_EMAIL -e REVIEW_ACCOUNTS_PASSWORD \
+    web python manage.py seed_review_accounts
+docker compose exec -u appuser web python manage.py seed_review_accounts --list
+unset REVIEW_ACCOUNTS_PASSWORD
+```
+- It refuses, writing nothing, without both variables, with a weak password, on a
+  database `bootstrap_platform` has not prepared, or when an address already belongs to
+  an account that is not a review account. Use the SAME address pattern every time: a
+  second run with another pattern is refused rather than making a second set.
+- A second run soon after changes nothing (`review accounts ready: nothing to change`).
+  A later one keeps the accounts alive: the Premium grant is extended below 30 days, a
+  new 7-day meal plan is made when none covers today, each programme's end date is moved
+  on below 14 days (a programme past its dates reads `finished` since D15), and a coached
+  client whose month has run out, or ends within the reminder's 3 days, is topped up by
+  the review agent and the month renewed — the agent stays suspended. A new password
+  rotates it and signs out every session taken with the old one.
+- Give the reviewers `client` and `trainer` only (the review notes say why).
+
 ### 12.4 What is different from Fly.io
 | | Fly.io (sections 2, 5, 10) | One server |
 |---|---|---|

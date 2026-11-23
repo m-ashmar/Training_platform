@@ -105,9 +105,19 @@ python manage.py seed_review_accounts --list     # the addresses, nothing change
 ```
 
 The password is read from the environment only — never an argument, never in a file.
-Run it again shortly before each submission: it extends the Premium grant when fewer
-than 30 days are left and makes a new 7-day meal plan when none covers today; nothing
-else changes on a second run. `{role}` is replaced by the role; without it the address
+Run it again shortly before each submission. A run soon after the last one changes
+nothing. A later one keeps the accounts alive (ROAD_TO_10 R5):
+- it extends the Premium grant when fewer than 30 days are left;
+- it makes a new 7-day meal plan when none covers today;
+- it moves each programme's end date on when fewer than 14 days are left, since a
+  programme past its dates reads `finished` and offers nothing to start;
+- when a coached client's month has run out, or ends within 3 days, and their wallet
+  cannot cover the next one, the review agent tops the wallet up and the month is
+  renewed, so the coaching is paid, not frozen. These are the ordinary agent top-up and
+  monthly renewal; the agent stays suspended.
+
+On the single server (`deploy/`) the command runs as `DEPLOY_CHECKLIST.md` section 12
+shows, with the password read at a hidden prompt. `{role}` is replaced by the role; without it the address
 is plus-addressed (`review+client@...`). A new password rotates it and signs out every
 session taken with the old one.
 
