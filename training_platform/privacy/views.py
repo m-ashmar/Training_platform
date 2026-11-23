@@ -98,6 +98,39 @@ async def _chunks(spool):
         yield chunk
 
 
+def money_left(user) -> dict:
+    """The money an account still holds, as deletion has to tell the person BEFORE they
+    confirm (R4, 2026-11-23). The privacy policy says it: "If there is money in your
+    wallet, contact us first to get it back" — erasure keeps wallets and ledgers
+    (financial records) but nobody can spend a deleted account's balance, and the
+    preview said only `{"rows": 1, "action": "keep"}`.
+
+    `wallet` — what each of the person's wallets holds, the non-zero ones only.
+    `held_coaching_months` — months of coaching held in escrow for a trainer that the
+    erasure returns to the client's wallet first (the wallet then holds more).
+    `agent_cash` — an agent only: the cash they collected for the platform and have not
+    settled; deleting the account does not settle it.
+    `contact_support` — any of the three is non-zero.
+
+    Amounts are decimal strings, each beside its currency. Read-only, no lock."""
+    from django.db.models import Sum
+
+    from users.models import CoachingPeriod
+    from wallet.models import AgentReceivableEntry, Wallet
+
+    wallet = [{"currency": w.currency, "amount": str(w.balance)}
+              for w in (Wallet.objects.filter(owner=user).exclude(balance=0)
+                        .order_by("currency", "id"))]
+    held = CoachingPeriod.objects.filter(client=user, status="held").count()
+    agent_cash = [{"currency": row["currency"], "amount": str(row["total"])}
+                  for row in (AgentReceivableEntry.objects.filter(agent__user=user)
+                              .values("currency").annotate(total=Sum("amount"))
+                              .order_by("currency"))
+                  if row["total"]]
+    return {"wallet": wallet, "held_coaching_months": held, "agent_cash": agent_cash,
+            "contact_support": bool(wallet or held or agent_cash)}
+
+
 class PersonalDataEraseView(APIView):
     """DELETE /api/privacy/erase/ — erasure request (GDPR Art. 17).
 
@@ -108,6 +141,17 @@ class PersonalDataEraseView(APIView):
     `?dry_run=1` reports what would happen without touching anything. `GET` is the same
     preview; for a trainer, `preview.trainer_relations.active_clients` counts the clients
     they still coach, and while it is above 0 the erasure is refused.
+
+    **The money left** (R4, 2026-11-23). `GET`, the 400 `confirmation_required` and the
+    200 each carry `money` beside the rest: `{wallet: [{currency, amount}],
+    held_coaching_months, agent_cash: [{currency, amount}], contact_support}` (see
+    `money_left`; only non-zero amounts are listed). Deleting is not refused for money:
+    while `contact_support` is true the app says, before the person confirms, that the
+    balance is not spendable after deletion and support returns it on request — the
+    privacy policy's "contact us first to get it back". On the 200 it is what remains
+    after the erasure (a held month already returned into `wallet`). For an agent,
+    `agent_cash` is the platform's cash they still hold: deleting does not settle it.
+    The same for every role and on every build.
 
     The anonymous AI training copies (`ai_training_data`) are found by the keyed
     pseudonym they are stored under and deleted, and counted like any other source.
@@ -126,8 +170,8 @@ class PersonalDataEraseView(APIView):
     refuses the erasure (`erasure_refused`, below).
 
     Answers:
-      200 `{message, detail}`   erased.
-      400 `confirmation_required` `{error, detail, code, preview}` — `confirm=ERASE`
+      200 `{message, detail, money}`   erased.
+      400 `confirmation_required` `{error, detail, code, preview, money}` — `confirm=ERASE`
           missing (it answered the status default `bad_request` until the owner's
           decision of 2026-09-24): show the preview and ask the user to confirm.
       409 `trainer_has_active_clients` with `active_clients` — a trainer still
@@ -146,7 +190,8 @@ class PersonalDataEraseView(APIView):
 
     def get(self, request):
         """Preview — what an erasure would remove."""
-        return Response({"preview": erase_user_data(request.user, dry_run=True)})
+        return Response({"preview": erase_user_data(request.user, dry_run=True),
+                         "money": money_left(request.user)})
 
     @transaction.atomic
     def delete(self, request):
@@ -158,6 +203,7 @@ class PersonalDataEraseView(APIView):
                     "detail": _("Repeat the request with confirm=ERASE. This cannot be undone."),
                     "code": "confirmation_required",
                     "preview": erase_user_data(request.user, dry_run=True),
+                    "money": money_left(request.user),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -191,4 +237,5 @@ class PersonalDataEraseView(APIView):
             return Response({"error": message, "code": "erasure_refused"},
                             status=status.HTTP_409_CONFLICT)
         logger.warning("Personal data erased for user %s: %s", user_id, report)
-        return Response({"message": _("Your personal data has been erased."), "detail": report})
+        return Response({"message": _("Your personal data has been erased."), "detail": report,
+                         "money": money_left(request.user)})
