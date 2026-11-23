@@ -36,6 +36,45 @@ from training_platform.admin_utils import log_admin_action
 from .models import AccountDeletionRequest, DeletionRequestStatus, LegalDocument
 
 
+def accounts_named_by(address):
+    """The ACTIVE accounts a deletion request's address names, by the project's one
+    lookup rule (`users/utils.py find_by_email`, BACKEND_BUGS B-033): the address
+    lower-cased, then as typed, each matched EXACTLY. Never `iexact`: Postgres folds the
+    dotless ı to I and the long ſ to S where Python's `lower()` does not, so a request
+    its owner confirmed for `samer@gmaıl.com` reached the real `samer@gmail.com` (the
+    integrator's review of R4, 2026-11-23).
+
+    A list, not one account: when the two spellings name two different accounts (a row
+    stored with its case, and an operator-made account that kept its own), both are
+    returned and the caller must pick neither. Empty when none does."""
+    from users.models import CustomUser
+    from users.utils import find_by_email
+
+    found = find_by_email(address, is_active=True)
+    if found is None:
+        return []
+    typed = (address or "").strip()
+    # `__in` is exact equality: the same rule, asked for the account it did not return.
+    rivals = (CustomUser.objects.filter(email__in={typed, typed.lower()}, is_active=True)
+              .exclude(pk=found.pk).order_by("pk"))
+    return [found, *rivals]
+
+
+def _log_or_fail(request, obj, message):
+    """A console log entry that RAISES when it cannot be written: inside the erasure's
+    transaction, so an erasure is never committed without its record.
+    `log_admin_action` swallows a failure, which is right for a closing stamp and wrong
+    here."""
+    from django.contrib.admin.models import CHANGE, LogEntry
+    from django.contrib.contenttypes.models import ContentType
+
+    LogEntry.objects.log_action(
+        user_id=request.user.pk,
+        content_type_id=ContentType.objects.get_for_model(obj.__class__).pk,
+        object_id=obj.pk, object_repr=str(obj), action_flag=CHANGE,
+        change_message=message)
+
+
 def _may_change(request, codename):
     return (is_console_operator(request.user)
             and request.user.has_perm(f"legal.{codename}"))
@@ -143,16 +182,18 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
 
     @admin.display(description="Active account with this address")
     def matching_account(self, obj):
-        from users.models import CustomUser
-
         if not obj.email:
             return "-"
-        user = (CustomUser.objects.filter(email__iexact=obj.email, is_active=True)
-                .only("pk", "email").first())
-        if user is None:
+        # The rule the erase action uses (`accounts_named_by`); `iexact` showed the real
+        # account beside a lookalike address.
+        people = accounts_named_by(obj.email)
+        if not people:
             return "none"
-        url = reverse(f"{self.admin_site.name}:users_customuser_change", args=[user.pk])
-        return format_html('<a href="{}">account #{}</a>', url, user.pk)
+        if len(people) > 1:
+            return "two accounts: " + ", ".join(f"#{person.pk}" for person in people)
+        url = reverse(f"{self.admin_site.name}:users_customuser_change",
+                      args=[people[0].pk])
+        return format_html('<a href="{}">account #{}</a>', url, people[0].pk)
 
     def _close(self, request, queryset, status, label):
         """Row by row through `save()`, logged — never a bulk update (see
@@ -187,8 +228,15 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
         by writing to the address, this erases the active account that uses it, through
         the one erasure (`CustomUser.retire()`, the registry), and closes the request.
 
-        Row by row, each in its own transaction. A row stays OPEN, with the reason in
-        plain words, when: no active account uses the address (close it "no account");
+        The account is found by the project's one lookup rule (`accounts_named_by`:
+        `find_by_email`, never `iexact`); the page stores the address lower-cased, so the
+        account erased is the one whose address is EXACTLY that, and an operator-made
+        account that differs only in case is another person's and is never touched.
+
+        Row by row, each in its own transaction, its two log entries inside it. A row
+        stays OPEN, with the reason in plain words, when: no active account uses the
+        address (close it "no account"); two active accounts could be meant (never
+        guessed between);
         the account is staff or a superuser (an operator account is never erased from
         this queue); the account is a trainer who still coaches someone (the owner's
         rule — the trainer ends each coaching first); or the erasure was refused (a held
@@ -199,17 +247,23 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
 
         from training_platform.privacy.registry import ErasureRefused
         from training_platform.privacy.views import money_left
-        from users.models import CustomUser
 
         erased = 0
         for row in queryset.filter(status=DeletionRequestStatus.OPEN).order_by("id"):
             label = f"Request #{row.pk} ({row.email})"
-            person = (CustomUser.objects.filter(email__iexact=row.email, is_active=True)
-                      .first() if row.email else None)
-            if person is None:
+            people = accounts_named_by(row.email) if row.email else []
+            if not people:
                 self.message_user(request, f"{label}: no active account uses this address. "
                                   "Close it with 'no account'.", messages.WARNING)
                 continue
+            if len(people) > 1:
+                self.message_user(
+                    request, f"{label}: two active accounts could be meant ("
+                    + ", ".join(f"#{person.pk} {person.email}" for person in people)
+                    + "). Nothing was erased and the request stays open; confirm with the "
+                    "requester which one, and erase it from its own page.", messages.ERROR)
+                continue
+            person = people[0]
             if person.is_staff or person.is_superuser:
                 self.message_user(request, f"{label}: account #{person.pk} is an operator "
                                   "account and is not erased from this queue.",
@@ -222,6 +276,10 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
                     row.handled_at = timezone.now()
                     row.handled_by = request.user
                     row.save(update_fields=["status", "handled_at", "handled_by"])
+                    # Inside the transaction, and raising: an erasure is never committed
+                    # without its record (the integrator's review, 2026-11-23).
+                    _log_or_fail(request, person, f"erased: web deletion request {row.pk}")
+                    _log_or_fail(request, row, "status -> erased (account erased)")
             except ErasureRefused as exc:
                 if exc.code == "trainer_has_active_clients":
                     reason = (f"the trainer still coaches {exc.extra.get('active_clients', 0)} "
@@ -232,8 +290,6 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
                 self.message_user(request, f"{label}: account #{person.pk} was NOT erased: "
                                   f"{reason}. The request stays open.", messages.ERROR)
                 continue
-            log_admin_action(request, person, f"erased: web deletion request {row.pk}")
-            log_admin_action(request, row, "status -> erased (account erased)")
             erased += 1
             # Read after the erasure: a held month has been returned into the wallet.
             note = self._money_note(money_left(person))
