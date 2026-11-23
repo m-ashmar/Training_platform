@@ -11,10 +11,10 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 (media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
 and order live in `BACKEND_DELTA.md`, not here.
 
-**Where things stand (2026-11-23):** Road to 10 is the work now: phase 0, batch A, phase 3 and
-S2.7, batch B and S2.13 are on this branch (full gate at `12cd8df`: 3066 passed, 0 failed); next
-are the later Road to 10 phases as the owner orders (the Road to 10 section below has the
-table per batch). The fix run is
+**Where things stand (2026-11-24):** Road to 10 is the work now: phase 0, batch A, phase 3,
+S2.7, batch B, S2.13, the review round of every landed batch and Part 4's R4, R5 and R8 are
+on this branch (full gate at `7c5f927` on a fresh database: 3162 passed, 2 failed, 0 skipped; the two failures are outside the round and pass alone or under a quiet load: SIDE_BUGS S-289, a test that fails in the hour after midnight, and S-290, S-245's wall-clock bound under a load average of 173); next are the later Road to 10 phases as the owner orders (the Road
+to 10 section below has the table per batch). The fix run is
 paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
 ## Build order
@@ -170,6 +170,20 @@ merged at its tip `47207b0` as `3945875`; LANDED with S2.13, full gate at `12cd8
 | S2.4 the free first workout (D10) | `d9e73a5` + `47207b0` | LANDED: home section `trial_workout` and `GET, POST /api/routine/trial-workout/` (404 `trial_not_offered` + `reason`); the client's own copy is `trial`, never assigned, not listed, no schedule, and in none of the numbers (`routine/outcomes._counted`: the streak, the week, and since `47207b0`, after the integrator's review, the coach's roster, client file, digest, attention queue and console streak). Migration `routine/0036`; `bootstrap_platform` step "platform templates" |
 | S2.10 platform starter templates (D16) | `0208f9e` | LANDED: eight platform templates (four goals x home/gym) in `public_templates/`, `by_platform`, `place` (field code `bad_place`), filters `?place=`, `?by_platform=`; a copy of a starter keeps its name; a trainer's own template cannot be made public through the API (400 `template_cannot_be_public`; the console still can). Migration `routine/0037`; the same `bootstrap_platform` step |
 
+**The review round and Part 4** (2026-11-23/24: each worker reviewed another's landed batch,
+and built R4, R5 and R8 of ROAD_TO_10 Part 4; merged on `road10/integration`, LANDED with the
+full gate at `7c5f927` on a fresh database: 3162 passed, 2 failed, 0 skipped; the two failures are outside the round and pass alone or under a quiet load: SIDE_BUGS S-289, a test that fails in the hour after midnight, and S-290, S-245's wall-clock bound under a load average of 173):
+
+| Item | Commits | State |
+|---|---|---|
+| Batch A review (S2.8, S2.1) | `b7ad726`, `f0b8b47`, `ace72c8`, `ca234f8` | LANDED: a new password is trimmed as sign-in trims; the five-guess limit counts each attempt before its check; a chat socket that only listens closes with 4001 at its token's expiry; a request to a trainer since suspended or blocked no longer blocks the next (never one holding money) |
+| Routes review (S3.7 findings) | `384ed62`, `bb08e74`, `497cab0` | LANDED: S-269 the public-profile list lists only the search's set; S-270 a follow is never edited (400 `follow_not_editable`, NEW code); S-273 the operator's trial grant is bounded, logged and locked |
+| Phase 0 review (S0.1, S0.3, S-262) | `3f491f0`, `2ccad4c`, `192c3ef`, `3eacd83`, `2bb99bb` | LANDED: a bought programme's `week` is its session block; both trainer lists use the directory's rule (`username` null, `client_count` from 5); a bought programme plans its sessions a week on Home and in the weekly goal |
+| Phase 3 review (S3.5, S3.1, S3.8) | `3396570`, `5ea4b34`, `ec8977a`, `7b7014a`, `caf15fd`, `264bc10` | LANDED: every write to a meal and its foods locks the meal first; `client_request_approved` / `_rejected` carry `trainer_id` and `client_id` both ways (the trainer's `trainer_id` was the client's id); the S3.8 sweep calls the 19 routes it skipped |
+| R4 account deletion per role | `4f3ec76`, `f89459b`, `43fd79a`, `41e5aec`, `4ec3fcf` | LANDED: an erased or suspended agent leaves the cash directory; `money` on GET/DELETE `privacy/erase/`; the console's "Erase the matching account, then close as erased" (operator + change permission; the account found by `find_by_email`, never `iexact`, two matches leave the request open: the integrator's HIGH, fixed in `4ec3fcf`; logs inside the transaction) |
+| R5 the store reviewers' accounts stay alive | `3203bae` | LANDED: a later `seed_review_accounts` run moves a programme's end on and keeps a coached month paid through the agent top-up path and `renew`; DEPLOY_CHECKLIST §12 has the owner's step |
+| R8 coaching off on Google Play with one row | `7973ea6` | LANDED: tests only, DEPLOY_CHECKLIST §13 has the console step |
+
 **S3.7, the routes the app never calls:** CLASSIFIED 2026-11-23, read-only (the table is the
 manager's note `road10-s37-unused-routes.md` in the side-session notes folder). 93 of the 301
 contract routes have no caller in the app: twin 43, dead 20, unbuilt 15, operator 6, machine 5,
@@ -190,7 +204,16 @@ choice, so a person cannot pay two periods ahead in one sitting); whether a trai
 unchanged copy of a platform starter template (today they can: `copy/`, then list the copy as a
 routine product). The server update (S3.3) is DEPLOY_CHECKLIST §12.5, "The Road to 10 update":
 migrate through the compose `migrate` service, then `bootstrap_platform` (writes the ten
-platform templates) and `create_starter_challenge`; the push to origin waits for the owner.
+platform templates) and `create_starter_challenge`; the push to origin waits for the owner; after it, and again before each store submission,
+`seed_review_accounts` (DEPLOY_CHECKLIST §12, the password at a hidden prompt). Also the
+owner's: access tokens stay valid up to 60 minutes after a password change (ending them at
+once needs SIMPLE_JWT `CHECK_REVOKE_TOKEN`, which signs every device out once when it is
+deployed); the trainer directory (`/api/v1/trainers/`) and `trainers/public/` are readable
+without signing in; an agent may delete the account while holding the platform's cash (the
+receivable stays on record; refusing with a code is a business ruling); R8's two limits (a
+trainer can still approve a paid request sent before the flip, and running coachings renew
+until the client sends `renew: false`); the stock `/admin/` (SIDE_BUGS S-274: gate it to
+console operators, or unmount it).
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
