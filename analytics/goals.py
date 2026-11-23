@@ -144,7 +144,8 @@ def weekly_targets(user_ids, today=None) -> dict:
     order `home/sections.py current_routine` reads), the days of the chosen routines'
     cycles that have exercises, and the stated training days.
     """
-    from home.sections import ROUTINES_CONSIDERED, pick_current_routine, planned_training_days
+    from home.sections import (ROUTINES_CONSIDERED, bought_sessions, pick_current_routine,
+                               planned_training_days)
     from routine.models import Routine, RoutineExercise
     from users.models import CustomUser
 
@@ -175,11 +176,15 @@ def weekly_targets(user_ids, today=None) -> dict:
 
     stated = dict(CustomUser.objects.filter(pk__in=ids)
                   .values_list('pk', 'training_days_per_week'))
+    # A buyer's copy plans its sessions a week (SIDE_BUGS S-262): two more queries, and
+    # only when one of the chosen routines is one.
+    sessions = bought_sessions(chosen.values(), first, working)
 
     answer = {}
     for uid in ids:
         routine = chosen.get(uid)
-        planned = (planned_training_days(routine, first, working.get(routine.pk, set()))
+        planned = (planned_training_days(routine, first, working.get(routine.pk, set()),
+                                         sessions.get(routine.pk))
                    if routine is not None else 0)
         days = stated.get(uid)
         if planned > 0:
