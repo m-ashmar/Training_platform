@@ -610,7 +610,9 @@ docker compose logs -f --tail=100 web worker beat
 
 ### 12.5 Updating a running server
 
-Every update, from `deploy/` on the server:
+Every update, from the `deploy/` directory of the server's checkout, wherever 12.3's clone
+was made (on the live server it is `/opt/yallagym/deploy`, with its `.env` beside it, from
+the owner's handover of 2026-11-21):
 ```bash
 docker compose exec -T db pg_dump -U yallagym --format=custom yallagym > ~/yallagym-before-update-$(date -u +%F-%H%M).dump
 git pull --ff-only
