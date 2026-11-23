@@ -302,16 +302,16 @@ def test_every_other_route_answers_a_trainer(people, api, make_user,
     assert fid in {row["id"] for row in rows}
     one = _coded(coach.get(f"/api/social/follows/{fid}/"))
     assert one.status_code == 200 and one.json()["id"] == fid, one.content
-    # PUT and PATCH each move the follow to another person, and it is stored.
+    # A follow is never edited (SIDE_BUGS S-270, bb08e74): PUT and PATCH answer a
+    # trainer what they answer a client, 400 `follow_not_editable`, never a 403 by
+    # role, and the follow still points at the person followed.
     other = make_user(_name("o"), first_name="Huda", email_verified=True)
-    put = _coded(coach.put(f"/api/social/follows/{fid}/", {"following_id": other.pk},
-                           content_type=JSON))
-    assert put.status_code == 200, put.content
-    assert UserFollow.objects.get(pk=fid).following_id == other.pk
-    patch = _coded(coach.patch(f"/api/social/follows/{fid}/", {"following_id": client.pk},
-                               content_type=JSON))
-    assert patch.status_code == 200, patch.content
-    assert UserFollow.objects.get(pk=fid).following_id == client.pk
+    for verb in (coach.put, coach.patch):
+        moved = _coded(verb(f"/api/social/follows/{fid}/", {"following_id": other.pk},
+                            content_type=JSON))
+        assert (moved.status_code, moved.json()["code"]) == (400, "follow_not_editable"), \
+            moved.content
+        assert UserFollow.objects.get(pk=fid).following_id == client.pk
     assert coach.delete(f"/api/social/follows/{fid}/").status_code == 204
     assert not UserFollow.objects.filter(pk=fid).exists()
 
