@@ -6214,3 +6214,13 @@ msgid ""
 msgstr ""
 "هذه خطة مدفوعة من المحفظة ولا يمكن عكسها وحدها. استرد قيمة الدفعة بدلاً من "
 "ذلك."
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "%(name)s accepted the coaching request."
+msgstr "قبِل %(name)s طلب التدريب."
+
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "%(name)s declined the coaching request."
+msgstr "رفض %(name)s طلب التدريب."

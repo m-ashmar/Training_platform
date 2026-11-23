@@ -197,8 +197,8 @@ so parse ids client-side.
 | `trainer_assignment_request` | `trainer_id`, `request_id` — the invitation; answer it with `POST /api/auth/client/respond-to-invite/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
 | `trainer_unassignment` | `trainer_id` |
 | `client_request_received` | `client_id`, `request_id` — to the trainer; answer it with `POST /api/auth/trainer/respond-to-request/` `{request_id, action}` (`request_id` since Road to 10 S3.1; `"0"` on a notice queued before) |
-| `client_request_approved` | `trainer_id` |
-| `client_request_rejected` | `trainer_id` |
+| `client_request_approved` | `trainer_id`, `client_id` — the coaching's two people. Sent both ways: to the CLIENT when the trainer accepts the client's request, to the TRAINER when the client accepts the trainer's invitation; the text names whoever answered. On the invitation path `trainer_id` was the client's id until the phase-3 review of Road to 10 S3.1 (`client_id` since then; `"0"` on a notice queued before) |
+| `client_request_rejected` | `trainer_id`, `client_id` — as `client_request_approved`, for a no |
 | `client_request_cancelled` | `client_id` — to the trainer; the request is gone, so there is no request to open |
 | `client_unassigned_trainer` | `client_id` — to the trainer; the client left |
 | `routine_assignment` | `related_object_id`, `related_object_type`, `routine_id` (since Road to 10 S3.1; the same id as `related_object_id`) |

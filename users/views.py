@@ -2178,9 +2178,14 @@ class ClientRespondToTrainerInviteView(APIView):
             refusal, relation = reject_trainer_relation(relation, request.user)
             if refusal is not None:
                 return refusal
+            client_id = request.user.id
+            client_name = request.user.full_name or request.user.username
+            # To the TRAINER: the relation's two ids, and the client who answered.
             transaction.on_commit(lambda: emit_event(ClientRequestRejectedEvent(
-                actor_id=request.user.id, recipient_id=trainer_id,
-                trainer_name=trainer.full_name or trainer.username)))
+                actor_id=client_id, recipient_id=trainer_id,
+                trainer_name=trainer.full_name or trainer.username,
+                trainer_id=trainer_id, client_id=client_id,
+                answered_by_name=client_name)))
             return Response({'message': _('Invitation declined.'),
                              'trainer_id': trainer_id, 'status': 'rejected'})
 
@@ -2195,9 +2200,14 @@ class ClientRespondToTrainerInviteView(APIView):
         refusal, relation = approve_trainer_relation(relation, request.user)
         if refusal is not None:
             return refusal
+        client_id = request.user.id
+        client_name = request.user.full_name or request.user.username
+        # To the TRAINER: the relation's two ids, and the client who answered.
         transaction.on_commit(lambda: emit_event(ClientRequestApprovedEvent(
-            actor_id=request.user.id, recipient_id=trainer_id,
-            trainer_name=trainer.full_name or trainer.username)))
+            actor_id=client_id, recipient_id=trainer_id,
+            trainer_name=trainer.full_name or trainer.username,
+            trainer_id=trainer_id, client_id=client_id,
+            answered_by_name=client_name)))
         logger.info(f"Client {request.user.id} accepted trainer {trainer_id}")
         return Response({'message': _('Invitation accepted.'),
                          'trainer_id': trainer_id, 'status': 'approved'})
@@ -2607,6 +2617,8 @@ class TrainerRespondToRequestView(APIView):
                     actor_id=request.user.id,
                     recipient_id=client.id,
                     trainer_name=request.user.full_name or request.user.username,
+                    trainer_id=request.user.id, client_id=client.id,
+                    answered_by_name=request.user.full_name or request.user.username,
                 ))
                 
                 logger.info(f"Trainer {request.user.id} approved client {client.id}")
@@ -2630,6 +2642,8 @@ class TrainerRespondToRequestView(APIView):
                     actor_id=request.user.id,
                     recipient_id=client.id,
                     trainer_name=request.user.full_name or request.user.username,
+                    trainer_id=request.user.id, client_id=client.id,
+                    answered_by_name=request.user.full_name or request.user.username,
                 ))
                 
                 logger.info(f"Trainer {request.user.id} rejected client {client.id}")
