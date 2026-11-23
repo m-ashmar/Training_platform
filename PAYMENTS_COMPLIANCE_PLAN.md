@@ -170,8 +170,15 @@ merged at its tip `47207b0` as `3945875`; LANDED with S2.13, full gate at `12cd8
 | S2.4 the free first workout (D10) | `d9e73a5` + `47207b0` | LANDED: home section `trial_workout` and `GET, POST /api/routine/trial-workout/` (404 `trial_not_offered` + `reason`); the client's own copy is `trial`, never assigned, not listed, no schedule, and in none of the numbers (`routine/outcomes._counted`: the streak, the week, and since `47207b0`, after the integrator's review, the coach's roster, client file, digest, attention queue and console streak). Migration `routine/0036`; `bootstrap_platform` step "platform templates" |
 | S2.10 platform starter templates (D16) | `0208f9e` | LANDED: eight platform templates (four goals x home/gym) in `public_templates/`, `by_platform`, `place` (field code `bad_place`), filters `?place=`, `?by_platform=`; a copy of a starter keeps its name; a trainer's own template cannot be made public through the API (400 `template_cannot_be_public`; the console still can). Migration `routine/0037`; the same `bootstrap_platform` step |
 
+**S3.7, the routes the app never calls:** CLASSIFIED 2026-11-23, read-only (the table is the
+manager's note `road10-s37-unused-routes.md` in the side-session notes folder). 93 of the 301
+contract routes have no caller in the app: twin 43, dead 20, unbuilt 15, operator 6, machine 5,
+web 3, agent 1. Recommendation: keep 23, retire 61 behind a v2 prefix, ask the owner about 9.
+NOTHING is retired: that is the owner's decision. Its security findings are SIDE_BUGS S-269 to
+S-274, each being verified by the worker named there.
+
 **Not built:** S2.5 (D2: no), S2.6 (D1: not now), S2.9 (later), S3.2 (the ShamCash rebuild waits for
-`sc-epay-doc.pdf`), S3.3 (the owner's server update), S3.6 (after launch), S3.7 (low priority).
+`sc-epay-doc.pdf`), S3.3 (the owner's server update: DEPLOY_CHECKLIST §12.5), S3.6 (after launch).
 
 **Owed by the owner:** whether a trainer's request limit rises from 1000 to 1500 an hour now that the
 community is a trainer's too (`training_platform/middleware.py`); the support WhatsApp number; the
@@ -179,8 +186,11 @@ Firebase credentials on the server; a review of the CONTENT the batch B worker w
 first workouts and the eight starter templates (`routine/data/platform_templates.py`: exercises,
 sets, reps, names in both languages); whether a second wallet payment of the same plan within 10
 minutes under another key stays refused (`already_paid`, `WALLET_REPEAT_WINDOW`: the money worker's
-choice, so a person cannot pay two periods ahead in one sitting). After the server update:
-`manage.py migrate`, then `manage.py bootstrap_platform` (writes the platform templates).
+choice, so a person cannot pay two periods ahead in one sitting); whether a trainer may sell an
+unchanged copy of a platform starter template (today they can: `copy/`, then list the copy as a
+routine product). The server update (S3.3) is DEPLOY_CHECKLIST §12.5, "The Road to 10 update":
+migrate through the compose `migrate` service, then `bootstrap_platform` (writes the ten
+platform templates) and `create_starter_challenge`; the push to origin waits for the owner.
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 

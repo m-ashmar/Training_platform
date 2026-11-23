@@ -360,7 +360,10 @@ REVIEW_ACCOUNTS_EMAIL='appreview+{role}@your-domain' REVIEW_ACCOUNTS_PASSWORD='�
 - `bootstrap_platform` brings an empty database to a launchable state and is safe to
   run again at any time (a second run prints `created 0` on every line): channel
   capabilities, quota features, plans, diet templates, achievements, the starter
-  exercises and the food catalogue (`load_food_catalogue --apply`, NEVER `--wipe`).
+  exercises, the platform's own templates (the two free first workouts and the eight
+  starter templates for trainers, Road to 10 S2.4 and S2.10: written once by key, never
+  rewritten, and not written while an exercise they name is missing, which its line
+  says) and the food catalogue (`load_food_catalogue --apply`, NEVER `--wipe`).
   **Never run `load_food_catalogue --wipe` against a live database**: it deletes what
   clients have eaten and every preference they built.
 - **A challenge to join on day one** (Road to 10 S3.4): after the first operator exists,
@@ -604,6 +607,55 @@ docker compose exec -u appuser web python manage.py check_media_storage
 docker compose exec -u appuser web python manage.py createsuperuser
 docker compose logs -f --tail=100 web worker beat
 ```
+
+### 12.5 Updating a running server
+
+Every update, from `deploy/` on the server:
+```bash
+docker compose exec -T db pg_dump -U yallagym --format=custom yallagym > ~/yallagym-before-update-$(date -u +%F-%H%M).dump
+git pull --ff-only
+docker compose build web
+docker compose up -d            # the migrate service runs first; web, worker, beat start only if it exits 0
+docker compose ps -a            # migrate: Exited (0). Everything else: Up / healthy
+docker compose logs --tail=50 migrate
+```
+Add any variable the update names below to `deploy/.env` BEFORE `docker compose up -d`
+(`setup.sh` never edits an existing file). A failed migration stops there with the old
+containers still serving; the dump is the way back. Then run the update's own commands.
+`bootstrap_platform` is safe after every update: it writes only what is missing.
+
+**The Road to 10 update** (2026-11-23: a server on `f77b3e1` or `f9f4cf1`, to
+`spec/payments-compliance` at `8a52c6c` or later):
+
+- Variables:
+  - Required, only on a `deploy/.env` written before 2026-11-21: `PUBLIC_PAGES_BASE_URL`
+    and the `APP_LINKS_*` lines, with the two commands in 12.3. Without the first,
+    `migrate` refuses to boot.
+  - Nothing became required after `f9f4cf1`.
+  - Optional, add only to change the default:
+    - `SUPPORT_WHATSAPP`: the Help page's number, e.g. `+9639…`. Empty hides the button;
+      the owner gives the number.
+    - `SUPPORT_EMAIL`: default `support@yalagym.com`.
+    - `CHALLENGE_HOST_LIMIT`: default 3.
+  - Push stays off until `FIREBASE_CREDENTIALS_JSON` is set (the owner's Firebase service
+    account key, `base64 -w0`; section 3.7).
+- Migrations the migrate service applies:
+
+  | Server on | Migrations |
+  |---|---|
+  | `f77b3e1` (also) | routine 0033, 0034, 0035 · social 0013, 0014 · subscription 0019, 0020 · users 0047 · wallet 0022 |
+  | `f77b3e1` or `f9f4cf1` | analytics 0006 (body measurements) · routine 0036 (platform templates, the free first workout), 0037 (a template's place) · subscription 0021 (a plan paid from the wallet) · users 0048 (the client's «do not renew») |
+
+- After `docker compose up -d`:
+  ```bash
+  docker compose exec -u appuser web python manage.py bootstrap_platform
+  docker compose exec -u appuser web python manage.py create_starter_challenge --creator <an operator's username>
+  docker compose exec -u appuser web python manage.py check_catalogue
+  ```
+  - The first run of `bootstrap_platform` shows 10 platform templates created; later runs
+    show 0.
+  - `create_starter_challenge` opens the community's starter challenge (section 6). It
+    creates nothing while one is upcoming or running.
 
 ### 12.4 What is different from Fly.io
 | | Fly.io (sections 2, 5, 10) | One server |
