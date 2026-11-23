@@ -1591,7 +1591,10 @@ class ClientRequestTrainerView(APIView):
 
     200 `{message, trainer_id, status: "pending"}`. Refusals, each with its `code`:
     400 `trainer_id_required`, `invalid_note`, `note_too_long`, `trainer_not_accepting`,
-    `already_has_trainer`, `request_pending_elsewhere`, `already_with_this_trainer`,
+    `already_has_trainer`, `request_pending_elsewhere` (the client's own request to
+    another trainer is still waiting; one to a trainer since suspended, or with a block
+    between them, does not count and is withdrawn when this one is sent),
+    `already_with_this_trainer`,
     `request_already_pending`, `app_channel_required` (no known `X-App-Channel`, for a
     trainer who charges); 402 `insufficient_balance` (with `required`, `balance` and
     `currency` — the month's price IN THE CLIENT'S CURRENCY, converted from the
@@ -1706,17 +1709,42 @@ class ClientRequestTrainerView(APIView):
             # Only the client's OWN outstanding request blocks them. Counting a
             # trainer's unanswered invitation here let any trainer freeze a client out
             # of choosing anybody, by inviting them and never withdrawing it.
-            has_pending_elsewhere = TrainerClientRelation.objects.filter(
-                client=request.user,
-                status='pending',
-                initiated_by='client',
-            ).exclude(trainer_id=trainer.id).exists()
+            #
+            # A request that can no longer be answered does not count (the batch A
+            # review of S2.1, 2026-11-23): its trainer suspended or erased, or a block
+            # between the two (approving it answers `user_blocked`). Home stopped showing
+            # such a request (`home/first_day.py open_request`), while this kept
+            # refusing every trainer the client chose next with `request_pending_
+            # elsewhere` — a client who saw "choose a trainer" and could choose none.
+            # It is withdrawn as this request is sent, below, as
+            # `client/cancel-trainer-request/` would, and nobody is told: the trainer
+            # is hidden or blocked. A row holding money (`hold_reference`) is never
+            # withdrawn and still counts.
+            from .visibility import is_public
+
+            elsewhere = list(TrainerClientRelation.objects
+                             .select_for_update(of=('self',))
+                             .select_related('trainer')
+                             .filter(client=request.user, status='pending',
+                                     initiated_by='client')
+                             .exclude(trainer_id=trainer.id))
+            unanswerable = [row for row in elsewhere if not row.hold_reference
+                            and (not is_public(row.trainer)
+                                 or is_blocked(request.user, row.trainer))]
+            has_pending_elsewhere = len(unanswerable) < len(elsewhere)
             if has_pending_elsewhere:
                 return Response(
                     {'error': _('You already have a pending request with another trainer. Please wait for a response or cancel it first.'),
                      'code': 'request_pending_elsewhere'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            # The requests nobody can answer any more give way to this one (above). Now,
+            # before it is written: the database keeps one pending request per client
+            # (`unique_pending_trainer_request_per_client`). No refusal below can follow
+            # one: with the client's request pending elsewhere, none is pending with this
+            # trainer (the same constraint) and none approved (`already_has_trainer`).
+            for row in unanswerable:
+                row.delete()
             
             # Check if relation already exists
             from .trainer_relations import quote_agreed_price

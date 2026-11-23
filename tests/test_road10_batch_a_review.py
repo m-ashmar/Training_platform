@@ -6,11 +6,14 @@ each failing on the code before its fix.
         tests/test_zz_road10_s28_guessing.py; here, that a right password costs no slot)
   S2.8  "every other session ends": a chat socket that only listened outlived its token
         (and so a password change and a logout), because only frames IN were re-checked
+  S2.1  a request Home no longer shows (trainer suspended, or a block between them) kept
+        refusing every next request with `request_pending_elsewhere`
 """
 import asyncio
 import json
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from asgiref.sync import async_to_sync
@@ -124,3 +127,55 @@ def test_s28_a_listening_chat_socket_closes_once_its_token_expires(
     assert live["type"] == "message.new"
     assert (after["type"], after["code"]) == ("error", "auth"), after
     assert closed == {"type": "websocket.close", "code": 4001}, closed
+
+
+# ------------------------------------------------------------------ S2.1
+def _home(api, person):
+    from training_platform.cache import private_cache
+
+    private_cache().clear()
+    body = api(person).get("/api/v1/home", HTTP_X_APP_CHANNEL="apk").json()
+    return {s["type"]: s["data"] for s in body["sections"]}
+
+
+def _coach(make_user, tag):
+    return make_user(_name(tag), user_type="trainer", first_name="Rami",
+                     email_verified=True, trainer_is_available=True,
+                     trainer_hourly_rate=Decimal("0"), trainer_goal_focus=["build_muscle"])
+
+
+@pytest.mark.parametrize("how", ["client_blocked", "trainer_blocked", "suspended"])
+def test_s21_a_request_nobody_can_answer_gives_way_to_the_next(make_user, api, how):
+    from moderation.models import Block
+    from users.models import CustomUser, TrainerClientRelation
+
+    first, second = _coach(make_user, "first"), _coach(make_user, "second")
+    client = make_user(_name("c21"), training_goal="build_muscle")
+    assert api(client).post("/api/auth/client/request-trainer/", {"trainer_id": first.pk},
+                            content_type=JSON).status_code == 200
+    if how == "client_blocked":
+        Block.objects.create(blocker=client, blocked=first)
+    elif how == "trainer_blocked":
+        Block.objects.create(blocker=first, blocked=client)
+    else:
+        CustomUser.objects.filter(pk=first.pk).update(is_active=False)
+    # Home stops showing it (S2.1, unchanged)...
+    assert "step" not in _home(api, client)["find_trainer_hero"]
+
+    # ...and it no longer holds the client back.
+    sent = api(client).post("/api/auth/client/request-trainer/", {"trainer_id": second.pk},
+                            content_type=JSON)
+    assert sent.status_code == 200, sent.content
+    assert not TrainerClientRelation.objects.filter(trainer=first, client=client).exists()
+    hero = _home(api, client)["find_trainer_hero"]
+    assert (hero["step"], hero["trainer"]["id"]) == ("waiting", second.pk)
+
+
+def test_s21_a_request_still_waiting_elsewhere_still_refuses(make_user, api):
+    first, second = _coach(make_user, "live1"), _coach(make_user, "live2")
+    client = make_user(_name("c21live"), training_goal="build_muscle")
+    assert api(client).post("/api/auth/client/request-trainer/", {"trainer_id": first.pk},
+                            content_type=JSON).status_code == 200
+    again = api(client).post("/api/auth/client/request-trainer/", {"trainer_id": second.pk},
+                             content_type=JSON)
+    assert (again.status_code, again.json()["code"]) == (400, "request_pending_elsewhere")
