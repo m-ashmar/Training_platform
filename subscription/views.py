@@ -1337,88 +1337,109 @@ class SubscriptionManagementView(APIView):
             )
     
     def post(self, request):
-        """Create a trial subscription for a user.
+        """An operator grants a person a free trial of a plan (the console's grant, over
+        the API).
 
-        Body: `{"user_id": <int>, "plan_id": <int>, "trial_days": 7}`. 201 is the new
-        subscription (`SubscriptionSerializer`), `status: "trial"`.
+        Body: `{"user_id": <int>, "plan_id": <int>, "trial_days": <int>}`. `trial_days`
+        is a whole number from 1 to the plan's `duration_days` (a number or a string of
+        digits); absent, it is 7, or the plan's length when that is shorter. 201 is the
+        new subscription (`SubscriptionSerializer`): `status: "trial"`, its access the
+        plan's until `trial_end_date`. No money moves and no payment is written.
+
+        Hardened as the console's own grant is (`subscription/admin.py
+        activate_subscriptions`; the manager's ruling of 2026-11-23, after the read-only
+        pass over the routes the app never calls): it is recorded as the operator's grant
+        (`source: "operator_grant"`, not a self-started `trial`), one admin log entry
+        names the operator, and it runs under the person's row lock, so two grants sent
+        together give one subscription and one `subscription_exists`, never a 500. It
+        granted any plan, a retired one included, for any length (36500 days was a
+        hundred-year Premium), and answered 500 for a `trial_days` that was not a number.
 
         | Status | `code` | Meaning |
         |---|---|---|
-        | 403 | `admins_only` | the caller is not staff |
+        | 401 | `not_authenticated` | no token |
+        | 403 | `admins_only` | not someone the console lets grant: `is_staff` AND the `subscription.change_subscription` permission (a superuser holds every one) |
         | 400 | `missing_fields` | `user_id` or `plan_id` missing |
-        | 400 | `invalid_user_or_plan` | either id names nothing |
-        | 400 | `subscription_exists` | that user already has a subscription (one per user) |
-        | 400 | `invalid_trial_days` | the trial would not end after it starts (`trial_days` not positive) |
+        | 400 | `invalid_user_or_plan` | either id is not an id or names nothing, or the plan is not active |
+        | 400 | `subscription_exists` | that person already has a subscription (one per person) |
+        | 400 | `invalid_trial_days` | `trial_days` is not a whole number from 1 to the plan's `duration_days` |
+        | 400 | `validation_error` | the body is not a JSON object |
         | 500 | `server_error` | unexpected fault |
 
         Each 400 answered only the status default, `bad_request`, until the owner's
-        decision of 2026-09-24.
+        decision of 2026-09-24. Nothing differs by build.
         """
-        try:
-            body = body_dict(request)
-            user_id = body.get('user_id')
-            plan_id = body.get('plan_id')
-            trial_days = body.get('trial_days', 7)
-            
-            if not user_id or not plan_id:
-                return Response(
-                    {'error': _('user_id and plan_id are required'),
-                     'code': 'missing_fields'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            try:
-                user = CustomUser.objects.get(id=user_id)
-                plan = SubscriptionPlan.objects.get(id=plan_id)
-            except (CustomUser.DoesNotExist, SubscriptionPlan.DoesNotExist):
-                return Response(
-                    {'error': _('Invalid user or plan ID'), 'code': 'invalid_user_or_plan'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Check if user already has subscription
-            if hasattr(user, 'subscription'):
+        from training_platform.admin_utils import log_admin_action
+
+        if not request.user.has_perm('subscription.change_subscription'):
+            raise PermissionDenied(detail=_('Only an administrator can do this.'),
+                                   code=AdminsOnly.code)
+        body = body_dict(request)
+        user_id = body.get('user_id')
+        plan_id = body.get('plan_id')
+        if not user_id or not plan_id:
+            return Response(
+                {'error': _('user_id and plan_id are required'),
+                 'code': 'missing_fields'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        user_id, plan_id = _whole_number(user_id), _whole_number(plan_id)
+        plan = (SubscriptionPlan.objects.filter(pk=plan_id, is_active=True).first()
+                if plan_id else None)
+        if user_id is None or plan is None or \
+                not CustomUser.objects.filter(pk=user_id).exists():
+            return Response(
+                {'error': _('Invalid user or plan ID'), 'code': 'invalid_user_or_plan'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if 'trial_days' in body:
+            trial_days = _whole_number(body['trial_days'])
+        else:
+            trial_days = min(7, plan.duration_days)
+        if trial_days is None or not 1 <= trial_days <= plan.duration_days:
+            return Response(
+                {'error': _('Request could not be completed.'), 'code': 'invalid_trial_days'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            # The person's row, so a second grant waits for the first and then sees
+            # its subscription (the console locks the subscription row it changes;
+            # here there is none yet to lock).
+            user = CustomUser.objects.select_for_update(no_key=True).get(pk=user_id)
+            if Subscription.objects.filter(user=user).exists():
                 return Response(
                     {'error': _('User already has a subscription'),
                      'code': 'subscription_exists'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            # Create trial subscription
-            trial_end = timezone.now() + timedelta(days=trial_days)
             subscription = Subscription.objects.create(
                 user=user,
                 plan=plan,
                 status='trial',
-                source='trial',
-                trial_end_date=trial_end
+                # The operator's grant, as the console records one: access with no
+                # payment behind it (`policy.money.EntitlementSource`).
+                source='operator_grant',
+                trial_end_date=timezone.now() + timedelta(days=trial_days),
             )
-            
-            logger.info(f"Created trial subscription {subscription.id} for user {user_id}")
-            
-            serializer = SubscriptionSerializer(subscription)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-            
-        except ValidationError as e:
-            logger.error(f"Validation error creating trial subscription: {str(e)}")
-            # `Subscription.clean`: with the plan's end derived from a positive
-            # duration, the one row it can refuse here is a trial that does not end
-            # after it starts.
-            return Response(
-                {'error': _('Request could not be completed.'), 'code': 'invalid_trial_days'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        except PASSTHROUGH_EXCEPTIONS:
-            # Control-flow exceptions carry their own correct status (404/403/401/400).
-            # The broad handler below turned every one of them into a 500, which is the
-            # wrong contract for the client and hides real faults in the error budget.
-            raise
-        except Exception as e:
-            logger.error(f"Error creating trial subscription: {str(e)}")
-            return Response(
-                {'error': _('Failed to create trial subscription')},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        log_admin_action(request, subscription,
+                         f"Trial of {plan.name} granted via the API for {trial_days} days")
+        logger.info("Operator %s granted subscription %s (trial, %s days) to user %s",
+                    request.user.pk, subscription.id, trial_days, user_id)
+        return Response(SubscriptionSerializer(subscription).data,
+                        status=status.HTTP_201_CREATED)
+
+
+def _whole_number(value):
+    """`value` as a positive or zero whole number, or None: an int (not a bool), or a
+    string of digits. A fraction, a float, a list or any other text is None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 class SubscriptionAccessView(APIView):
     """View to check subscription access for specific features with comprehensive validation"""

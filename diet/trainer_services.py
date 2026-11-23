@@ -626,6 +626,12 @@ class TrainerDietPlanService:
         # Atomic, because the old components are deleted before the new ones exist:
         # a failure halfway through emptied the client's meal.
         with transaction.atomic():
+            # The meal's row lock FIRST, the order the client's confirm and undo take
+            # (meal, then its foods, then the day): deleting the foods and then saving
+            # the meal deadlocked against a confirm of the same meal (Road to 10 S3.5,
+            # the phase-3 review).
+            list(Meal.objects.select_for_update().filter(pk=meal.pk)
+                 .values_list('pk', flat=True))
             if scheduled_time is not None:
                 meal.scheduled_time = scheduled_time
             if description is not None:

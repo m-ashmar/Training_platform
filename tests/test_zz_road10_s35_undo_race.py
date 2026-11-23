@@ -10,7 +10,11 @@ after the other and the meal ends one way or the other, whole.
 
 The gap is held open on purpose: the confirm's thread stops right after its first
 `transaction.atomic()` block in `diet/trainer_services.py` closes, and waits for the
-undo to finish (or to block, which is the fix). In a `test_zz_` file because
+undo to finish (or to block, which is the fix). What this proves is that the confirm's
+writes (ticks, flag, day, funnel event) are ONE transaction the undo cannot land
+inside. That the meal's lock is taken BEFORE any food is written, the order that keeps
+a confirm, an undo, a swap and a trainer's edit from deadlocking, is
+tests/test_road10_s35_lock_order.py's to prove (the second review). In a `test_zz_` file because
 `django_db(transaction=True)` truncates every table when it finishes; nothing seeded by
 a migration is relied on.
 """

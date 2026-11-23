@@ -3748,6 +3748,12 @@ class ClientMealInteractionView(APIView):
                 grams = _swap_grams(component, chosen)
                 rejected = component.food
                 with transaction.atomic():
+                    # The meal's row lock FIRST, the order the confirm and the undo
+                    # take (meal, then its foods, then the day): saving the food and
+                    # then the meal deadlocked against a confirm of the same meal
+                    # (Road to 10 S3.5, the phase-3 review).
+                    list(Meal.objects.select_for_update().filter(pk=component.meal_id)
+                         .values_list('pk', flat=True))
                     if MealComponent.objects.filter(meal=component.meal, food=chosen).exclude(pk=component.pk).exists():
                         # With a code (BACKEND_BUGS B-059); the envelope filled in the
                         # generic `conflict`, which says nothing the app can act on.

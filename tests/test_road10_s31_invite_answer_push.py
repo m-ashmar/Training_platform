@@ -92,10 +92,18 @@ def test_a_trainer_answering_a_request_tells_the_client_with_both_ids(
 
 
 def test_a_notice_queued_before_keeps_its_trainer_id():
-    """An event serialised before the new fields existed still renders and carries the
-    id it had (its actor), with `client_id` 0."""
+    """An event serialised before the new fields existed carries the id it had (its
+    actor) as `trainer_id`, with `client_id` 0. Its text is the new template's: a row
+    of the invitation path stored before this change, read again in the inbox, names
+    the trainer to himself until it ages out (the second review, accepted as
+    transient)."""
     from notifications.domain.trainer_client_events import ClientRequestApprovedEvent
 
     old = ClientRequestApprovedEvent.from_dict(
         {"actor_id": 7, "recipient_id": 8, "trainer_name": "Rami"})
     assert old.trainer_id == 0 and old.client_id == 0 and old.answered_by_name == ""
+    # What its push and inbox row then carry: the actor, as before, and client_id 0.
+    from notifications.listeners.trainer_client_listeners import _answer_ids
+
+    assert _answer_ids("client_request_approved", old) == {
+        "type": "client_request_approved", "trainer_id": 7, "client_id": 0}
