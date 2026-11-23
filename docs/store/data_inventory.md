@@ -1343,6 +1343,8 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **On erasure.** Kept.
 
+**Also on erasure.** before any row goes, `_unlist_agent` runs (`sources.py`).
+
 **Retention.** Kept for good, and after erasure.
 
 ### `agent_receivable` — `wallet.AgentReceivableEntry`
