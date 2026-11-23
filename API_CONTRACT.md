@@ -1519,6 +1519,18 @@ coaching fee. Matches carry up to three `reasons`, each `{code, text: {ar, en}}`
 | `GET` | `/api/v1/trainers/matches/` | auth (client) | `TrainerMatchesView` |
 | `GET` | `/api/v1/trainers/{id}/` | public | `TrainerDetailView` |
 
+**The legacy public list follows the directory** (Road to 10 phase 0 review, 2026-11-23).
+`GET /api/auth/trainers/public/` (public, kept for older builds) lists whom
+`GET /api/v1/trainers/` lists — a trainer with a first name (S0.3, B-198) on an enabled
+account shown to other people, with a confirmed address — of those accepting clients. A
+nameless trainer was still on it. Every key of its row stays: `username` is now always
+null (the directory never shows an account's username, and this list answers anyone),
+and `client_count` is the number from 5 up, null below (the owner's privacy rule, as
+for a programme's buyers). `?search=` matches first and last names only, as the
+directory's does (a username search would confirm the names it no longer shows).
+`trainer_hourly_rate` / `coaching_currency` are unchanged: null together on a build that
+may not show a coaching fee.
+
 ### Coaching (monthly)
 
 Coaching is sold by the month: month 1 is held when the trainer accepts and paid out when
