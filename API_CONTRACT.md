@@ -2919,6 +2919,10 @@ achievement_not_earned` (a 500). The views' docstrings carry the full contract.
   `{count, next, previous, results}`; a row is a subset of the public profile: `{id,
   username, user_type, first_name, last_name, profile_picture_url, followers_count,
   is_following, member_since}`. `by_username/` is unchanged (exact, case-sensitive).
+  The plain list `GET /api/social/users/public-profile/` (nothing in the app calls it)
+  lists exactly that set too, ordered by username, rows the full public profile: it
+  paged every active account, staff, agents and unverified sign-ups included (the
+  routes review, 2026-11-23). A profile still opens by id for any visible account.
 
 **What the fix run changed in the community** (BACKEND_BUGS B-161, B-162; SIDE_BUGS
 S-189, S-194, S-218, S-219; the owner's decisions of 2026-09-28). Additive: no route,

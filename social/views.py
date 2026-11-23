@@ -1942,6 +1942,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only public user profiles with non-sensitive fields and social counts.
 
+    GET /api/social/users/public-profile/                      (paginated, `list` below)
     GET /api/social/users/public-profile/{id}/
     GET /api/social/users/public-profile/by_username/?username=<exact username>
     GET /api/social/users/public-profile/search/?q=<text>      (paginated, below)
@@ -1983,6 +1984,16 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
         """Every account this viewer may see: publicly visible (`users/visibility.py`,
         the account is active), and neither side blocking."""
         return public_people().exclude(id__in=self._hidden())
+
+    def _listable(self):
+        """The people a LIST may show this viewer: what `_visible_people` allows, less the
+        caller, and only verified members (`client`, `trainer`). Staff, top-up agents and
+        sign-ups that never verified keep a profile that opens by id, but are never
+        listed (the owner's decision 7, 2026-09-24). `search/` and the plain list both
+        read this, so they cannot drift apart."""
+        return (self._visible_people()
+                .filter(email_verified=True, user_type__in=self.SEARCH_USER_TYPES)
+                .exclude(pk=self.request.user.pk))
 
     def _with_follow_figures(self, queryset):
         """`is_following` and `followers_count`, for the whole page in its own query."""
@@ -2038,6 +2049,25 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
             Prefetch('earned_achievements', queryset=featured_badges_queryset(user),
                      to_attr='featured_badges'),
         )
+
+    def list(self, request, *args, **kwargs):
+        """GET /api/social/users/public-profile/ — the people `search/` may list, paged.
+
+        Auth required; no body; nothing differs by build. Nothing in the app calls it.
+        It inherited the viewset's queryset, so any signed-in person could page every
+        active account — staff, top-up agents and unverified sign-ups among them — which
+        the people search was written not to do (the owner's decision 7; the routes
+        review, 2026-11-23). It now lists exactly the set `search/` may show (`_listable`:
+        active, verified `client` and `trainer` accounts other than the caller, no block
+        either way), ordered by username, then id. A row is the full public profile, as
+        it always was. Paginated `{count, next, previous, results}`, 25 a page
+        (`page_size` up to 100). No codes of its own; a bad `page` / `page_size` is the
+        paginator's 400.
+        """
+        people = self.get_queryset().filter(pk__in=self._listable().values('pk'))
+        page = self.paginate_queryset(people.order_by('username', 'id'))
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def by_username(self, request):
@@ -2108,9 +2138,7 @@ class PublicUserProfileViewSet(viewsets.ReadOnlyModelViewSet):
                  'code': 'query_too_short', 'min_length': self.SEARCH_MIN_LENGTH},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        people = (self._visible_people()
-                  .filter(email_verified=True, user_type__in=self.SEARCH_USER_TYPES)
-                  .exclude(pk=request.user.pk)
+        people = (self._listable()
                   .annotate(search_name=Concat('first_name', Value(' '), 'last_name'))
                   .filter(Q(username__istartswith=query)
                           | Q(first_name__istartswith=query)
