@@ -53,16 +53,50 @@ def _wrong_count(user_id) -> int:
         return 0
 
 
-def _count_wrong(user_id) -> None:
+def _take_attempt(user_id) -> int:
+    """Count this attempt BEFORE the password is checked, and answer its number.
+
+    Read first and counted after the check, the limit let every request already in
+    flight through: twenty sent at once all read 0, all checked a guess, and twenty
+    guesses passed a limit of five (the batch A review, 2026-11-23). The add-or-increment
+    is one atomic step in the cache, so the sixth request at once is the sixth. 0 when
+    the cache is down: fail open, as the platform's limiter does."""
     from training_platform.cache import ratelimit_cache
 
     cache = ratelimit_cache()
+    key = _wrong_key(user_id)
     try:
-        if not cache.add(_wrong_key(user_id), 1, WRONG_CURRENT_WINDOW_SECONDS):
-            cache.incr(_wrong_key(user_id))
+        if cache.add(key, 1, WRONG_CURRENT_WINDOW_SECONDS):
+            return 1
+        try:
+            return int(cache.incr(key))
+        except ValueError:
+            # The window ended between the two calls: this attempt opens the next one.
+            cache.set(key, 1, WRONG_CURRENT_WINDOW_SECONDS)
+            return 1
     except Exception:
-        logger.warning("could not count a wrong current password for user %s", user_id,
+        logger.warning("could not count a password change attempt for user %s", user_id,
                        exc_info=True)
+        return 0
+
+
+def _give_back(user_id) -> None:
+    """The current password was right: this attempt was no guess, so it does not count."""
+    from training_platform.cache import ratelimit_cache
+
+    try:
+        ratelimit_cache().decr(_wrong_key(user_id))
+    except Exception:
+        pass
+
+
+def _throttled():
+    response = Response(
+        {'error': _('Too many attempts. Try again later.'), 'code': 'throttled',
+         'retry_after_seconds': WRONG_CURRENT_WINDOW_SECONDS},
+        status=status.HTTP_429_TOO_MANY_REQUESTS)
+    response['Retry-After'] = str(WRONG_CURRENT_WINDOW_SECONDS)
+    return response
 
 
 class PasswordChangeView(APIView):
@@ -83,7 +117,7 @@ class PasswordChangeView(APIView):
     | `400` | `current_password_wrong` | `current_password` is not the account's password, with `field`; nothing changes |
     | `400` | `password_unchanged` | `new_password` is the current one, with `field` |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
-    | `429` | `throttled` | five wrong current passwords within 15 minutes; `retry_after_seconds` and `Retry-After` say when to try again |
+    | `429` | `throttled` | five wrong current passwords within 15 minutes — counted as each attempt arrives, so requests sent at once past the fifth are refused before their password is checked; `retry_after_seconds` and `Retry-After` say when to try again |
 
     The same on every build.
     """
@@ -93,24 +127,22 @@ class PasswordChangeView(APIView):
     def post(self, request):
         user = request.user
         if _wrong_count(user.pk) >= MAX_WRONG_CURRENT:
-            response = Response(
-                {'error': _('Too many attempts. Try again later.'), 'code': 'throttled',
-                 'retry_after_seconds': WRONG_CURRENT_WINDOW_SECONDS},
-                status=status.HTTP_429_TOO_MANY_REQUESTS)
-            response['Retry-After'] = str(WRONG_CURRENT_WINDOW_SECONDS)
-            return response
+            return _throttled()
 
         serializer = PasswordChangeSerializer(data=request.data, context={'user': user})
         serializer.is_valid(raise_exception=True)
         current = serializer.validated_data['current_password']
         new = serializer.validated_data['new_password']
 
+        # The slot is taken before the guess is checked, never after (see _take_attempt).
+        if _take_attempt(user.pk) > MAX_WRONG_CURRENT:
+            return _throttled()
         if not user.check_password(current):
-            _count_wrong(user.pk)
             return Response({'error': _('Your current password is not correct.'),
                              'code': 'current_password_wrong',
                              'field': 'current_password'},
                             status=status.HTTP_400_BAD_REQUEST)
+        _give_back(user.pk)
         if user.check_password(new):
             return Response({'error': _('Choose a password different from your '
                                         'current one.'),
