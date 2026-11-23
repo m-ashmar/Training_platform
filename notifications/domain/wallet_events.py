@@ -5,9 +5,12 @@ top-up endpoints). The design promises the client hears of it at once: AgentRece
 «وصل رصيده فوراً، ووصله إشعار», and the agent README "the client gets a push at the same
 moment".
 
-A top-up is WALLET_MOVE — money handed to a person in a shop, not a digital good — so it
-reaches every build (the spec, section 3: "top-up is done with an agent in person, so
-there is nothing to hide"). The text still states the fact only and names no amount,
+A top-up is WALLET_MOVE — money handed to a person in a shop, not a digital good — so
+the NOTICE reaches the client whatever their build (the spec, section 3: "top-up is
+done with an agent in person, so there is nothing to hide"). Whether the top-up can be
+made is the AGENT's build, not the client's: the agent's app is refused where
+`can_transfer_wallet` is off, the first `ios` build by the spec's table (BACKEND_BUGS
+B-199). The text still states the fact only and names no amount,
 like every other notice in this package: the amount, the currency and the reference ride
 in `data`, for the app to show beside its own balance.
 """
