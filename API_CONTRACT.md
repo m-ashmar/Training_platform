@@ -1529,7 +1529,9 @@ and `client_count` is the number from 5 up, null below (the owner's privacy rule
 for a programme's buyers). `?search=` matches first and last names only, as the
 directory's does (a username search would confirm the names it no longer shows).
 `trainer_hourly_rate` / `coaching_currency` are unchanged: null together on a build that
-may not show a coaching fee.
+may not show a coaching fee. The signed-in client's list, `GET
+/api/auth/client/available-trainers/`, follows the same listing rule (blocks still left
+out) and the same `client_count` rule; its `username` and search are unchanged.
 
 ### Coaching (monthly)
 
