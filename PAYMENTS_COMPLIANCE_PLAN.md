@@ -12,8 +12,8 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 and order live in `BACKEND_DELTA.md`, not here.
 
 **Where things stand (2026-11-23):** Road to 10 is the work now: phase 0, batch A, phase 3 and
-S2.7 are on this branch (full gate at `24170ca`: 3003 passed, 0 failed); S2.13 and batch B are
-merged on `road10/integration`, their full gate pending (the Road to 10 section below has the
+S2.7, batch B and S2.13 are on this branch (full gate at `12cd8df`: 3066 passed, 0 failed); next
+are the later Road to 10 phases as the owner orders (the Road to 10 section below has the
 table per batch). The fix run is
 paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
@@ -159,16 +159,16 @@ BACKEND_BUGS rows there). Workers never edit this file, BACKEND_BUGS.md or SIDE_
 | Item | Commit | State |
 |---|---|---|
 | S2.7 "do not renew after this month" (D12) | `7c8dc0a` | LANDED (merged as `b906639`; full gate at `24170ca`: 3003 passed, 0 failed): `POST /api/v1/coaching/renewal/` `{renew}`; `stop_renewal`, `ends_at`, `ending_reminder` on `coaching/current/`; push `coaching_ending_soon`; migration `users/0048`. Its own adversarial review found 2 MEDIUM, both fixed before the commit |
-| S2.13 a plan paid from the wallet (D19) | `b65efbf` | MERGED on `road10/integration` (`a15834f`), batch gate pending: `POST /api/subscription/v1/subscriptions/{id}/pay-from-wallet/` `{idempotency_key, amount, currency}` (all required), `require_purchase_allowed(PLATFORM_SUB)` first so `play`/`ios` refuse before the body is read; `PaymentService.pay_from_wallet` takes the price from the wallet to the platform (100%) and completes the payment in ONE transaction; the same key replays, another key within 10 minutes is 409 `already_paid`; `GET v1/gateways/` adds `can_pay_from_wallet` and `wallet` BESIDE `gateways`; the console's reversal refuses the payment's row (409 `plan_payment_leg`). Migration `subscription/0021`. The integrator checked the diff against the money rules (lock order, one transaction, no mint, refund at the leg's own amount); its own adversarial review found 4 MEDIUM, all fixed before the commit |
+| S2.13 a plan paid from the wallet (D19) | `b65efbf` | LANDED (merged as `a15834f`; full gate at `12cd8df`: 3066 passed, 0 failed): `POST /api/subscription/v1/subscriptions/{id}/pay-from-wallet/` `{idempotency_key, amount, currency}` (all required), `require_purchase_allowed(PLATFORM_SUB)` first so `play`/`ios` refuse before the body is read; `PaymentService.pay_from_wallet` takes the price from the wallet to the platform (100%) and completes the payment in ONE transaction; the same key replays, another key within 10 minutes is 409 `already_paid`; `GET v1/gateways/` adds `can_pay_from_wallet` and `wallet` BESIDE `gateways`; the console's reversal refuses the payment's row (409 `plan_payment_leg`). Migration `subscription/0021`. The integrator checked the diff against the money rules (lock order, one transaction, no mint, refund at the leg's own amount); its own adversarial review found 4 MEDIUM, all fixed before the commit |
 
 **Batch B** (worker "Road to 10 batch B", branch `claude/road10-batch-b-4a061f`, cut from `b18fb0b`;
-merged at its tip `47207b0` on `road10/integration` as `3945875`, batch gate pending):
+merged at its tip `47207b0` as `3945875`; LANDED with S2.13, full gate at `12cd8df`: 3066 passed, 0 failed):
 
 | Item | Commit | State |
 |---|---|---|
-| S2.11 body measurements (D18) | `4cd0dde` | MERGED: no new route; `POST /api/analytics/metrics/` takes `chest` 60-160, `arm` 20-60, `waist` 50-160, `thigh` 30-100, always in `cm` (new field code `unit_not_cm`); `GET metrics/?latest_for=<types>` answers the caller's newest row of each (400 `bad_metric_type`; not B-181's `latest_for`, which is on the exercise-progress list). Migration `analytics/0006` (choices only) |
-| S2.4 the free first workout (D10) | `d9e73a5` + `47207b0` | MERGED: home section `trial_workout` and `GET, POST /api/routine/trial-workout/` (404 `trial_not_offered` + `reason`); the client's own copy is `trial`, never assigned, not listed, no schedule, and in none of the numbers (`routine/outcomes._counted`: the streak, the week, and since `47207b0`, after the integrator's review, the coach's roster, client file, digest, attention queue and console streak). Migration `routine/0036`; `bootstrap_platform` step "platform templates" |
-| S2.10 platform starter templates (D16) | `0208f9e` | MERGED: eight platform templates (four goals x home/gym) in `public_templates/`, `by_platform`, `place` (field code `bad_place`), filters `?place=`, `?by_platform=`; a copy of a starter keeps its name; a trainer's own template cannot be made public through the API (400 `template_cannot_be_public`; the console still can). Migration `routine/0037`; the same `bootstrap_platform` step |
+| S2.11 body measurements (D18) | `4cd0dde` | LANDED: no new route; `POST /api/analytics/metrics/` takes `chest` 60-160, `arm` 20-60, `waist` 50-160, `thigh` 30-100, always in `cm` (new field code `unit_not_cm`); `GET metrics/?latest_for=<types>` answers the caller's newest row of each (400 `bad_metric_type`; not B-181's `latest_for`, which is on the exercise-progress list). Migration `analytics/0006` (choices only) |
+| S2.4 the free first workout (D10) | `d9e73a5` + `47207b0` | LANDED: home section `trial_workout` and `GET, POST /api/routine/trial-workout/` (404 `trial_not_offered` + `reason`); the client's own copy is `trial`, never assigned, not listed, no schedule, and in none of the numbers (`routine/outcomes._counted`: the streak, the week, and since `47207b0`, after the integrator's review, the coach's roster, client file, digest, attention queue and console streak). Migration `routine/0036`; `bootstrap_platform` step "platform templates" |
+| S2.10 platform starter templates (D16) | `0208f9e` | LANDED: eight platform templates (four goals x home/gym) in `public_templates/`, `by_platform`, `place` (field code `bad_place`), filters `?place=`, `?by_platform=`; a copy of a starter keeps its name; a trainer's own template cannot be made public through the API (400 `template_cannot_be_public`; the console still can). Migration `routine/0037`; the same `bootstrap_platform` step |
 
 **Not built:** S2.5 (D2: no), S2.6 (D1: not now), S2.9 (later), S3.2 (the ShamCash rebuild waits for
 `sc-epay-doc.pdf`), S3.3 (the owner's server update), S3.6 (after launch), S3.7 (low priority).
