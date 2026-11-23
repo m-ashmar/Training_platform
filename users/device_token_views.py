@@ -48,8 +48,14 @@ class FCMTokenView(APIView):
         its build is shown (`notifications/build_gate.py`): on a store build three
         notices read differently or are not pushed (see `GET /api/social/notifications/`).
         A token registered with no known channel is the strictest build, or the ios
-        build when `platform` is `ios`. Re-registering an existing token records the
-        channel again; a request that declares none leaves the recorded one."""
+        build when `platform` is `ios`.
+
+        Re-registering a token the server already has UPDATES that one row, never a
+        second: its account, `platform`, and the build and version it records now — the
+        channel this request declares and its version (body, else header). Register on
+        every cold start and every token refresh, so the build a device is pushed for is
+        the build it runs. A request that declares no channel, or no version, leaves the
+        recorded one."""
         token = request.data.get('token')
         if not token:
             message = _('Token is required')

@@ -358,3 +358,26 @@ def test_the_gate_reads_the_build_and_nothing_else():
     assert build_gate.hidden_event_types(flags_for("apk")) == []
     assert build_gate.hidden_event_types(flags_for("ios")) == ["checkout_expired"]
     assert build_gate.hidden_event_types(flags_for(None)) == ["checkout_expired"]
+
+
+def test_registering_the_same_token_again_updates_its_build(make_user, api):
+    """The app registers its token on every cold start and token refresh: the same token
+    with another channel or version updates the one row, never a second."""
+    from users.models import DeviceToken
+
+    person = make_user(_name("again"))
+    token = f"tok-again-{uuid.uuid4().hex}"
+
+    def register(channel, version):
+        return api(person).post(TOKENS, {"token": token, "platform": "android"},
+                                content_type=JSON, HTTP_X_APP_CHANNEL=channel,
+                                HTTP_X_APP_VERSION=version)
+
+    assert register("play", "1.0.0").status_code == 201
+    assert register("apk", "1.2.0").status_code == 200
+    rows = DeviceToken.objects.filter(token=token)
+    assert rows.count() == 1
+    assert (rows[0].app_channel, rows[0].app_version) == ("apk", "1.2.0")
+    assert register("play", "1.3.0").status_code == 200
+    assert (DeviceToken.objects.get(token=token).app_channel,
+            DeviceToken.objects.get(token=token).app_version) == ("play", "1.3.0")
