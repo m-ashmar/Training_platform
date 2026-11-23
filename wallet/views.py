@@ -716,7 +716,10 @@ class AgentDirectoryView(generics.ListAPIView):
 
     Only agents an operator has LISTED (`is_listed`) and whose account is `active`
     appear; an agent who has not agreed to be published is not published, and one who
-    is suspended is not sent a customer. `?city=` filters, case-insensitively, to the
+    is suspended is not sent a customer. "Active" is both the agent profile's `status`
+    AND the person's account (`users/visibility.py`): an agent who deleted their account,
+    or whose account was suspended, stayed listed — shop name, city and phone — while
+    no top-up they could make would ever reach a client (R4, 2026-11-23). `?city=` filters, case-insensitively, to the
     city heading the screen shows.
 
     Paying an agent cash is not an in-app purchase of anything — it is how money gets
@@ -729,8 +732,11 @@ class AgentDirectoryView(generics.ListAPIView):
     serializer_class = AgentListingSerializer
 
     def get_queryset(self):
+        from users.visibility import public_q
+
         qs = (AgentProfile.objects
               .filter(is_listed=True, status="active")
+              .filter(public_q("user"))
               .select_related("user")
               .order_by("city", "display_name", "id"))
         city = self.request.query_params.get("city")

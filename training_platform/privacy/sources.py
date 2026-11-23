@@ -711,7 +711,24 @@ register(PersonalDataSource(label="ai_consent", model="moderation.AIConsent",
 # opening_hours and public_phone (the shop line, never the number they registered
 # with) — travels with their own export and is kept under erasure like the rest of the
 # financial record. A new field on this model needs no change here; a new model does.
+def _unlist_agent(user, queryset, *, dry_run):
+    """An agent who erases their account is no longer offered to anyone (R4,
+    2026-11-23). The profile is kept, a financial record like the ledger it names, but
+    it stayed `is_listed`: clients were still sent, by name, city and shop phone, to
+    hand cash to an account that can no longer credit them. The directory also requires
+    the account to be active (`wallet/views.py AgentDirectoryView`); this makes the row
+    itself say so, for the console and for a reinstated account (an operator lists it
+    again on purpose). Counts nothing: the source's own count is the report."""
+    if dry_run:
+        return {}
+    for profile in queryset.filter(is_listed=True):
+        profile.is_listed = False
+        profile.save(update_fields=["is_listed", "updated_at"])
+    return {}
+
+
 register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", user_field="user", on_erase="keep",
+                            before_erase=_unlist_agent,
                             purpose=("An agent's account: limits, status, allowed "
                                      "addresses, and the listing they agreed to show "
                                      "signed-in users (shop name, city, area, hours, shop "
