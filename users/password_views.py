@@ -23,8 +23,13 @@ WRONG_CURRENT_WINDOW_SECONDS = 15 * 60
 
 
 class PasswordChangeSerializer(serializers.Serializer):
-    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
-    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    # Trimmed, as every other password field is: sign-up, `login/`, `token/` and the
+    # reset all drop the spaces around a password (DRF's default). Kept here, a new
+    # password typed with a trailing space was stored with it, and no sign-in could ever
+    # match it again — the trimmed string is not the stored one, and the untrimmed one
+    # is trimmed on the way in.
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)
 
     def validate_new_password(self, value):
         # The sign-up rules and their codes (`password_too_short`, `password_too_common`,
@@ -64,7 +69,8 @@ class PasswordChangeView(APIView):
     """POST /api/auth/password/change/ — a new password for the signed-in person, and
     every other device signed out.
 
-    Auth: Bearer JWT, any role. Body (JSON): `current_password`, `new_password`.
+    Auth: Bearer JWT, any role. Body (JSON): `current_password`, `new_password`. Both
+    are trimmed of surrounding spaces, as sign-in trims the password it is given.
 
     200 `{message, access, refresh}`: the password is changed, EVERY refresh token the
     account held is blacklisted (each other device is signed out when its access token
