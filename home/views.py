@@ -157,7 +157,9 @@ class HomeView(APIView):
 
         {"routine_id": 12, "routine_name": "Upper body", "date": "2026-09-20",
          "week": 3,                           week of the programme from its start,
-                                              never past `weeks_total`
+                                              never past `weeks_total`; a bought
+                                              programme's: the week its sessions have
+                                              reached (the schedule's `week`)
          "weeks_total": 9 | null,             null for a cycle with no end
          "finished": false,                   past its dates, or every day of a
                                               programme that does not repeat is done

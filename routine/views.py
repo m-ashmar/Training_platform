@@ -843,7 +843,10 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                       today, or a routine with no exercises)
              "next_day": 3 | null,                the next day not done; null when
                                                   finished
-             "week": 4,                           from `start_date`, 1..weeks_total
+             "week": 4,                           from `start_date`, 1..weeks_total;
+                                                  a BOUGHT programme (sessions, not
+                                                  dates): the week its sessions have
+                                                  reached, = `slots_week` (2026-11-23)
              "weeks_total": 9 | null,             from the dates; a bought programme's
                                                   own weeks; null for a cycle with no end
              "finished": false,
