@@ -47,6 +47,26 @@ def token_from_scope(scope) -> str | None:
     return (token or "").strip() or None
 
 
+def token_expires_at(scope) -> float | None:
+    """When the access token this socket connected with expires (epoch seconds), or None
+    when there is no usable token.
+
+    No database: only the `exp` claim of the token `authenticate_scope` accepted. For a
+    socket that only LISTENS — it sends no frame, so nothing re-runs the per-frame check —
+    this is the one thing that can still end it (the batch A review, 2026-11-23).
+    """
+    from rest_framework_simplejwt.exceptions import TokenError
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    token = token_from_scope(scope)
+    if not token:
+        return None
+    try:
+        return float(AccessToken(token)["exp"])
+    except (TokenError, KeyError, TypeError, ValueError):
+        return None
+
+
 def still_authenticated(scope) -> bool:
     """Is the credential this socket connected with STILL good?
 
