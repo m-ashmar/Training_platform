@@ -1023,6 +1023,10 @@ class NotificationSerializer(serializers.ModelSerializer):
     Resolves title/message at read-time from the event template
     using the active language context. Falls back to metadata keys
     for backward-compatible notifications that stored title/body.
+
+    The template is the READING build's (`notifications/build_gate.choose`, from the
+    flags `NotificationViewSet` puts in `notification_flags`): a gated event reads its
+    store text on a build without the flag. `data` is the stored one on every build.
     """
 
     sender = UserMinimalSerializer(source='actor', read_only=True)
@@ -1048,10 +1052,18 @@ class NotificationSerializer(serializers.ModelSerializer):
 
         # Try template resolution first (new architecture)
         try:
-            from notifications.channels.fcm import _resolve_event_template
+            from notifications.build_gate import HIDDEN, choose
             from notifications.template_resolver import NotificationTemplateResolver
+            from policy.services import STRICTEST
 
-            template = _resolve_event_template(obj.event_type)
+            # The READING build's text (Road to 10 R1, `notifications/build_gate.py`):
+            # the viewset puts that build's flags in the context. Without them, the
+            # strictest build, as policy answers a request that declares none.
+            flags = self.context.get('notification_flags') or STRICTEST
+            template = choose(obj.event_type, flags)
+            if template is HIDDEN:
+                # The list leaves these out; nothing a build may not see is rendered.
+                template = None
             if template:
                 context = obj.metadata.get('context', {})
                 title, body = NotificationTemplateResolver.render(

@@ -6229,3 +6229,14 @@ msgstr "قبِل %(name)s طلب التدريب."
 #, python-format
 msgid "%(name)s declined the coaching request."
 msgstr "رفض %(name)s طلب التدريب."
+
+#. `subscription_expired` on a build that may not sell the plan (Road to 10 R1).
+#: notifications/domain/subscription_events.py
+msgid "Your diet plan and routine are saved and you can still see them."
+msgstr "خطتك الغذائية وبرنامجك التدريبي محفوظان ويمكنك الاطلاع عليهما."
+
+#. `coaching_payment_due` on a build that may not pay for coaching (Road to 10 R1).
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "Your coaching with %(name)s is paused. You can still see your routines."
+msgstr "تدريبك مع %(name)s متوقف مؤقتاً. لا يزال بإمكانك الاطلاع على برامجك."
