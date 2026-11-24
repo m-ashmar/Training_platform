@@ -514,10 +514,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     @property
     def full_name(self):
-        """Get user's full name."""
-        if self.first_name and self.last_name:
-            return f"{self.first_name} {self.last_name}"
-        return self.username
+        """The person's name as others read it: the first and last name, either alone
+        when only one is set, and the username only when neither is.
+
+        It fell back to the username unless BOTH were set (SIDE_BUGS S-223, the fix run's
+        ACC-1). A last name is optional (`blank=True`) and a trainer is listed on a first
+        name alone, so every coaching notice built from it (`users/coaching.py`) named
+        "Omar" by his username."""
+        name = " ".join(part for part in ((self.first_name or "").strip(),
+                                          (self.last_name or "").strip()) if part)
+        return name or self.username
 
     def get_client_count(self):
         """Get number of clients assigned to this trainer."""
