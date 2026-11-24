@@ -250,7 +250,13 @@ class PaymentGatewayManager:
     def describe_gateways(names) -> Dict[str, Dict[str, Any]]:
         """Each named gateway's name, currencies and per-currency bounds, whatever its
         credentials (`GET v1/gateways/` lists every registered gateway and says which can
-        take a payment: `gateway_config.gateway_kind`)."""
+        take a payment: `gateway_config.gateway_kind`).
+
+        `supported_currencies` are the currencies it can CHARGE: the registry's list
+        narrowed to those with configured bounds, the same test a checkout makes
+        (`_require_chargeable_currency`). The registry's ['SYP', 'USD'] was copied
+        verbatim while USD has no bounds until the owner sets them (SIDE_BUGS S-185,
+        S-052), so the list promised a currency every checkout refused."""
         from ..settings.gateway_config import get_gateway_config, get_gateway_info
 
         available = {}
@@ -264,7 +270,8 @@ class PaymentGatewayManager:
             settlement_limits = limits.get(settlement) or {}
             entry = {
                 'name': info['name'],
-                'supported_currencies': info['supported_currencies'],
+                'supported_currencies': [cur for cur in info['supported_currencies']
+                                         if str(cur).upper() in limits],
                 'settlement_currency': settlement,
                 'amount_limits': {
                     cur: {

@@ -1844,7 +1844,12 @@ person confirms it in the console), null when unavailable — and `review_hours`
 `reviewed`: within how many hours it is confirmed, `PAYMENT_REVIEW_HOURS`; null
 otherwise); `enabled` equals `available`. The answer's `can_pay` is true when one is
 available, else `reason: "no_gateway"`. Sell only on `can_pay`, and word the promise
-from `kind`.
+from `kind`. A gateway's `supported_currencies` are the currencies it can charge (those
+with bounds in `amount_limits`: SYP only until the owner sets the USD bounds), and
+`available` needs the caller's own currency among them (SIDE_BUGS S-185): a gateway set
+up only for another currency leaves `can_pay` false with `reason:
+"currency_not_chargeable"` (additive), where a USD buyer used to be offered a Pay whose
+checkout answered 503 `currency_not_chargeable`.
 
 **A plan paid from the wallet** (Road to 10 S2.13, the owner's D19 of 2026-11-22). On a
 build that may sell a plan (`apk`, `web`) `GET v1/gateways/` also answers
