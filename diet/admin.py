@@ -234,7 +234,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             '{}<p>macro slot: <b>{}</b></p><p>servings it can be given in:<br>{}</p>',
             note, classify_food(obj), ladder)
 
-    @admin.action(description='Approve: allow the planner to serve these')
+    @admin.action(description='Approve: allow the planner to serve these', permissions=["change"])
     def approve_foods(self, request, queryset):
         # Row by row, so `save()` runs. `needs_review` is the flag that SUPPRESSES the
         # nutrition checks (an impossible kcal/g, an Atwater mismatch), so approving
@@ -270,7 +270,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
                 + ', '.join(missing[:8]),
                 messages.WARNING)
 
-    @admin.action(description='Send back: stop the planner serving these')
+    @admin.action(description='Send back: stop the planner serving these', permissions=["change"])
     def send_back_for_review(self, request, queryset):
         # Through the model and into the admin log, like every other bulk action: taking
         # a food out of every client's plans is a decision someone has to own.
@@ -279,7 +279,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
         n = bulk_apply(request, queryset, "Sent back for review", needs_review=True)
         self.message_user(request, f"{n} food(s) held for review.", messages.SUCCESS)
 
-    @admin.action(description='Guess household unit, role and slots from the name')
+    @admin.action(description='Guess household unit, role and slots from the name', permissions=["change"])
     def assign_units_and_roles(self, request, queryset):
         """The same patterns `seed_food_units` applies — to the SELECTED foods only.
 
@@ -416,6 +416,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
             updated += 1
         self.message_user(request, f"Recalculated per-gram values for {updated} item(s).")
     calculate_per_gram_values.short_description = "Recalculate per-gram values"
+    calculate_per_gram_values.allowed_permissions = ('change',)
 
     
     def get_urls(self):
@@ -640,6 +641,7 @@ class ImprovedFoodItemAdmin(TranslAdmin):
         """
         return HttpResponseRedirect("import-edamam/")
     import_from_edamam.short_description = "Import from Edamam API"
+    import_from_edamam.allowed_permissions = ('add',)
 
 
 # Improved DietPlan Admin
@@ -1020,7 +1022,7 @@ class RecipeAdmin(TranslAdmin):
     # Logged per dish. Marking a recipe reviewed is the sign-off that its grams and its
     # allergens were checked by a person; `queryset.update()` recorded the date and not
     # who, so the review trail the owner relies on had no reviewer in it.
-    @admin.action(description='Mark selected dishes reviewed')
+    @admin.action(description='Mark selected dishes reviewed', permissions=["change"])
     def mark_reviewed(self, request, queryset):
         from training_platform.admin_utils import bulk_apply
 
@@ -1028,7 +1030,7 @@ class RecipeAdmin(TranslAdmin):
                        reviewed=True, reviewed_at=timezone.now())
         self.message_user(request, f"{n} dish(es) marked reviewed.", messages.SUCCESS)
 
-    @admin.action(description='Mark selected dishes NOT reviewed')
+    @admin.action(description='Mark selected dishes NOT reviewed', permissions=["change"])
     def mark_unreviewed(self, request, queryset):
         from training_platform.admin_utils import bulk_apply
 

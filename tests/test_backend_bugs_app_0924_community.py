@@ -157,6 +157,15 @@ def test_challenge_progress_is_counted_from_logged_training(
     design counts from logged sets never moved unless its participant typed a number."""
     from social.models import ChallengeParticipation
 
+    # Setup, not assertion (SIDE_BUGS S-289, 2026-11-24): the workout below starts an
+    # hour before now, and its sets carry the day it STARTED, as the app sends them
+    # (`workout_controller.dart` dates every set of a workout with its start date). They
+    # were dated today, so in the first hour after midnight (Asia/Damascus) the session
+    # fell on yesterday and its sets on today, and `workouts` read 0 on a correct tree.
+    # Read once, so a run that crosses midnight cannot split them either.
+    started = timezone.now() - timedelta(hours=1)
+    day = timezone.localdate(started)
+
     trainer, client, routine, rows = _program(make_user, "b075", sets=5, reps=10,
                                               weight=40)
     challenge = _running_challenge(trainer, "b075", metric="volume_kg",
@@ -164,7 +173,7 @@ def test_challenge_progress_is_counted_from_logged_training(
 
     # Training already logged inside the window counts from the moment of joining.
     with django_capture_on_commit_callbacks(execute=True):
-        _log_sets(client, api, rows[0], 1, reps=10, weight=40)
+        _log_sets(client, api, rows[0], 1, reps=10, weight=40, date=day)
     joined = api(client).post(f"/api/social/challenges/{challenge.pk}/join/", {},
                               content_type=JSON)
     assert joined.status_code == 201, joined.content
@@ -173,7 +182,7 @@ def test_challenge_progress_is_counted_from_logged_training(
 
     # Every set logged afterwards moves it, with no manual step.
     with django_capture_on_commit_callbacks(execute=True):
-        _log_sets(client, api, rows[0], 2, reps=10, weight=40, start=2)
+        _log_sets(client, api, rows[0], 2, reps=10, weight=40, start=2, date=day)
     row.refresh_from_db()
     assert row.current_value == 1_200.0
     assert row.progress_percentage == 100.0 and row.status == "completed"
@@ -189,10 +198,10 @@ def test_challenge_progress_is_counted_from_logged_training(
         assert api(client).post(f"/api/social/challenges/{counted[metric].pk}/join/", {},
                                 content_type=JSON).status_code == 201
     with django_capture_on_commit_callbacks(execute=True):
-        _log_sets(client, api, rows[0], 1, reps=10, weight=40, start=3)
+        _log_sets(client, api, rows[0], 1, reps=10, weight=40, start=3, date=day)
         session = WorkoutSession.objects.create(
             user=client, routine=routine, day=1, status="completed",
-            start_time=timezone.now() - timedelta(hours=1), end_time=timezone.now())
+            start_time=started, end_time=timezone.now())
         # Setup, not assertion (owner, 2026-09-24, F20): a workout counts only with
         # `MIN_SETS_PER_WORKOUT` credible sets in it (`social/challenge_progress.py`),
         # so the session carries the three sets this client logged — an empty one

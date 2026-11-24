@@ -101,6 +101,9 @@ def _review_action(name, description, state, message):
 
     action.__name__ = name
     action.short_description = description
+    # A review decision changes the participation: the change permission, not the view
+    # permission an action with none declared is offered to (Road to 10 round 4).
+    action.allowed_permissions = ('change',)
     return action
 
 

@@ -1881,10 +1881,43 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 
     `?page=` is 400 `cursor_paginated` (the owner's decision 9, 2026-09-24; it was
     `validation_error`): follow `next`. An unknown or foreign id is 404 `not_found`.
+
+    **What differs by build** (Road to 10 R1, 2026-11-24; `notifications/build_gate.py`).
+    Send `X-App-Channel` and `X-App-Version` as on every route: the text is chosen at
+    READ time by that build's policy flags, and by nothing else. Three events are gated:
+
+      checkout_expired      a build that may not sell plans (play, ios) never sees it:
+                            not in the list, not in `unread_count`, not opened by id
+      subscription_expired  that build reads «خطتك الغذائية وبرنامجك التدريبي محفوظان
+                            ويمكنك الاطلاع عليهما.» ("Your diet plan and routine are saved
+                            and you can still see them."), without the sentence that a
+                            subscription is needed
+      coaching_payment_due  a build that may not pay for coaching in the app (ios) reads
+                            «تدريبك مع %(name)s متوقف مؤقتاً. لا يزال بإمكانك الاطلاع على
+                            برامجك.», without "until the next month is paid"
+
+    apk and web read every notice exactly as before. A request with no known channel is
+    the strictest build (all three gated). The same row reads differently on two builds:
+    the row is the account's, the sentence the build's. `data` and `type` never change.
+    Every record of money that already moved — a receipt, a fee held or paid out, a top-up
+    with its amount, a sale, a withdrawal — and every reminder of state reads the same on
+    every build. `mark_all_read` marks what this build lists.
     """
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = NotificationCursorPagination
+
+    def _build_flags(self):
+        """The reading build's policy flags, asked once per request."""
+        if not hasattr(self, '_notification_flags'):
+            from notifications.build_gate import flags_for_request
+            self._notification_flags = flags_for_request(self.request)
+        return self._notification_flags
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['notification_flags'] = self._build_flags()
+        return context
     
     def get_queryset(self):
         # `recipient` is serialised on every row and was not joined, so a page of 20
@@ -1907,6 +1940,13 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
             # no actor and stay; reinstating the account brings the rows back.
             Q(actor__isnull=True) | public_q('actor')
         ).order_by('-created_at', '-id')
+
+        # The events this BUILD is not shown at all (Road to 10 R1): out of the list, the
+        # unread count and the detail route alike, so the three always agree.
+        from notifications.build_gate import hidden_event_types
+        hidden = hidden_event_types(self._build_flags())
+        if hidden:
+            qs = qs.exclude(event_type__in=hidden)
         
         # Optional filter by notification type
         notification_type = self.request.query_params.get('type')
@@ -1953,6 +1993,9 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         Get unread notification count
         
         GET /api/social/notifications/unread_count/
+
+        Counts exactly what the list shows THIS build (above): a notice the build is not
+        shown is not counted.
         """
         count = self.get_queryset().filter(is_read=False).count()
         return Response({'unread_count': count})

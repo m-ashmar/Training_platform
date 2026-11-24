@@ -143,12 +143,12 @@ class ReportAdmin(OperatorOnlyMixin, admin.ModelAdmin):
         self.message_user(request, f"{closed} report(s) closed as {new_status}.",
                           messages.SUCCESS)
 
-    @admin.action(description="Dismiss: nothing to answer here")
+    @admin.action(description="Dismiss: nothing to answer here", permissions=["change"])
     def dismiss_reports(self, request, queryset):
         self._close(request, queryset, ReportStatus.DISMISSED,
                     "Dismissed in the console.")
 
-    @admin.action(description="Action taken: the target was dealt with")
+    @admin.action(description="Action taken: the target was dealt with", permissions=["change"])
     def mark_action_taken(self, request, queryset):
         self._close(request, queryset, ReportStatus.ACTIONED,
                     "Action taken in the console.")

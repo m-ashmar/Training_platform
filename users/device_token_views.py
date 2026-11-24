@@ -39,7 +39,23 @@ class FCMTokenView(APIView):
         was the generic `bad_request`, the owner, 2026-09-24), `field_too_long` /
         `invalid_field` with `field` — these
         reached the database unchecked and came back as a generic 500, so the device
-        silently never registered (BACKEND_BUGS B-025)."""
+        silently never registered (BACKEND_BUGS B-025).
+
+        **The build is recorded** (Road to 10 R1, 2026-11-24): send `X-App-Channel` and
+        `X-App-Version` here as on every route. The token keeps the channel it was
+        registered from (`DeviceToken.app_channel`), and the version from the header
+        when the body carries no `app_version`. A push then gives this device the text
+        its build is shown (`notifications/build_gate.py`): on a store build three
+        notices read differently or are not pushed (see `GET /api/social/notifications/`).
+        A token registered with no known channel is the strictest build, or the ios
+        build when `platform` is `ios`.
+
+        Re-registering a token the server already has UPDATES that one row, never a
+        second: its account, `platform`, and the build and version it records now — the
+        channel this request declares and its version (body, else header). Register on
+        every cold start and every token refresh, so the build a device is pushed for is
+        the build it runs. A request that declares no channel, or no version, leaves the
+        recorded one."""
         token = request.data.get('token')
         if not token:
             message = _('Token is required')
@@ -69,6 +85,15 @@ class FCMTokenView(APIView):
             platform = 'android'
         app_version = request.data.get('app_version')
         device_id = request.data.get('device_id')
+        # The build this device runs (Road to 10 R1): the request's own declaration, the
+        # one every route reads (`policy.channels`). The version from the header when the
+        # body has none.
+        from policy.channels import VERSION_HEADER, channel_of
+
+        app_channel = channel_of(request)
+        if not app_version:
+            header = (request.headers.get(VERSION_HEADER) or '').strip()
+            app_version = header[:50] or None
 
         try:
             # Check if token exists
@@ -83,6 +108,8 @@ class FCMTokenView(APIView):
                 # would silently never receive push again.
                 device_token.is_active = True
                 device_token.platform = platform
+                if app_channel:
+                    device_token.app_channel = app_channel
                 if app_version:
                     device_token.app_version = app_version
                 if device_id:
@@ -99,6 +126,7 @@ class FCMTokenView(APIView):
                     user=request.user,
                     token=token,
                     platform=platform,
+                    app_channel=app_channel,
                     app_version=app_version,
                     device_id=device_id,
                     is_active=True,

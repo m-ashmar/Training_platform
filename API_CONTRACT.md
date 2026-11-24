@@ -89,6 +89,8 @@ POST /api/auth/password/change/  {current_password, new_password}  (signed in; S
                                         -> 200 {message, access, refresh}: every other
                                            session ends, store the new pair
                                         | 400 current_password_wrong | password_unchanged
+                                          | password_not_set (no password yet: use
+                                            forgot-password; never a guess)
                                           | field_errors.new_password (as at sign-up)
                                         | 429 throttled (5 wrong in 15 min)
 POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200
@@ -182,6 +184,24 @@ its status default (§6). A gate test fails any refusal written in a view withou
 ## 4. Push notifications (FCM)
 
 Register the device token, then route on `data.type`.
+
+**What differs by build (Road to 10 R1, 2026-11-24).** A notice is written for the account
+and read or pushed on every device it has; three notices read differently, or not at all,
+on a build whose policy flags forbid what they say (`notifications/build_gate.py`):
+
+| `data.type` | needs | a build without it (today: play, ios) |
+|---|---|---|
+| `checkout_expired` | `can_purchase_platform_sub` | never sees it: no push, not in the inbox list, not in `unread_count` |
+| `subscription_expired` | `can_purchase_platform_sub` | reads «خطتك الغذائية وبرنامجك التدريبي محفوظان ويمكنك الاطلاع عليهما.» (no "needs an active subscription") |
+| `coaching_payment_due` | `can_pay_coaching_in_app` | (ios) reads «تدريبك مع %(name)s متوقف مؤقتاً. لا يزال بإمكانك الاطلاع على برامجك.» (no "until the next month is paid") |
+
+The inbox (`GET /api/social/notifications/`) chooses at READ time from the request's
+`X-App-Channel` and `X-App-Version`; a push chooses per DEVICE from the build its token
+recorded at `POST /api/auth/device-token/` (send both headers there too). A request, or a
+token, with no known channel is the strictest build (all three gated); a token registered
+as `platform: ios` is the ios build. `data` never changes. apk and web read and receive
+every notice exactly as before, and every record of money that already moved (a receipt, a
+fee, a top-up with its amount, a sale, a withdrawal) reads the same on every build.
 
 **`data.type` is always exactly the `event_type`** — the same values
 `GET /api/notifications/preferences/event_types/` returns. Every value is a string (FCM requires it),
