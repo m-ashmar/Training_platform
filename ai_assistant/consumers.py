@@ -1,8 +1,9 @@
 """
 consumers.py — WebSocket consumer for AI chat.
 
-Handles WebSocket connections at ws://host/ws/ai/chat/?token=<JWT>.
-Authentication is delegated to training_platform.ws_auth, shared with
+Handles WebSocket connections at wss://<host>/ws/ai/chat/?token=<JWT> (TLS ends at
+Caddy in production; a local server, which has no TLS, takes the same path over the
+plain ws scheme). Authentication is delegated to training_platform.ws_auth, shared with
 SocialConsumer. It checks premium entitlement, enforces rate limiting, and
 streams GPT responses to the client.
 
@@ -52,6 +53,17 @@ def daily_limit_key(user_id, today=None):
     return f"ai_chat_limit:{user_id}:{today.isoformat()}"
 
 
+def daily_message_limit() -> int:
+    """How many messages one person may send the AI coach in a day.
+
+    `AI_ASSISTANT_CONFIG["MAX_MESSAGES_PER_DAY"]`, from the environment variable
+    `AI_MAX_MESSAGES_PER_DAY` (10 by default: the owner, 2026-11-21). The one reader:
+    the socket that refuses the next message and `GET subscription/v1/usage/today/`
+    that draws the bar both call this, and neither has a number of its own that could
+    disagree with the setting."""
+    return int(settings.AI_ASSISTANT_CONFIG["MAX_MESSAGES_PER_DAY"])
+
+
 def reserve_daily_slot(user_id, max_messages, *, store=None, now=None):
     """Take one of `user_id`'s messages for today. Returns (allowed, remaining,
     resets_at), `resets_at` an ISO 8601 instant WITH its offset.
@@ -93,7 +105,7 @@ def reserve_daily_slot(user_id, max_messages, *, store=None, now=None):
 
 class AIChatConsumer(AsyncWebsocketConsumer):
     """
-    WebSocket endpoint: ws://host/ws/ai/chat/?token=<JWT>
+    WebSocket endpoint: wss://<host>/ws/ai/chat/?token=<JWT> (plain ws on a local server)
 
     **The build.** Declare it on the handshake the way every REST call does, as
     `X-App-Channel: apk | play | ios | web` and `X-App-Version: 1.4.0` headers; a
@@ -129,7 +141,7 @@ class AIChatConsumer(AsyncWebsocketConsumer):
       {"type": "complete", "session_id": "uuid", "message_id": 123, "tools_used": [...],
        "medical_disclaimer": "..."}
       {"type": "feedback_saved", "content": "..."}
-      {"type": "rate_limit", "remaining": 49, "resets_at": "..."}
+      {"type": "rate_limit", "remaining": 9, "resets_at": "..."}
       {"type": "error", "content": "...", "code": "..."}
 
     Branch on `code`, never on `content` — `content` is translated. Every `code` this
@@ -160,6 +172,13 @@ class AIChatConsumer(AsyncWebsocketConsumer):
     `connected` status (so the chat screen can show it before the first reply) and on
     every `complete`. The same on every build. Additive: a build that ignores it loses
     nothing.
+
+    The daily allowance is the same for every plan with the coach: 10 messages per
+    person per day by default (the owner, 2026-11-21; the server's
+    `AI_MAX_MESSAGES_PER_DAY`, read by `daily_message_limit`), the `limit` that
+    `usage/today/` answers for `ai_messages`. The message after the last one is refused
+    with the `error` frame `code: "rate_limit"`, `remaining: 0` and `resets_at`, and is
+    not charged.
 
     A turn that ends on an `error` is NOT charged against the daily allowance
     (`_reserve_rate_limit`), and the `rate_limit` frame that closes every turn carries
@@ -491,10 +510,10 @@ class AIChatConsumer(AsyncWebsocketConsumer):
         still spent the user's daily allowance: they paid for the assistant's failures.
 
         `remaining` counts the reservation as already spent, so it is what the user has
-        left AFTER this turn. The work is `reserve_daily_slot`, synchronous, below.
+        left AFTER this turn. The work is `reserve_daily_slot`, synchronous, above; the
+        allowance is `daily_message_limit()`, the setting and no number of its own.
         """
-        config = getattr(settings, 'AI_ASSISTANT_CONFIG', {})
-        return reserve_daily_slot(self.user.id, config.get('MAX_MESSAGES_PER_DAY', 50))
+        return reserve_daily_slot(self.user.id, daily_message_limit())
 
     async def _refund_rate_limit(self, remaining):
         """Give back the slot a failed turn reserved. Returns the corrected `remaining`.

@@ -65,7 +65,11 @@ _REVIEW_CONTRACT = """
       foods: [{food_id, name, name_ar, dates}]}}`. `allergens.verdict` is
       `nothing_declared`, `clear`, `unverified` (no declared allergen found, but a
       food's allergen data is not verified: not the same as safe) or `violation`;
-      `dislikes.verdict` is `clear` or `present`.
+      `dislikes.verdict` is `clear` or `present`. `allergens.verdict` judges the whole
+      plan. The food picker's `for_client.allergen_verdict` (`food/list/?for_client=`)
+      judges one food and is spelled `safe` / `unverified` / `violation` (BACKEND_BUGS
+      B-143): a client who declared nothing reads `nothing_declared` here and `safe` on
+      every picker row, and a plan whose every row reads `safe` is `clear` here.
 
     Health data (the allergies) goes to the client's APPROVED trainer only: a trainer
     of this client (the approved relation, `can_access_user_data`), and not while the
@@ -104,7 +108,11 @@ class TrainerPlanReviewView(APIView):
     - 403 `not_a_trainer` — the caller is not a trainer (an admin included).
     - 403 `not_plan_owner` — another trainer wrote it (the engine's plans too);
       `not_assigned_client` — the client is no longer yours; `plan_superseded` — a
-      newer plan replaced it: the trainer plan reads' own reasons.
+      newer plan replaced it: the trainer plan reads' own reasons. `plan_superseded` is
+      403 here and on the plan reads; the same code is 400 on a trainer's meal write
+      (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`
+      and its undo, `client/meals/<meal_id>/undo/`.
+      Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     - 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` — see above.
     - 403 `no_entitlement` / `feature_not_in_plan`.
     - 404 `not_found` — no such plan.

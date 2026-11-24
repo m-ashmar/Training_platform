@@ -14,10 +14,12 @@ and order live in `BACKEND_DELTA.md`, not here.
 **Where things stand (2026-11-24):** Road to 10 is the work now: phase 0, batch A, phase 3,
 S2.7, batch B, S2.13, the review round of every landed batch, Part 4's R4, R5, R8 and R1,
 round 3 (B-199, the console and password fixes), round 4's fixes, the dev-only walk
-seed and round 5 (the inbox's language, B-200) are on this branch (full gate at `bd087df` on a fresh database: 3359 passed, 0 failed, 0 skipped); next
+seed, round 5 (the inbox's language, B-200) and the fix run's first resumed landing
+(`fx/w2-diet`, `fx/w2-small`, `fx/w2-ci`: the fix-run section) are on this branch (full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped); next
 are the later Road to 10 phases as the owner
-orders (the Road to 10 section below has the table per batch). The fix run is
-paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
+orders (the Road to 10 section below has the table per batch). The fix run
+resumed on 2026-11-24 (the owner's order): `fx/w2-chat` and `fx/w2-backups` are still on their
+branches (its section).
 
 ## Build order
 
@@ -107,6 +109,51 @@ ROAD_TO_10 Part 3:**
 | D17 | The owner's own (every account has its QR; only the agent reads it) | — |
 | D19, a plan paid from the wallet | Yes (2026-11-22, confirmed in the backend session): "users can charge their wallets and use them to pay to subscribe in app features"; never inside a store build | S2.13 (phase 2): a plan and its renewal paid from the wallet on `apk` and `web` only, refused on `play`/`ios` by the same capability check (`can_purchase_platform_sub` is store-locked); 100% to the platform (2026-09-19); the gateway list names the wallet where it is a way to pay |
 | D13, support contacts | `support@yalagym.com` (support), `admin@yalagym.com` (admin); the WhatsApp number comes before the launch | S2.12: `links.support_email` = support@yalagym.com; `links.support_whatsapp` empty until the owner gives the number |
+
+**Owner decisions (2026-11-24, in the manager's session: «all as recommended»).** They close
+the owed list below as it stood that morning. The ones marked «build» are in the next table.
+
+| # | The owner's word | What the server does |
+|---|---|---|
+| 1 | iOS wallet moves stay off (B-199) | the flag stands: `can_transfer_wallet` off on the first `ios` build |
+| 2 | An agent cannot delete the account while holding platform cash | build |
+| 3 | The Play coaching switch stops new payments only | R8 as built: a paid request sent before the flip can still be approved, running coachings renew until the client sends `renew: false` |
+| 4 | A plan upgrade's difference may be paid from the wallet, on `apk` and `web` only | build |
+| 5 | The console must not approve a coaching with no consent and no charge | build (the `assigned_trainer` sync) |
+| 6 | The 10-minute `already_paid` window stays | as built (`WALLET_REPEAT_WINDOW`) |
+| 7 | Selling an unchanged starter copy stays allowed for now | as built (`copy/`, then a routine product) |
+| 8 | A password change signs every device out at once | build (today access tokens live up to 60 minutes) |
+| 9 | The stock `/admin/` is gated to operators (SIDE_BUGS S-274) | build |
+| 10 | Build flags are read fresh: `policy_channelcapabilities` on `CACHALOT_UNCACHABLE_TABLES` (S-292) | build |
+| 11 | Keep the 5-per-15-minutes password-change limit, and add an e-mail on a password change | build (the e-mail) |
+| 12 | A trainer's request limit is 1,500 an hour | build (`training_platform/middleware.py`, from 1,000) |
+| 13 | The trainer directory stays readable without sign-in | as built (`/api/v1/trainers/`, `trainers/public/`) |
+| 14 | Accounts made outside sign-up default to Arabic (`users/models.py:297`) | build |
+| 15 | A hidden challenge holds no hosting place | as built |
+| 16 | Meal undo only on the same day; the rating and the badge stay | as built (S3.5) |
+| 17 | The trial card's rules | as built |
+| 18 | The store wording of `subscription_expired` | as built (R1) |
+| 19 | An operator's trial grant is capped at the plan's length | as built (S-273) |
+| 20 | Retiring the unused routes waits until after launch | S3.6 / S3.7 after launch |
+
+**To build from them** (each a worker's item, through the integrator as every round):
+
+| # | Item | Worker | State |
+|---|---|---|---|
+| 2 | An agent holding platform cash is refused account deletion, with a code | phase 3 worker | owed |
+| 4 | A plan upgrade's difference paid from the wallet (`apk`, `web`; refused on `play`/`ios` by `can_purchase_platform_sub`) | money worker | owed |
+| 5 | The console's `assigned_trainer` sync never approves a relation with no consent and no charge | money worker | owed |
+| 8 | A password change ends every session at once (SIMPLE_JWT `CHECK_REVOKE_TOKEN` or equal; every device signs out once when it is deployed) | phase 3 worker | owed |
+| 9 | The stock `/admin/` gated to console operators | phase 3 worker | owed |
+| 10 | `policy_channelcapabilities` on `CACHALOT_UNCACHABLE_TABLES` | batch B worker | owed |
+| 11 | An e-mail to the account on a password change (the 5-per-15-minutes limit kept) | phase 3 worker | owed |
+| 12 | A trainer's request limit 1,500 an hour | batch B worker | owed |
+| 14 | Accounts made outside sign-up default to Arabic (about 20 to 25 test files' setup) | batch B worker | owed |
+
+**Pushed (2026-11-24, the owner's word, done by the manager):** `git push origin
+spec/payments-compliance`, `f9f4cf1..9b286e7` (144 commits). The live server may be updated
+to `9b286e7` (DEPLOY_CHECKLIST §12.5); anything landed after it reaches origin only at the
+owner's next push.
 
 **Phase 0** (the app does its own phase 0 in parallel; S0.1 first, the app deletes its own schedule
 arithmetic when it lands). Each landed item: its route, fields and codes in the view docstring and
@@ -221,38 +268,20 @@ S-274, each being verified by the worker named there.
 **Not built:** S2.5 (D2: no), S2.6 (D1: not now), S2.9 (later), S3.2 (the ShamCash rebuild waits for
 `sc-epay-doc.pdf`), S3.3 (the owner's server update: DEPLOY_CHECKLIST §12.5), S3.6 (after launch).
 
-**Owed by the owner:** whether a trainer's request limit rises from 1000 to 1500 an hour now that the
-community is a trainer's too (`training_platform/middleware.py`); the support WhatsApp number; the
-Firebase credentials on the server; a review of the CONTENT the batch B worker wrote, the two free
-first workouts and the eight starter templates (`routine/data/platform_templates.py`: exercises,
-sets, reps, names in both languages); whether a second wallet payment of the same plan within 10
-minutes under another key stays refused (`already_paid`, `WALLET_REPEAT_WINDOW`: the money worker's
-choice, so a person cannot pay two periods ahead in one sitting); whether a trainer may sell an
-unchanged copy of a platform starter template (today they can: `copy/`, then list the copy as a
-routine product). The server update (S3.3) is DEPLOY_CHECKLIST §12.5, "The Road to 10 update":
-migrate through the compose `migrate` service, then `bootstrap_platform` (writes the ten
-platform templates) and `create_starter_challenge`; the push to origin waits for the owner; after it, and again before each store submission,
-`seed_review_accounts` (DEPLOY_CHECKLIST §12, the password at a hidden prompt). Also the
-owner's: access tokens stay valid up to 60 minutes after a password change (ending them at
-once needs SIMPLE_JWT `CHECK_REVOKE_TOKEN`, which signs every device out once when it is
-deployed); the trainer directory (`/api/v1/trainers/`) and `trainers/public/` are readable
-without signing in; an agent may delete the account while holding the platform's cash (the
-receivable stays on record; refusing with a code is a business ruling); R8's two limits (a
-trainer can still approve a paid request sent before the flip, and running coachings renew
-until the client sends `renew: false`); the stock `/admin/` (SIDE_BUGS S-274: gate it to
-console operators, or unmount it); B-199: whether the first ios build should
-run the agent's top-ups and the trainer's withdrawals (today its flag refuses them,
-the spec's table); whether `policy_channelcapabilities` belongs on
-`CACHALOT_UNCACHABLE_TABLES` (SIDE_BUGS S-292: cached up to 24 hours, and a write
-from outside Django, a restore included, does not clear it; DEPLOY_CHECKLIST §9 now
-clears it after a restore); and the console's `assigned_trainer` sync, which still
-approves a pending or rejected relation with no consent from the client and no
-charge (older than Road to 10; the money worker's reviewer flagged it); and the default language of an
-account made outside sign-up (`users/models.py:297`: English, while sign-up saves Arabic),
-which decides the language of its pushes and e-mails; changing it touches about 20 to 25
-test files, under 100 assertion lines (the phase 3 worker's count).
+**Owed by the owner** (after his decisions of 2026-11-24 above): the ShamCash gateway: he
+has an API key and named the documentation (https://shamcash-api.com/en/docs); the money
+worker is reading it, and nothing is built on the gateway until his word on the plan; the
+backup bucket (hours away: `fx/w2-backups` needs it for its first drill); the Firebase
+credentials on the live server (`FIREBASE_CREDENTIALS_JSON` in `deploy/.env`, his step;
+the app needs its own client files); the support WhatsApp number (it comes last); a review
+of the CONTENT the batch B worker wrote, the two free first workouts and the eight starter
+templates (`routine/data/platform_templates.py`). The server update (S3.3) is
+DEPLOY_CHECKLIST §12.5, "The Road to 10 update": migrate through the compose `migrate`
+service, then `bootstrap_platform` (writes the ten platform templates) and
+`create_starter_challenge`; after it, and again before each store submission,
+`seed_review_accounts` (DEPLOY_CHECKLIST §12, the password at a hidden prompt).
 
-## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
+## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, RESUMED 2026-11-24 (the owner's order)
 
 **Review first.** Every open BACKEND_BUGS row B-136..B-183 was verified against the code
 (refute-first, probes on cloned databases), and every refutation or severity change was
@@ -293,11 +322,19 @@ worktree named, NOT merged and NOT pushed:
 
 | Branch (worktree `.claude/worktrees/…`) | Holds | Left |
 |---|---|---|
-| `fx/w2-diet` (`wf_45b02467-91e-1`) | B-142, B-143 (docs naming the shipped statuses and verdicts), B-195 (`allergens`/`allergy_terms` on the client's own preferences read); report done | review |
+| `fx/w2-diet` (`wf_45b02467-91e-1`) | B-142, B-143 (docs naming the shipped statuses and verdicts), B-195 (`allergens`/`allergy_terms` on the client's own preferences read); report done | LANDED 2026-11-24 (merge `3d2c756`; B-142 also names S3.5's undo, 409), full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped |
 | `fx/w2-chat` (`wf_45b02467-91e-2`) | B-150 (`frame_payload`), B-149 (the API envelope on media refusals), B-177 (Ogg/WebM length read on the request, 90 s cap, a worker fills a missing length); report done | review: B-177 parses untrusted bytes, fuzz it |
-| `fx/w2-small` (`wf_45b02467-91e-3`) | B-168 (docs), B-190 (`utc_offset_minutes` on agent/me), coach limit 10 from one optional `AI_MAX_MESSAGES_PER_DAY`; report done | review |
-| `fx/w2-ci` (`wf_45b02467-91e-4`) | wss:// in the docs, nosemgrep with reasons on the Dockerfile and the two raw queries, the secret step rewritten to key shapes over tracked files (`tests/test_security_scan_job.py`); the builder ran out of usage before its report | review against the brief; the proof is GitHub's CI run after the push |
+| `fx/w2-small` (`wf_45b02467-91e-3`) | B-168 (docs), B-190 (`utc_offset_minutes` on agent/me), coach limit 10 from one optional `AI_MAX_MESSAGES_PER_DAY`; report done | LANDED 2026-11-24 (merge `1e14003`, two conflicts against S0.4 `ad4214d` resolved by hand keeping both), full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped; the allowance drops to 10 on the first server update after the owner's next push |
+| `fx/w2-ci` (`wf_45b02467-91e-4`) | wss:// in the docs, nosemgrep with reasons on the Dockerfile and the two raw queries, the secret step rewritten to key shapes over tracked files (`tests/test_security_scan_job.py`); the builder ran out of usage before its report | LANDED 2026-11-24 (merge `b1c6f7c`), full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped; its key-shape scan finds nothing on the merged tree (run by the integrator with `git grep`); the proof that is left is GitHub's security-scan run after the owner's next push |
 | `fx/w2-backups` (`wf_45b02467-91e-5`) | WIP: `backups/` app (streamed authenticated encryption, store, retention, drill, health, model + migration 0001), `deploy/backup.sh`, `deploy/restore-drill.sh`, `deploy/cron/yallagym`, setup.sh writes `BACKUP_ENCRYPTION_KEY` | every test of its brief, DEPLOY_CHECKLIST §3/§9/§12 docs, the deploy-key steps, boot refusing a half-set configuration, then review |
+
+**Landed 2026-11-24** (the integrator, `road10/integration`, LANDED with the full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped):
+`fx/w2-diet`, `fx/w2-small` and `fx/w2-ci`, read diff by diff first (nobody else had
+reviewed them), and the walk seed's polish (`36c94c6`: the up-front check reads the amounts
+each state declares; the money states use the shared `plan_for` and `top_up`, S-296
+closed). BACKEND_BUGS B-142, B-143, B-195, B-168 and B-190 filled. Still on their branches:
+`fx/w2-chat` (the phase 3 worker fuzzes B-177's readers first) and `fx/w2-backups` (the
+batch B worker is finishing it; the owner's bucket is hours away).
 
 To resume: the briefs and the three finished reports are in the backend session's directory
 (`~/.claude/projects/-Users-mac-Desktop-Git-t2-Training-platform/741ec8b2-f2c0-4b8b-a55f-bdc282a3d595/fx-w2/`,
@@ -318,7 +355,50 @@ branch at a time, then ONE full gate + the smoke; a review of the merged diff af
 |---|---|---|
 | 1 | payments (B-167, S-232, S-234b, S-238..S-241, B-171), programs (S-234a, B-153..B-156, B-169, B-170, B-180), routine-core (B-136, B-139, B-152, B-157, B-158, B-181 = S-164), diet (S-212, S-215, S-216, S-243, B-137, B-140), accounts (S-235, S-236, S-242, B-159, B-160, B-165, B-166, B-173), home (B-175, B-176, B-178, B-179, B-182, S-193), wallet (B-138, B-144..B-148, B-163, B-184, S-237), privacy (S-213, S-214, S-225, S-231, S-233, B-174), social (B-161, B-162, B-164, S-189, S-194, S-218, S-219) | MERGED 2026-10-07 (`merge/w1`): 57 rows fixed, B-164 and S-193 closed, each test proven on the old code. Six builders lost their login mid-run on 2026-09-28 and were resumed in their worktrees. Migrations renumbered at the merge: routine 0033 quick_log -> 0034 place -> 0035 goal choices, subscription 0019 catalogue_key -> 0020 payer proof. The merged-wave review (5 lenses, verified) confirmed 12 findings (2 HIGH: Arabic allergies written «للوز», a challenge streak broken after its window); all 12 fixed in the repair pass `fx/w1r-*` before landing. Full gate on `82ef697`: 2849 passed, 0 failed (JIT off: the diet week passes). Template goals closed (owner 2026-10-07) |
 | 2 | payments2 (S-052, S-180, S-184, S-185, S-228..S-230), routine2 (S-114, S-165..S-168, S-176, S-177, S-183), diet2 (S-198, S-217, B-142, B-143), accounts2 (S-106, S-181, S-200..S-202, S-223), wallet2 (S-162, S-179, S-221, S-222), platform (S-054, S-178, S-186, S-197, S-199, S-203, S-220, S-224), chat-media (B-149, B-150, B-177, S-187, S-188, S-211, S-226), notifications (B-168, S-196, S-206..S-208), ai-achievements (S-190..S-192, S-195, S-204, S-205) | The owner's BACKEND_BUGS subset (B-142, B-143, B-149, B-150, B-168, B-177, B-190, B-195) is built on `fx/w2-*`, unmerged, PAUSED for Road to 10 (see above). The SIDE rows are not started; the older ones are re-verified before fixing |
-| 3 | routine3 (S-169..S-175, S-227), BACKEND_DELTA item 20 (verify each gap first), every BACKEND_BUGS row filed after B-184, what the wave reviews find | TODO |
+| 3 | Re-verified 2026-11-24 against `9b286e7` (the note `fix-run-backlog-verified.md` and `fix-run-backlog-verdicts.jsonl` in the manager's notes folder): 66 buildable rows in 15 batches, 10 rows that are merges of branches already built, 24 owner rows. The table below | PLANNED |
+
+**Wave 3, by batch** (2026-11-24; rows `open` are buildable now, `owner` wait for a decision;
+no two batches share a source file unless the note says «after»). The PAY, SOC-1, DIET and
+PLT-2 batches start only after the first resumed landing has landed (the paused branches edit
+their files); each starts after its worker's current list:
+
+| Batch | Area | Buildable | H / M / L | Owner rows | Holder |
+|---|---|---:|---|---:|---|
+| G5 first (SIDE_BUGS S-299, HIGH) | an empty or retired routine pays month 1: a guard before `settle_first_month` | 1 | 1 / 0 / 0 | 0 | money worker, first |
+| PAY-1 Wallet console reversals and coaching holds | payments | 3 | 0 / 3 / 0 | 2 | money worker |
+| PAY-2 Subscription checkout and gateway (S-263 after PAY-1) | payments | 7 | 0 / 3 / 4 | 2 | money worker |
+| PAY-3 Small money leftovers | payments | 4 | 0 / 0 / 4 | 0 | money worker |
+| RTN-1 Routine: assignment guard, exercise retire, limits, codes, day outcomes (without G5) | routine | 14 | 1 / 10 / 3 | 4 | no builder yet (brief `fx-w3/brief-rtn1.md`) |
+| DIET-1 Impossible dates, Arabic refusals, small command and task fixes | diet | 4 | 0 / 2 / 2 | 0 | no builder yet |
+| DIET-2 AI assistant: weakest-meal window, refund key | diet | 2 | 0 / 1 / 1 | 0 | no builder yet |
+| DIET-3 Diet write lock order (before NOT-1's G8a, G8b) | diet | 1 | 0 / 0 / 1 | 4 | no builder yet |
+| ACC-1 Profile pictures, blocks, names, the coach roster, the trainer queue | accounts | 6 | 0 / 2 / 4 | 1 | phase 3 worker |
+| ACC-2 Erasure and export | accounts | 3 | 0 / 1 / 2 | 2 | phase 3 worker |
+| SOC-1 Chat socket and history codes (after `fx/w2-chat` lands) | chat | 2 | 0 / 1 / 1 | 0 | phase 3 worker |
+| SOC-2 Community, achievements, moderation console | social | 6 | 0 / 2 / 4 | 2 | no builder yet |
+| NOT-1 Notices: unassign, diet plan written, trainer-scheduled end, worker tolerance (after RTN-1, DIET-3) | notifications | 5 | 0 / 2 / 3 | 2 | batch B worker, later |
+| PLT-1 Middleware limiter, language header, the gate file (before S-274) | platform | 4 | 0 / 0 / 4 | 1 | batch B worker |
+| PLT-2 Cache bumps, settings, catalogue | platform | 3 | 0 / 0 / 3 | 3 | batch B worker |
+| TST-1 Probes and environment-dependent tests (S-224 before S-195) | tests | 2 | 0 / 0 / 2 | 1 | batch B worker |
+| MERGE the paused branches, never rebuilt | various | 10 | 0 / 0 / 10 | 0 | the integrator |
+
+Not builder work: nine SIDE rows were already fixed and three stale (closed in SIDE_BUGS with
+their commits, 2026-11-24); BACKEND_DELTA item 20's G7 is closed and G15 settled by D15;
+S-211 needs one run under the lock's Pillow first (the note, section 8); 24 rows wait for the
+owner (the note, section 6), among them G11 (SIDE_BUGS S-300, HIGH): does a diet plan the
+trainer sends pay month 1?
+
+**Landing order** (the manager's ruling, 2026-11-24): (1) the first resumed landing
+(`fx/w2-diet`, `fx/w2-small`, `fx/w2-ci`, the walk polish). (2a) phase 3's branch (the
+agent-cash refusal `b45cdda` and what follows on it), the batch B worker's three items, the
+money worker's G5 (committed alone, first), upgrade and console items: it lands when those
+reports are in and its gate passes; a late item rides the next landing, and no money fix
+waits for a straggler. (2b) `fx/w2-chat` after its fuzz review and `fx/w2-backups` finished:
+the backups branch lands without a real drill once its tests and docs are in and its crypto
+and scripts are reviewed (the docs say what the drill needs; the drill is the owner's day);
+if only one is ready it rides the next wave 3 landing. Then the wave 3 batches as they
+report. Every landing: one gate through the queue, the push-registry line in the hand-off,
+the app manager's «go» before the fast-forward, no push (the owner is asked after each).
 
 ## Step 5, receipts slice — done on `build/money` (2026-09-20, unmerged)
 
@@ -409,9 +489,10 @@ is locked (spec §8); the numbers above are the defaults.
    `SUBSCRIPTION_TRAINER_SHARE = 0`, so no trainer is paid anything for a plan. Either
    the line goes or the share is priced; shipping both is a promise the ledger does not
    keep. (b) The AI coach's daily allowance is ONE GLOBAL SETTING
-   (`AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY'] = 50`) applied to every plan that has
-   `has_ai_advice`, while `Plans.png` prices three different allowances (Basic none,
-   Premium 50 a day, Professional "بلا حدود"). `usage/today/` answers 50 to everyone
+   (`AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY']`, from the optional `AI_MAX_MESSAGES_PER_DAY`:
+   10 since the owner's word of 2026-11-21, it was 50; `fx/w2-small`) applied to every plan
+   that has `has_ai_advice`, while `Plans.png` prices three different allowances (Basic none,
+   Premium 50 a day, Professional "بلا حدود"). `usage/today/` answers 10 to everyone
    until there is a per-plan field and the owner's numbers for it. (c) `Pay.png` counts
    down 72 hours ("الرمز صالح لمدة 71:42:10") and `PAYMENT_CHECKOUT_TTL_MINUTES` is 60
    MINUTES; `expires_at` now answers the server's real TTL, so the screen and the server

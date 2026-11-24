@@ -588,7 +588,13 @@ AI_ASSISTANT_CONFIG = {
     "MAX_RESPONSE_TOKENS": 2000,
     "TEMPERATURE": 0.7,
     "MAX_TOOL_CALLS_PER_TURN": 5,
-    "MAX_MESSAGES_PER_DAY": 50,
+    # The AI coach's messages per person per day, on every plan with the coach. 10 (the
+    # owner, 2026-11-21; it was 50): the free Workers AI allowance is about 115 coach
+    # messages a day for everyone together. ONE value: the socket that refuses the
+    # next message and `usage/today/` that draws the bar both read it through
+    # `ai_assistant.consumers.daily_message_limit`, with no number of their own.
+    # Production refuses to boot below 1 (`settings_production.enforce_production_safety`).
+    "MAX_MESSAGES_PER_DAY": get_int_env("AI_MAX_MESSAGES_PER_DAY", 10),
     "SESSION_TIMEOUT_MINUTES": 30,
     "DAILY_COST_ALERT_USD": "50.00",
     # Hard platform-wide ceiling. DAILY_COST_ALERT_USD only logs; this one

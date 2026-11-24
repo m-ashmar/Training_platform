@@ -82,9 +82,10 @@ class MemoryService:
 
         # Bounded. This had no LIMIT, so every message in the session was fetched to
         # keep about ninety of them: a 2,000-message session read 2,000 rows on every
-        # turn. Real sessions stay near a hundred because `close_idle_sessions` runs at
-        # 30 minutes and the daily cap is 50 turns, so the window below is comfortably
-        # more than the budget can ever use.
+        # turn. Real sessions stay small because `close_idle_sessions` runs at 30
+        # minutes and the daily cap is `AI_MAX_MESSAGES_PER_DAY` turns (10 by default,
+        # `consumers.daily_message_limit`: two messages each), so the window below is
+        # comfortably more than the budget can ever use.
         messages_qs = ChatMessage.objects.filter(
             session=session,
         ).order_by('-created_at')[:HISTORY_WINDOW]

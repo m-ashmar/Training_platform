@@ -407,15 +407,22 @@ a challenge that is OVER — closed as completed, or past its end date and not c
 
 ### AI Assistant
 
-The assistant answers over the socket `ws://host/ws/ai/chat/?token=<JWT>`; these routes
-are the history and the housekeeping around it. Every socket `error` frame and every
-REST refusal carries a `code` — `ai_assistant/consumers.py` lists the socket's full set
-in its class docstring. Two worth naming here:
+The assistant answers over the socket `wss://<host>/ws/ai/chat/?token=<JWT>` (the plain
+`ws` scheme on a local server, which has no TLS); these routes are the history and the
+housekeeping around it. Every socket `error` frame and every REST refusal carries a
+`code` — `ai_assistant/consumers.py` lists the socket's full set in its class
+docstring. Two worth naming here:
 
 | `code` | Where | When |
 |---|---|---|
 | `message_not_found` | `POST feedback/` (404) and the socket's `feedback` frame | No assistant message of yours by that id |
 | `ai_consent_required` | every `/api/ai/` route except `data/` (`GET` and `DELETE`) and `training-consent/`, and the socket | The AI coach has not been allowed to read this person's data |
+
+The daily message allowance is **10 per person per day** by default (the owner,
+2026-11-21; it was 50), the same on every plan with the coach and set on the server by
+`AI_MAX_MESSAGES_PER_DAY`. The message after the last one is refused with the `error`
+frame `code: "rate_limit"` (`remaining: 0`, `resets_at`), uncharged; `usage/today/`
+answers the same number as `ai_messages.limit`. No `code` changed.
 
 A turn that ends in an `error` frame is **not** charged against the daily message
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
@@ -725,7 +732,8 @@ frame names the same code). `DELETE
 messages/{id}/` tombstones the sender's own message — the row stays in the thread with
 `deleted: true` and an empty `body`, and nothing is ever hard-deleted.
 
-Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
+Live: `wss://<host>/ws/chat/{conversation_id}/?token=<access JWT>` (plain `ws` on a
+local server). Client frames
 `{"type": "message.send", body, client_uuid?}` (or a program card: `kind: "program"`
 and the card's fields, as on REST) and `{"type": "message.read"}`; server frames
 `message.new`, `message.updated` (a message already sent now reads differently —
@@ -774,6 +782,17 @@ guidance, not medical advice. Check with your doctor before changing how you eat
 every 200 of `GET` and `POST preferences/` (where the tastes and allergies are saved),
 the 200 of `plans/generate/`, both 201s of `plans/generate-rule/`, and
 `plans/tasks/{task_id}/` once `plan_id` is there. The same on every build.
+
+**The client's allergies as the server reads them** (BACKEND_BUGS B-195, 2026-11-21,
+additive): `GET preferences/` answers, beside `allergies` (the text as typed),
+`allergens` — the canonical tags it names, sorted («حساسية للوز» is `tree_nut`, "nuts"
+is `peanut` and `tree_nut`) — and `allergy_terms` — the words it names that the
+vocabulary does not know, English or Arabic, sorted; both empty for blank text and
+for "none" in either language («لا يوجد»). Exactly the two fields of the trainer's
+`trainer/clients/{client_id}/preferences/` (B-128), from one function
+(`diet/allergens.py allergy_reading`), so the Allergies screen ticks its chips from
+the server's reading instead of parsing the text again. The writes answer no
+preferences object and are unchanged.
 
 No plan is generated from an activity level the client never chose (the owner,
 2026-09-20): `plans/generate/` and `plans/generate-rule/` answer 400
@@ -914,6 +933,15 @@ holds.
 
 **Whose plan (B-140).** The `plan` block of `plan/{id}/meals-with-ingredients/` gains
 `client_id`, the user whose plan it is.
+
+**One code, three statuses (B-142).** `plan_superseded` (a newer plan replaced this
+one) is 400 on a trainer's meal write (`trainer/meals/`, `trainer/meals/{meal_id}/`),
+403 on the trainer's plan reads (`nutrition/plan/{plan_id}/`,
+`meals/{meal_id}/components/`, `plan/{plan_id}/meals-with-ingredients/`) and the review
+(`trainer/diet-plans/{plan_id}/review/`), and 409 on the client's
+`client/meals/{meal_id}/complete/` and its undo, `client/meals/{meal_id}/undo/` (Road to
+10 S3.5). Each status is shipped and stays: branch on `code`, never on the status. Each
+view's docstring says so; nothing changed on the wire.
 
 New codes: `bad_macro_split` (400, above). `bad_meals` (400: `meals` is not a non-empty
 list, or an item is not an object). Reused with their meaning: `bad_duration` (now also
@@ -1085,7 +1113,7 @@ anything to buy, on any build:
 
 | preference `event_type` | the email |
 |---|---|
-| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). Email only: there is no push of this type |
+| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). A plan's payment also sends the push `payment_confirmed` (§4), and this row governs both: `channels.fcm` the push, `channels.email` the email. A routine product's web-hub checkout sends this email too, but its pushes are `routine_product_purchased` / `routine_product_sold`, never `payment_confirmed` (BACKEND_BUGS B-168) |
 | `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
 | `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
 | `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
@@ -1094,7 +1122,8 @@ Preferences govern the email as they govern the push: `channels.email: false` on
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
 inbox row is written either way. `GET preferences/event_types/` answers additively
 `{"event_types": [...], "email_event_types": [the six above]}`; `payment_confirmed` is a
-valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Since
+valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Each of the
+six is a push type too, so each is in `event_types` as well (BACKEND_BUGS B-168). Since
 2026-11-22 (Road to 10 S0.4) it also answers `role` and `role_event_types` /
 `role_email_event_types`: the same lists cut to the kinds the caller's ROLE is ever sent
 (`notifications/audience.py`, read from each kind's call site), `all` always kept. A
@@ -2183,7 +2212,8 @@ show plan status, expiry and history, and history without receipts is not histor
   `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
 - `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
   resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
-  (the same counter the WebSocket enforces). `limit: 0` is unlimited; no subscription
+  (the same counter and the same allowance the WebSocket enforces: 10 a day by default
+  since 2026-11-21, `AI_MAX_MESSAGES_PER_DAY`). `limit: 0` is unlimited; no subscription
   is `{quotas: []}`, not an error. A pure read: it creates no usage row.
 - `subscriptions/current/` gains `plan_duration_days` (what a renewal adds, and the
   denominator of the days-left gauge — `start_date` cannot serve, a renewal moves only
@@ -2380,7 +2410,11 @@ field and code; in short:
   own wallet currency, so the app picks `currencies[currency]` without reading
   `wallet/balance/` (BACKEND_BUGS B-144); `today` (YYYY-MM-DD) and `time_zone`
   ("Asia/Damascus"), the server's day and zone that the caps and `since`/`until` are
-  read in (B-146). The top-level `status` is `AgentProfile.status`, the same value as
+  read in (B-146). Additive (BACKEND_BUGS B-190): `utc_offset_minutes`, an integer, the
+  offset of that zone from UTC at the moment of the answer in minutes east (180 for
+  Asia/Damascus), read with `today` from the same clock: add it to an instant in UTC
+  and take the date to place the instant on the server's day, without mapping the zone
+  name to an offset on the phone. The top-level `status` is `AgentProfile.status`, the same value as
   `profile.status` (B-148). The agent ledger's, receipts' and settlements' timestamps
   and the key's `paired_at` / `last_signature_at` now carry the server's offset
   (+03:00), like `wallet/transactions/`: the same instants.
@@ -2794,7 +2828,12 @@ docstrings carry the full contract (`diet/views.py FoodListView`,
   food for that client. `&hide_conflicts=true` drops excluded and disliked rows,
   `&liked_only=true` keeps the liked ones; `count` follows. 400 `bad_for_client`,
   `bad_hide_conflicts`, `bad_liked_only`, `missing_fields` (`fields: ["for_client"]`,
-  a flag without it).
+  a flag without it). `allergen_verdict` is ONE food's verdict, `safe` / `unverified`
+  / `violation`; the review's `check.allergens.verdict` is the whole plan's,
+  `nothing_declared` / `clear` / `unverified` / `violation` (B-143). A client who
+  declared nothing reads `safe` on every picker row, an uncurated food included, and
+  `nothing_declared` on the review. Two sets, documented in both docstrings; no value
+  changed.
 - **The client's tastes** (B-128). `GET trainer/clients/{client_id}/preferences/` —
   `{client_id, has_preferences, allergies, allergens, allergy_terms, liked_foods,
   disliked_foods}`: the client's own text, its tags, the words the vocabulary does not
@@ -2802,7 +2841,9 @@ docstrings carry the full contract (`diet/views.py FoodListView`,
   An Arabic word the vocabulary does not know («الفراولة») is one of those words too
   (fix run, 2026-10-07): it is matched against a food's Arabic name, so it can appear
   in `allergy_terms`, in the picker's `excluded_terms` and, as `free:<word>`, in the
-  plan check's `declared_allergens`. No field or code changed.
+  plan check's `declared_allergens`. No field or code changed. The client's own
+  `GET preferences/` answers the same `allergens` and `allergy_terms` (B-195,
+  2026-11-21), from the same function.
 - **The client's week** (B-129). `GET trainer/clients/{client_id}/adherence/
   ?start_date=` — seven `days` (Saturday to Friday by default) with the client's own
   progress figures (ticked meals, calories and protein eaten and their targets, the
@@ -3265,7 +3306,7 @@ of its codes.
 | `diet/v1/trainer/templates/` | 403 `not_a_trainer` |
 | `diet/v1/trainer/diet-plans/` | 400 `missing_fields` (with `fields`), `bad_client_id`, `bad_template_id`, `bad_date`, `bad_body`, `bad_macro_split` (also `trainer/diet-plans/review/`, BACKEND_BUGS B-137); 403 `not_a_trainer` |
 | `diet/v1/trainer/meals/`, `.../{meal_id}/` | 400 `missing_fields` (with `fields`), `bad_diet_plan_id`, `bad_date`, `bad_body`; 403 `not_a_trainer` |
-| `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other |
+| `diet/v1/nutrition/plan/{plan_id}/`, `diet/v1/meals/{meal_id}/components/`, `diet/v1/plan/{plan_id}/meals-with-ingredients/` | 403 to a trainer: `not_plan_owner`, `not_assigned_client` or `plan_superseded` (the trainer service's own reason), `not_assigned_view` for any other. `plan_superseded` is 400 on `trainer/meals/` and 409 on `client/meals/{meal_id}/complete/` (BACKEND_BUGS B-142): branch on the code |
 | `diet/v1/client/meals/{meal_id}/` | 403 `clients_only` |
 | `analytics/sessions/end_session/` | 400 `missing_session_id` |
 | `analytics/dashboard/platform_stats/` | 403 `admins_only` |

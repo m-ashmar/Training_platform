@@ -56,8 +56,15 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8000
 
+# Semgrep's missing-user rules want a USER instruction before ENTRYPOINT and CMD. There
+# is none on purpose (see "Non-root user" above): the entrypoint starts as root only to
+# create the upload spool, then execs the process as appuser through setpriv, and a
+# USER instruction would make that chown fail. Nothing the app does runs as root.
+# nosemgrep: dockerfile.security.missing-user-entrypoint.missing-user-entrypoint
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Run migrations then start Daphne (ASGI for WebSockets). fly.toml's [processes]
-# replaces this CMD per process group; the ENTRYPOINT above still runs for all of them.
+# replaces this CMD per process group; the ENTRYPOINT above still runs for all of them,
+# so this command, like every other, runs as appuser (the missing-user reason above).
+# nosemgrep: dockerfile.security.missing-user.missing-user
 CMD ["sh", "-c", "python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 training_platform.asgi:application"]

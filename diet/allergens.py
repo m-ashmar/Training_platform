@@ -771,6 +771,27 @@ def declared_terms(raw: str | None) -> Set[str]:
     return parse_user_allergies(raw) | {f"free:{w}" for w in arabic_free_terms(raw)}
 
 
+def allergy_reading(raw: str | None) -> dict:
+    """The server's reading of a client's allergy text, as every read of it answers it:
+    `{"allergens": [...], "allergy_terms": [...]}`.
+
+    `allergens` — the tags of the vocabulary the text names, sorted (an everyday word
+    widens: "nuts" is `peanut` and `tree_nut`; «حساسية للوز» is `tree_nut`).
+    `allergy_terms` — the words it names that the vocabulary does not know, English
+    ("kiwi") or Arabic («الفراولة»), sorted. «لا يوجد», "none" or blank text: both empty.
+
+    `declared_terms` underneath, so a read shows exactly what the checks refuse with.
+    ONE function for the client's own `GET v1/preferences/` (BACKEND_BUGS B-195) and his
+    trainer's `trainer/clients/{id}/preferences/` (B-128), so the two reads of one text
+    can never disagree, and the app never parses the text a second time.
+    """
+    tags = declared_terms(raw)
+    return {
+        "allergens": sorted(t for t in tags if not t.startswith("free:")),
+        "allergy_terms": sorted(t[5:] for t in tags if t.startswith("free:")),
+    }
+
+
 def label(tag: str) -> str:
     """Human-readable name for a tag."""
     if tag.startswith("free:"):

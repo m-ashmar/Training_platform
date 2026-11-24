@@ -35,6 +35,7 @@ After adding a migration, the run needs `--create-db` or it dies with `Duplicate
 | One predicate decides what a trainer sees | A source scan forbids reading `assigned_trainer` directly — use the approved relation |
 | The venv IS the lock (`tests/test_django_lts.py`) | Every package `requirements.lock` pins must be installed at exactly that version where the tests run, or the gate fails. A worktree's symlinked `.venv` is the main checkout's: if it predates the lock, run `.venv/bin/pip install --require-hashes -r requirements.lock` in the main checkout — only when no other agent is running tests on it. Never `pip install` a package by name to get past this; change `requirements.txt` and regenerate the lock (its header says how) |
 | Nothing Django 6.0 removes | An AST scan fails `format_html()` with no arguments (pass the text as an argument, or use `format_html_join`) and `CheckConstraint(check=...)` (it is `condition=`); `manage.py check` must start with no deprecation warning and no issue |
+| CI's `security-scan` job, and `tests/test_security_scan_job.py` beside it | Semgrep (on GitHub only, ERROR rules) reads every tracked text file: a socket address written with the plain ws scheme fails it even in a docstring or a `.md` (write `wss://<host>/ws/...`). A checked false positive gets its reason in a comment and a line `nosemgrep: <the full rule id>` just before it, never a directory exclusion. The secret grep fails a key-SHAPED string in any tracked file, tests included: build a test key at run time from a prefix and random characters, never as a literal |
 
 Not a gate, and just as silent: **a new app with a `FileField` must be added to
 `LOCAL_APPS_FOR_FILE_CLEANUP` in `training_platform/signals.py`**, or a deleted or
@@ -310,6 +311,22 @@ routine products): `git archive <base> | tar -x -C <scratchpad>/<unique dir>`, s
 - Money: a payment's state changes only inside `PaymentService`; every `move_funds_atomic`
   names its `money_type`; lock order is subscription → payment, user rows → wallets by
   ascending id.
+
+- **An app test reads the push registry and the push data keys from disk.** The
+  app's gate test reads `notifications/channels/fcm.py` `EVENT_CLASS_REGISTRY` and
+  API_CONTRACT.md's table «`data.type` | additional `data` keys», and fails when the
+  app's table (a push's `data.type` -> the page it opens, with the keys it reads)
+  differs, as its store-safety test reads `policy/defaults.py`. If you add, rename or
+  remove an event type, or a push data key in that table, or move or rename either,
+  SAY SO IN YOUR REPORT: the integrator lists every such change in the hand-off
+  (2026-11-24, the manager and the app manager; the app covers all 48 types as of
+  `9b286e7`).
+- **A test run over about 2 minutes goes through the one lock.** `sh
+  /Users/mac/Desktop/Git/t2/Training_platform/.claude/worktrees/.locks/with_lock.sh suite
+  backend-<who> -- <command>`, the command the script starts. A list of files is ONE run.
+  Only a single file that finishes in under 2 minutes runs unlocked, and never two backend
+  runs at once outside the lock: the Mac (8 GB) reached load 256 with swap nearly full when
+  two unlocked backend runs went beside a simulator build (2026-11-24).
 
 ## Where the product is decided
 
