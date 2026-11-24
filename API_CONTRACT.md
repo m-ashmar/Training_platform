@@ -1764,6 +1764,19 @@ by name, and `email`, `height`, `weight`, `age`, `gender`, `activity_level`,
 `client_goals` and `client_preferences` are null meanwhile (the rule of the trainer's
 diet reads). `profile_picture` is a signed URL that expires, or null.
 
+**One rule for every trainer read of a client's personal data (BACKEND_BUGS B-201, the
+manager's ruling, 2026-11-24; additive).** While the coaching may not be used, the same
+`coaching_refusal` key (null while it may) is on `trainer/client-profile/` (the list and
+`{id}/`), on each row of `routine/trainer/client-progress/recent/`, and on
+`routine/trainer/client-progress/{id}/`. The file then answers 200 with `email`, `height`,
+`weight`, `age`, `gender`, `specific_injury`, `activity_level`, `client_goals`,
+`client_preferences`, `training_goal`, `training_place`, `training_days_per_week`,
+`injury_areas`, `bmi`, `bmr` and `tdee` null; the names, the picture, the dates and
+`coaching` stay, `coaching.status` saying `frozen` or `unpaid`. The progress detail holds
+back `client.goal`; its training record stays. The three values: `coaching_frozen` and
+`coaching_unpaid` keep the relation approved; `coaching_ended` means it is gone (the file
+answers 403 `not_your_client`, the lists leave the client out). No new code.
+
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
 `likes_count` and `comments_count` on a post and a comment, all exclude the rows a

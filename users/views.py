@@ -1379,6 +1379,26 @@ class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
     message = _lazy('This endpoint is only for trainers')
 
 
+#: What a trainer's file on a client (`trainer/client-profile/`) holds back while the
+#: coaching may not be used (BACKEND_BUGS B-201, the manager's ruling, 2026-11-24): the
+#: list's withheld record (`WITHHELD_WHILE_FROZEN`, below) and what the file adds of the
+#: same kind — the injuries, the onboarding answers, and the figures computed from the
+#: body (BMI, BMR, TDEE), which would give the weight back. Nulled, never dropped.
+PROFILE_WITHHELD_WHILE_FROZEN = (
+    'email', 'height', 'weight', 'age', 'gender', 'specific_injury', 'activity_level',
+    'client_goals', 'client_preferences', 'training_goal', 'training_place',
+    'training_days_per_week', 'injury_areas', 'bmi', 'bmr', 'tdee')
+
+
+def _withheld_profile(row, refusal):
+    """A file's row as the trainer may read it: `coaching_refusal` beside it, and the
+    record nulled while it is set."""
+    row = {**row, 'coaching_refusal': refusal}
+    if refusal is not None:
+        row.update(dict.fromkeys(PROFILE_WITHHELD_WHILE_FROZEN))
+    return row
+
+
 def _coaching_on_file(viewer, client):
     """The coaching on a trainer's file for `client` (Road to 10 S2.7): what
     `users.coaching.coaching_status` says of the approved relation between them — an
@@ -1419,6 +1439,20 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     `renewal_reminder`, `since`, `trainer_id`, `grace_until`. Null when there is no
     approved coaching (an admin: the client's approved coaching with anyone). The list
     does not carry it.
+
+    WHILE THE COACHING MAY NOT BE USED (BACKEND_BUGS B-201, the manager's ruling,
+    2026-11-24; additive): every row, the list's and `{id}/`'s, carries
+    `coaching_refusal` — null while the coaching may be used, else `coaching_frozen`
+    (the renewal found the client's wallet short) or `coaching_unpaid` (support
+    returned the month's payment), the codes `trainer/clients/` and the trainer's diet
+    reads answer for the same pair (`users.coaching.refusals_for`). While it is set, the
+    client's personal record is null: `email`, `height`, `weight`, `age`, `gender`,
+    `specific_injury`, `activity_level`, `client_goals`, `client_preferences`,
+    `training_goal`, `training_place`, `training_days_per_week`, `injury_areas`, `bmi`,
+    `bmr`, `tdee`. The names, the picture, the dates and `coaching` stay, so the screen
+    can say why it is paused (`coaching.status`: `frozen` or `unpaid`). A coaching that
+    ended is no approved relation: `{id}/` answers 403 `not_your_client` as before.
+    An admin reads in full (null). The same on every build.
     """
     queryset = CustomUser.objects.filter(user_type='client')
     serializer_class = ClientProfileViewSerializer
@@ -1472,7 +1506,13 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             private_cache().set(cache_key, data, timeout=300)
         # The coaching is read live, never from the five-minute cache: the client's
         # «do not renew» (S2.7) is a choice they switch, and the file must show it now.
-        return Response({**data, 'coaching': _coaching_on_file(request.user, obj)})
+        # So is what the trainer may read of the client (B-201): the cache is shared by
+        # every reader of this client, and the coaching's state is the reader's.
+        from .coaching import coaching_refusals
+
+        refusal = coaching_refusals(request.user, [obj.pk]).get(obj.pk)
+        return Response({**_withheld_profile(data, refusal),
+                         'coaching': _coaching_on_file(request.user, obj)})
 
     def list(self, request, *args, **kwargs):
         """
@@ -1501,10 +1541,14 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             logger.info(f"Trainer {request.user.id} listed their approved clients")
             
             serializer = self.get_serializer(queryset, many=True)
+            rows = list(serializer.data)
+            from .coaching import coaching_refusals
+
+            refusals = coaching_refusals(request.user, [row['id'] for row in rows])
             return Response({
                 'trainer_id': request.user.id,
                 'client_count': queryset.count(),
-                'clients': serializer.data
+                'clients': [_withheld_profile(row, refusals.get(row['id'])) for row in rows]
             })
             
         except PASSTHROUGH_EXCEPTIONS:
