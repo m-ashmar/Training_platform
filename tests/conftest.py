@@ -185,6 +185,9 @@ def _ensure_migration_seed(django_db_blocker):
     nothing follows them. This stays as the belt to that braces: it is one query, it runs
     for every database test, and it means a stray truncation from anywhere costs a
     re-create rather than a wall of unrelated failures.
+
+    The other migration-seeded tables (banned terms, channel rows, legal drafts) are put
+    back the same way, by `_restore_seeded_tables` (S-257 / S-267, 2026-11-24).
     """
     with django_db_blocker.unblock():
         from subscription.models import SubscriptionFeature
@@ -196,6 +199,64 @@ def _ensure_migration_seed(django_db_blocker):
         for name in missing:
             SubscriptionFeature.objects.get_or_create(
                 name=name, defaults={"description": name.replace("_", " ")})
+        _restore_seeded_tables()
+
+
+#: The other tables a migration leaves rows in on a FRESH database, and the function that
+#: wrote them (SIDE_BUGS S-257 / S-267, the phase 0 review round 4, 2026-11-24). A
+#: thread test (`test_zz_*`, `transaction=True`) flushes every table; on a reused
+#: database the next run then found no banned terms (test_w1_wallet's B-163 note was
+#: let through: 200, not 400 `content_not_allowed`), no channel rows and no legal
+#: drafts. `diet.FoodCategory` is not here: migration 0005's two rows are deleted again
+#: by 0066, so a fresh database holds none, and the catalogue's categories are
+#: `seeded_catalogue`'s (`load_food_catalogue`).
+MIGRATION_SEEDS = (
+    ("moderation.BannedTerm", "moderation.migrations.0004_seed_banned_terms",
+     "seed_banned_terms"),
+    ("policy.ChannelCapabilities", "policy.migrations.0002_seed_channel_capabilities",
+     "seed"),
+    ("legal.LegalDocument", "legal.migrations.0002_seed_draft_documents", "seed"),
+)
+#: The migrations' own models (the project state at the last migration), built the first
+#: time a table has to be put back: the seed functions are run as `migrate` runs them, so
+#: the rows are the migrations' rows — no second copy of the data — and no model's own
+#: `save()` adds to them (a `ChannelCapabilities` saved through the real model writes a
+#: `CapabilityChangeLog` row that a fresh database does not have).
+_historical_apps = None
+
+
+def _restore_seeded_tables():
+    """Run each `MIGRATION_SEEDS` function again for a table that is EMPTY. One query
+    when every table holds rows, which is every test but the first after a flush. A test
+    that wants a table empty deletes its rows itself, inside its own transaction, after
+    this has run (test_releases_legal, test_policy_channels, test_backend_bugs_b172)."""
+    import importlib
+
+    from django.apps import apps
+    from django.db import connection
+
+    global _historical_apps
+    tables = [apps.get_model(label)._meta.db_table for label, _module, _fn in MIGRATION_SEEDS]
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT " + ", ".join(
+            f'EXISTS (SELECT 1 FROM "{table}")' for table in tables))
+        present = cursor.fetchone()
+    if all(present):
+        return
+    if _historical_apps is None:
+        from django.db.migrations.loader import MigrationLoader
+
+        _historical_apps = MigrationLoader(connection).project_state().apps
+    for (label, module, function), there in zip(MIGRATION_SEEDS, present):
+        if there:
+            continue
+        getattr(importlib.import_module(module), function)(_historical_apps, None)
+        if label == "moderation.BannedTerm":
+            # The filter keeps the list in memory under a version in the shared cache;
+            # a historical model's save sends no signal, so say it here.
+            from moderation import ugc_filter
+
+            ugc_filter.invalidate()
 
 
 @pytest.fixture(autouse=True)
