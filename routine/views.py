@@ -229,6 +229,20 @@ class ExerciseFilter(django_filters.FilterSet):
         fields = ['target_muscle', 'exclude']
 
 
+def exercise_owner(user):
+    """Who an exercise `user` creates belongs to: a trainer's is their own; an admin's
+    is the platform catalogue's — no owner, so `is_global`, visible to everyone and
+    editable by an admin — exactly what the console makes (the fix run's S-166,
+    2026-11-24).
+
+    Both create routes let an admin in ("a trainer or an admin") and then saved the admin
+    as the owner, which `Exercise.clean` refuses (`trainer_required`: only a trainer owns
+    an exercise): `create-with-image/` answered 500 `exercise_create_failed`."""
+    if not getattr(user, 'is_trainer', False) and getattr(user, 'is_admin', False):
+        return None
+    return user
+
+
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises.
@@ -265,8 +279,9 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return visible_exercises_for(self.request.user, base_qs)
 
     def perform_create(self, serializer):
-        """Override to assign the exercise to the creator."""
-        serializer.save(created_by=self.request.user)
+        """The exercise is the creating trainer's own; an admin's is the platform
+        catalogue's (`exercise_owner`)."""
+        serializer.save(created_by=exercise_owner(self.request.user))
 
     def destroy(self, request, *args, **kwargs):
         """Refuse to delete an exercise clients have logged work against.
@@ -404,6 +419,10 @@ class ExerciseCreateWithImageView(APIView):
     and expiring like every media URL — read it again, never store it. The row used to
     keep the signed URL itself, which on object storage died an hour after the upload
     (SIDE_BUGS S-070). Removing the media row or the exercise removes the file.
+
+    **Who owns it.** A trainer's exercise is their own; an admin's goes to the platform
+    catalogue (no owner, visible to everyone; `is_mine` false), as the console makes one
+    (`exercise_owner`, S-166 — it answered 500 `exercise_create_failed`).
 
     A fault nobody anticipated answers 500 `exercise_create_failed` with a translated
     sentence and nothing else: the exception text used to BE the response body
@@ -549,7 +568,7 @@ class ExerciseCreateWithImageView(APIView):
 
             # Create the exercise
             exercise = Exercise.objects.create(
-                created_by=request.user,
+                created_by=exercise_owner(request.user),
                 **exercise_data
             )
 
