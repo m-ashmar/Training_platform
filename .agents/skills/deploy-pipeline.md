@@ -210,13 +210,24 @@ python manage.py runserver
 
 ## CI/CD Gates (GitHub Actions)
 
-Runs on every PR to `main`/`develop` and every push to `main`:
+Runs on every push and pull request to `main`, `develop` and `spec/payments-compliance`
+(`.github/workflows/security.yml`, job `security-scan`):
 
 1. **Bandit** — Python static security analysis (high severity blocks)
 2. **Safety** — dependency vulnerability scan
-3. **Semgrep** — pattern-based SAST
+3. **Semgrep** — pattern-based SAST (`--config=auto`, fails on ERROR). It reads every
+   tracked text file, documentation included: a socket address written with the plain
+   ws scheme fails it even in prose, so write `wss://<host>/ws/...`. A checked false
+   positive is answered at its place: the reason in a comment, then a line
+   `# nosemgrep: <the full rule id>` just before the finding (a Dockerfile has no
+   inline comments). Never exclude a code directory to silence one. Do not run it on a
+   laptop: `--config=auto` talks to semgrep.dev, and the CI run is the proof.
 4. **TruffleHog** — secret scanning (only-verified mode)
-5. **Hardcoded secret grep** — patterns like `sk-proj-`, `django-insecure`, HuggingFace tokens
+5. **Hardcoded secret grep** — `git grep -E` over the tracked files minus `_excluded/`,
+   for key SHAPES (OpenAI, Hugging Face, a generated Django key, AWS, GitHub, a PEM
+   private key with its body); it prints `file:line`, never the key. A test that needs
+   a key-looking value builds it at run time, never as a literal
+   (`tests/test_security_scan_job.py` runs the step's script and shows how).
 
 All gates must pass before merge.
 

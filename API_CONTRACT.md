@@ -407,10 +407,11 @@ a challenge that is OVER — closed as completed, or past its end date and not c
 
 ### AI Assistant
 
-The assistant answers over the socket `ws://host/ws/ai/chat/?token=<JWT>`; these routes
-are the history and the housekeeping around it. Every socket `error` frame and every
-REST refusal carries a `code` — `ai_assistant/consumers.py` lists the socket's full set
-in its class docstring. Two worth naming here:
+The assistant answers over the socket `wss://<host>/ws/ai/chat/?token=<JWT>` (the plain
+`ws` scheme on a local server, which has no TLS); these routes are the history and the
+housekeeping around it. Every socket `error` frame and every REST refusal carries a
+`code` — `ai_assistant/consumers.py` lists the socket's full set in its class
+docstring. Two worth naming here:
 
 | `code` | Where | When |
 |---|---|---|
@@ -731,7 +732,8 @@ frame names the same code). `DELETE
 messages/{id}/` tombstones the sender's own message — the row stays in the thread with
 `deleted: true` and an empty `body`, and nothing is ever hard-deleted.
 
-Live: `ws://host/ws/chat/{conversation_id}/?token=<access JWT>`. Client frames
+Live: `wss://<host>/ws/chat/{conversation_id}/?token=<access JWT>` (plain `ws` on a
+local server). Client frames
 `{"type": "message.send", body, client_uuid?}` (or a program card: `kind: "program"`
 and the card's fields, as on REST) and `{"type": "message.read"}`; server frames
 `message.new`, `message.updated` (a message already sent now reads differently —

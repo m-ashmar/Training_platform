@@ -1,8 +1,9 @@
 """
 consumers.py — WebSocket consumer for AI chat.
 
-Handles WebSocket connections at ws://host/ws/ai/chat/?token=<JWT>.
-Authentication is delegated to training_platform.ws_auth, shared with
+Handles WebSocket connections at wss://<host>/ws/ai/chat/?token=<JWT> (TLS ends at
+Caddy in production; a local server, which has no TLS, takes the same path over the
+plain ws scheme). Authentication is delegated to training_platform.ws_auth, shared with
 SocialConsumer. It checks premium entitlement, enforces rate limiting, and
 streams GPT responses to the client.
 
@@ -104,7 +105,7 @@ def reserve_daily_slot(user_id, max_messages, *, store=None, now=None):
 
 class AIChatConsumer(AsyncWebsocketConsumer):
     """
-    WebSocket endpoint: ws://host/ws/ai/chat/?token=<JWT>
+    WebSocket endpoint: wss://<host>/ws/ai/chat/?token=<JWT> (plain ws on a local server)
 
     **The build.** Declare it on the handshake the way every REST call does, as
     `X-App-Channel: apk | play | ios | web` and `X-App-Version: 1.4.0` headers; a
