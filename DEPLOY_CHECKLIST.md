@@ -266,6 +266,7 @@ the privacy policy (`docs/store/privacy_labels.md`).
 | `EXCHANGE_RATE_MAX_AGE_DAYS` | | `7` | | |
 | `PAYOUT_HOLD_DAYS` | | `3` | | Owner number |
 | `AGENT_DEFAULT_DAILY_LIMIT`, `..._MONTHLY_LIMIT`, `..._PER_TRANSACTION_LIMIT`, `..._RECEIVABLE_CEILING` | | 250000, 5000000, 50000, 600000 | | Owner numbers (SYP) |
+| `WALLET_LARGE_TOPUP_THRESHOLD_SYP`, `WALLET_LARGE_TOPUP_THRESHOLD_USD` | | `1000000`, `100` | | The operator's "large top-up" alert, per currency (SIDE_BUGS S-162) |
 | `PLATFORM_ESCROW_*`, `PLATFORM_REVENUE_*`, `PLATFORM_PAYOUT_CLEARING_*` (`_EMAIL`, `_USERNAME`) | | `platform_*@local` | | The platform's system wallets. Set once, before the first money moves; never change after |
 | `WALLET_DEV_MODE` | | `False` | | Boot refuses `True` |
 

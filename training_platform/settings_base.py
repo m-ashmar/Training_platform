@@ -378,6 +378,15 @@ AGENT_DEFAULT_PER_TRANSACTION_LIMIT = _Decimal(
 #: agent means its monthly cap in that currency (`wallet.agents.Usage.ceiling`).
 AGENT_DEFAULT_RECEIVABLE_CEILING = _Decimal(
     get_env("AGENT_DEFAULT_RECEIVABLE_CEILING", "600000"))
+# What ONE cash top-up must reach for the operator's suspicious-activity alert to call it
+# large, per currency (`wallet.views.large_topup_thresholds`; SIDE_BUGS S-162): 1,000,000
+# SYP and 100 USD, the numbers ruled for Road to 10 on 2026-11-24. One threshold of 1,000
+# for both currencies flagged ordinary pound top-ups and let dollar ones worth millions of
+# pounds through. A currency with no entry keeps that old 1,000.
+WALLET_LARGE_TOPUP_THRESHOLDS = {
+    "SYP": _Decimal(get_env("WALLET_LARGE_TOPUP_THRESHOLD_SYP", "1000000")),
+    "USD": _Decimal(get_env("WALLET_LARGE_TOPUP_THRESHOLD_USD", "100")),
+}
 # The DOLLAR defaults are still nobody's: AGENT_DEFAULT_DAILY_LIMIT_USD /
 # AGENT_DEFAULT_MONTHLY_LIMIT_USD are unset, so a new agent tops up no dollars until an
 # operator sets its dollar caps (SIDE_BUGS S-059), and its dollar per-top-up cap and
