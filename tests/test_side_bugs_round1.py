@@ -263,6 +263,12 @@ def test_a_turn_that_only_errors_does_not_spend_the_daily_allowance(
     from ai_assistant.services.chat_service import ChatService
     from training_platform.cache import ratelimit_cache
 
+    # Deliberate contract change (the owner, 2026-11-21): the default allowance fell
+    # from 50 to 10 messages a day (`AI_MAX_MESSAGES_PER_DAY`). This test protects the
+    # refund, not the default, so it pins the fifty it was written against, as its
+    # neighbours below do; the new default is tested in tests/test_ai_daily_limit.py.
+    settings.AI_ASSISTANT_CONFIG = {**settings.AI_ASSISTANT_CONFIG,
+                                    "MAX_MESSAGES_PER_DAY": 50}
     person = _ai_subscriber(make_user, _tag("rl"))
     # `monkeypatch`, never a bare assignment: setting the attribute and deleting it
     # afterwards REMOVES the real method from the class for the rest of the session.

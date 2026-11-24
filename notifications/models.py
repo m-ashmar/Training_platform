@@ -105,8 +105,9 @@ class EmailDelivery(models.Model):
 
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                   related_name='email_deliveries')
-    #: The inbox row this email went with, when it went with one (the receipt and the
-    #: 7-day notice are email only).
+    #: The inbox row this email went with, when it went with one. The receipt and the
+    #: 7-day notice are queued on their own, so theirs is null; the push
+    #: `payment_confirmed` writes its own inbox row (BACKEND_BUGS B-168).
     notification = models.ForeignKey(Notification, on_delete=models.SET_NULL, null=True,
                                      blank=True, related_name='emails')
     kind = models.CharField(max_length=50)

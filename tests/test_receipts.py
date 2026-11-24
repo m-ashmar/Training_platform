@@ -343,12 +343,18 @@ def test_a_store_build_still_gets_the_length_and_the_features_but_no_price(
     assert body["plan_features"]["ai_advice"] is True
 
 
-def test_todays_usage_answers_both_bars_the_screen_draws(make_user, api):
+def test_todays_usage_answers_both_bars_the_screen_draws(make_user, api, settings):
     """Subscription.png "استهلاكك اليوم": diet plan builds and AI coach messages, each
     used-out-of-limit. Neither was answerable: the usage list carries no row until the
     allowance has been spent, and the AI messages are not in that table at all."""
     from subscription import quota
 
+    # Deliberate contract change (the owner, 2026-11-21): the AI coach's default
+    # allowance fell from 50 to 10 messages a day (`AI_MAX_MESSAGES_PER_DAY`). This test
+    # is about the two bars being answered, not about the default, so it pins the 50 it
+    # was written against; the new default is tested in tests/test_ai_daily_limit.py.
+    settings.AI_ASSISTANT_CONFIG = {**settings.AI_ASSISTANT_CONFIG,
+                                    "MAX_MESSAGES_PER_DAY": 50}
     user = make_user("rc_usage")
     _subscription(user, _plan("rc usage plan"))
     assert quota.consume(user, "daily_meals", 2) is True

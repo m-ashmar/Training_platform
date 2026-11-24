@@ -234,6 +234,7 @@ go in `fly.toml [env]`, but a secret there is readable in the repository.
 | `AI_ASSISTANT_MODEL` | | `gpt-4o-mini` | | The model's name at that provider. The provider's name is never shown to users (owner, 2026-09-24) |
 | `AI_EXTRA_BODY` | | | | A JSON object merged into every request, for a provider-specific switch such as turning a model's "thinking" off. Malformed: boot fails |
 | `AI_PRICE_INPUT_PER_1M_USD`, `AI_PRICE_OUTPUT_PER_1M_USD` | | the price table's | | The model's price, both or neither; the daily cost ceiling counts on it. One without the other: boot fails |
+| `AI_MAX_MESSAGES_PER_DAY` | | `10` | | The AI coach's messages per person per day, the same on every plan with the coach; the socket refuses the next one with `rate_limit`, and `usage/today/` draws it as `ai_messages.limit` (the owner, 2026-11-21: it was 50; the free Workers AI allowance is about 115 coach messages a day for everyone together). Not a whole number, or below 1: boot fails. Set as a line or left out, never empty |
 | `AI_PROVIDER`, `OPENAI_MODEL` | | `openai`, `gpt-4o-mini` | | Read by nothing; kept so an existing environment still loads |
 | `HUGGINGFACE_API_TOKEN` | | | yes | Only for the Hugging Face provider |
 | `AI_TRAINING_RETENTION_DAYS` | | `365` | | Anonymous training copies are purged after this |

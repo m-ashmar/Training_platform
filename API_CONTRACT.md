@@ -417,6 +417,12 @@ in its class docstring. Two worth naming here:
 | `message_not_found` | `POST feedback/` (404) and the socket's `feedback` frame | No assistant message of yours by that id |
 | `ai_consent_required` | every `/api/ai/` route except `data/` (`GET` and `DELETE`) and `training-consent/`, and the socket | The AI coach has not been allowed to read this person's data |
 
+The daily message allowance is **10 per person per day** by default (the owner,
+2026-11-21; it was 50), the same on every plan with the coach and set on the server by
+`AI_MAX_MESSAGES_PER_DAY`. The message after the last one is refused with the `error`
+frame `code: "rate_limit"` (`remaining: 0`, `resets_at`), uncharged; `usage/today/`
+answers the same number as `ai_messages.limit`. No `code` changed.
+
 A turn that ends in an `error` frame is **not** charged against the daily message
 allowance; each turn closes with `{"type": "rate_limit", "remaining", "resets_at"}`
 carrying what is actually left. `resets_at` is the next midnight in the server's time
@@ -1104,7 +1110,7 @@ anything to buy, on any build:
 
 | preference `event_type` | the email |
 |---|---|
-| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). Email only: there is no push of this type |
+| `payment_confirmed` | the payment's receipt as a PDF attachment (the same document as `payments/{id}/receipt/?format=pdf`). A plan's payment also sends the push `payment_confirmed` (§4), and this row governs both: `channels.fcm` the push, `channels.email` the email. A routine product's web-hub checkout sends this email too, but its pushes are `routine_product_purchased` / `routine_product_sold`, never `payment_confirmed` (BACKEND_BUGS B-168) |
 | `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
 | `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
 | `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
@@ -1113,7 +1119,8 @@ Preferences govern the email as they govern the push: `channels.email: false` on
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
 inbox row is written either way. `GET preferences/event_types/` answers additively
 `{"event_types": [...], "email_event_types": [the six above]}`; `payment_confirmed` is a
-valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Since
+valid `event_type` for `POST preferences/` (it was `400 unknown_event_type`). Each of the
+six is a push type too, so each is in `event_types` as well (BACKEND_BUGS B-168). Since
 2026-11-22 (Road to 10 S0.4) it also answers `role` and `role_event_types` /
 `role_email_event_types`: the same lists cut to the kinds the caller's ROLE is ever sent
 (`notifications/audience.py`, read from each kind's call site), `all` always kept. A
@@ -2179,7 +2186,8 @@ show plan status, expiry and history, and history without receipts is not histor
   `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
 - `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
   resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
-  (the same counter the WebSocket enforces). `limit: 0` is unlimited; no subscription
+  (the same counter and the same allowance the WebSocket enforces: 10 a day by default
+  since 2026-11-21, `AI_MAX_MESSAGES_PER_DAY`). `limit: 0` is unlimited; no subscription
   is `{quotas: []}`, not an error. A pure read: it creates no usage row.
 - `subscriptions/current/` gains `plan_duration_days` (what a renewal adds, and the
   denominator of the days-left gauge — `start_date` cannot serve, a renewal moves only
@@ -2376,7 +2384,11 @@ field and code; in short:
   own wallet currency, so the app picks `currencies[currency]` without reading
   `wallet/balance/` (BACKEND_BUGS B-144); `today` (YYYY-MM-DD) and `time_zone`
   ("Asia/Damascus"), the server's day and zone that the caps and `since`/`until` are
-  read in (B-146). The top-level `status` is `AgentProfile.status`, the same value as
+  read in (B-146). Additive (BACKEND_BUGS B-190): `utc_offset_minutes`, an integer, the
+  offset of that zone from UTC at the moment of the answer in minutes east (180 for
+  Asia/Damascus), read with `today` from the same clock: add it to an instant in UTC
+  and take the date to place the instant on the server's day, without mapping the zone
+  name to an offset on the phone. The top-level `status` is `AgentProfile.status`, the same value as
   `profile.status` (B-148). The agent ledger's, receipts' and settlements' timestamps
   and the key's `paired_at` / `last_signature_at` now carry the server's offset
   (+03:00), like `wallet/transactions/`: the same instants.

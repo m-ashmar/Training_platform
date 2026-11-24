@@ -1699,7 +1699,7 @@ class AgentMeView(APIView):
          profile: {display_name, city, area, opening_hours, public_phone, status,
                    is_listed},
          status, can_top_up, blocked_reason, next_settlement_on, currency, today,
-         time_zone,
+         time_zone, utc_offset_minutes,
          currencies: {"SYP": {...}, "USD": {...}}}
 
     `status` is the agent's own status, `AgentProfile.status` (`active`, `suspended`,
@@ -1724,6 +1724,12 @@ class AgentMeView(APIView):
     receipts' and settlements' timestamps (and the key's `paired_at` /
     `last_signature_at`) are written with the server's offset (+03:00), like
     `wallet/transactions/` rows: the same instants they always were.
+    `utc_offset_minutes` (an integer, BACKEND_BUGS B-190) is that offset in minutes east
+    of UTC at the moment of the answer, read with `today` from one clock reading: 180
+    for Asia/Damascus. To put any instant on the server's day, add it to the instant in
+    UTC and take the date; the phone never has to know a zone's offset from its name.
+    It follows `TIME_ZONE`: another zone answers its own offset (Asia/Tokyo 540,
+    -300 for a zone five hours behind UTC).
 
     One object per currency the platform trades in, every amount a string in that
     currency: `per_transaction_limit` (null: none of its own), `daily_limit`,

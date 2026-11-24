@@ -45,8 +45,8 @@ class UserNotificationPreferenceSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError(_("event_type is required."))
         # One of the types `event_types/` lists. A typo answered 201 and muted nothing
-        # (BACKEND_BUGS B-014). An email-only type (`payment_confirmed`, the receipt) is
-        # one of them too: `email_event_types`.
+        # (BACKEND_BUGS B-014). The email types (`email_event_types`) count as well;
+        # today each of them is a push type too (B-168).
         from notifications.channels.email import email_preference_types
         from notifications.channels.fcm import EVENT_CLASS_REGISTRY
         if (value != 'all' and value not in EVENT_CLASS_REGISTRY
@@ -77,10 +77,15 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
 
     Which types send an email at all (the payments spec, section 7): the ones
     `event_types/` lists in `email_event_types` — `payment_confirmed` (the receipt, as a
-    PDF; email only, there is no push of that type), `subscription_expiring` (the 7-day
-    notice only), `subscription_expired`, `withdrawal_requested`, `withdrawal_paid`,
-    `withdrawal_failed`. An email goes only to a verified address. `channels.email` on
-    any other type is accepted and changes nothing.
+    PDF), `subscription_expiring` (the 7-day notice only), `subscription_expired`,
+    `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed`. Each of the six is a
+    push type as well, listed in `event_types` too, and its row governs both: a plan's
+    payment sends the push `payment_confirmed` beside the receipt email, so
+    `channels.fcm` on that row is the push and `channels.email` the email (BACKEND_BUGS
+    B-168). A routine product's web-hub checkout sends the same receipt email, governed
+    by the `payment_confirmed` row, but its pushes are `routine_product_purchased` /
+    `routine_product_sold`, never `payment_confirmed`. An email goes only to a verified
+    address. `channels.email` on any other type is accepted and changes nothing.
     """
     serializer_class = UserNotificationPreferenceSerializer
     permission_classes = [IsAuthenticated]
@@ -117,8 +122,9 @@ class NotificationPreferenceViewSet(viewsets.ModelViewSet):
         "role": "trainer", "role_event_types": [...], "role_email_event_types": [...]}`.
         `event_types` is every push type (the FCM registry) and `all`; `email_event_types`
         is the types that also send an email, whose `channels.email` therefore means
-        something — one of them, `payment_confirmed`, has no push and is in this list
-        only. Same answer on every build.
+        something. Each of those is in `event_types` too: `payment_confirmed` is both
+        the receipt's push and its email (BACKEND_BUGS B-168). Same answer on every
+        build.
 
         `role_event_types` / `role_email_event_types` (additive, Road to 10 S0.4,
         2026-11-22): the same two lists cut to the kinds the caller's ROLE is ever sent

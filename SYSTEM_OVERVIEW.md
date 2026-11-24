@@ -228,7 +228,7 @@ ai_assistant/
 └── tool_registry.py ← Tool registration and dispatch
 ```
 
-Config: max 50 messages/day, 30-min session timeout, $50/day cost alert, `gpt-4o-mini` default model.
+Config: max 10 messages/day per person (`AI_MAX_MESSAGES_PER_DAY`, the owner 2026-11-21; it was 50), 30-min session timeout, $50/day cost alert, `gpt-4o-mini` default model.
 
 ---
 

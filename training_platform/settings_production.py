@@ -772,6 +772,15 @@ def enforce_production_safety():
     elif _aik == (SECRET_KEY or ""):
         errors.append("AI_TRAINING_PSEUDONYM_KEY must not be SECRET_KEY")
 
+    # --- The AI coach's daily messages per person (the owner, 2026-11-21) ---
+    # 0 or less would refuse every message while `usage/today/` reads a `limit` of 0 as
+    # "unlimited": the screen and the socket would disagree.
+    _ai_daily = (globals().get("AI_ASSISTANT_CONFIG") or {}).get("MAX_MESSAGES_PER_DAY")
+    if isinstance(_ai_daily, bool) or not isinstance(_ai_daily, int) or _ai_daily < 1:
+        errors.append(
+            f"AI_MAX_MESSAGES_PER_DAY is {_ai_daily!r} — the AI coach's messages per "
+            "person per day must be 1 or more (default 10)")
+
     # --- SECRET_KEY strength ---
     if ('django-insecure' in (SECRET_KEY or '')) or (len(SECRET_KEY or '') < 32):
         errors.append("SECRET_KEY is weak or a Django dev placeholder in production")
