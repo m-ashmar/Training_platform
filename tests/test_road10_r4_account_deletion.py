@@ -143,7 +143,12 @@ def test_a_trainer_with_earnings_and_nobody_to_coach_is_deleted_and_told(make_us
     assert done.status_code == 200 and done.json()["money"]["contact_support"]
 
 
-def test_an_agent_holding_the_platforms_cash_is_told_it_is_not_settled(make_user, api):
+def test_an_agent_holding_the_platforms_cash_is_told_and_refused(make_user, api):
+    """A deliberate contract change (the owner, 2026-11-24): R4 deleted an agent who
+    held the platform's cash and only reported it (`money.agent_cash` on the 200). The
+    owner's rule is that the account cannot go until the cash is settled, so the same
+    agent is now told before confirming and refused, 409 `agent_holds_platform_cash`.
+    Every path and the settlement are in `tests/test_road10_agent_cash_deletion.py`."""
     from tests.test_agent_shell import _agent, _receivable, _topup
 
     client = make_user(_name("ac"))
@@ -153,9 +158,11 @@ def test_an_agent_holding_the_platforms_cash_is_told_it_is_not_settled(make_user
     assert _topup(api, agent, client, "5000.00", _name("k")).status_code == 200
     owed = [{"currency": "SYP", "amount": "5000.00"}]
     assert api(agent).get(ERASE).json()["money"]["agent_cash"] == owed
-    done = _erase(api, agent)
-    assert done.status_code == 200 and done.json()["money"]["agent_cash"] == owed
-    # Deleting settled nothing: the platform's claim is still on record.
+    refused = _erase(api, agent)
+    assert refused.status_code == 409
+    assert (refused.json()["code"], refused.json()["agent_cash"]) == (
+        "agent_holds_platform_cash", owed)
+    # Nothing settled and nothing erased: the platform's claim is still on record.
     assert _receivable(profile) == Decimal("5000.00")
 
 

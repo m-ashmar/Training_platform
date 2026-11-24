@@ -718,12 +718,55 @@ def _unlist_agent(user, queryset, *, dry_run):
     hand cash to an account that can no longer credit them. The directory also requires
     the account to be active (`wallet/views.py AgentDirectoryView`); this makes the row
     itself say so, for the console and for a reinstated account (an operator lists it
-    again on purpose). Counts nothing: the source's own count is the report."""
+    again on purpose). Counts nothing: the source's own count is the report.
+
+    It also stops taking cash: an `active` profile becomes `suspended` (2026-11-24; a
+    banned one stays banned). The erasure
+    holds the profile lock from `_refuse_while_holding_cash`, so a top-up that was
+    waiting for that lock finds the profile suspended and is refused
+    (`agent_not_active`) instead of posting the platform's cash to an account that has
+    just been allowed to go because it held none."""
     if dry_run:
         return {}
-    for profile in queryset.filter(is_listed=True):
+    from django.db.models import Q
+
+    for profile in queryset.filter(Q(is_listed=True) | Q(status="active")):
         profile.is_listed = False
-        profile.save(update_fields=["is_listed", "updated_at"])
+        if profile.status == "active":
+            profile.status = "suspended"
+        profile.save(update_fields=["is_listed", "status", "updated_at"])
+    return {}
+
+
+def _refuse_while_holding_cash(user, queryset, *, dry_run):
+    """An agent cannot delete the account while holding the platform's cash (the owner,
+    2026-11-24). Road to 10 R4 deleted it and only reported `agent_cash`; deleting
+    settles nothing, and the platform's claim was left on an account nobody could reach.
+    Refused (`agent_holds_platform_cash`, with the amounts per currency) until an
+    operator records the settlement (`wallet.agents.record_settlement`), on every path:
+    the API, the console's erase of a web request, `CustomUser.retire()`. The trainer's
+    `trainer_has_active_clients` is the model.
+
+    A `refuse_erase`, so it runs before every `before_erase`: the agent's profile is
+    locked first, as a top-up and a settlement lock it before anything else
+    (`wallet/agents.py`, LOCK ORDER). Under that lock no top-up can add cash between
+    this count and the commit. A dry run never raises: the preview's `money.agent_cash`
+    is the same count."""
+    from wallet.agents import lock_profile, platform_cash_held_by
+    from wallet.models import AgentProfile
+
+    from .registry import ErasureRefused
+
+    profile = AgentProfile.objects.filter(user=user).first()
+    if profile is None:
+        return {}
+    if not dry_run:
+        lock_profile(profile)
+    held = platform_cash_held_by(user)
+    if held and not dry_run:
+        raise ErasureRefused(
+            "The agent still holds the platform's cash, so nothing was erased.",
+            code="agent_holds_platform_cash", agent_cash=held)
     return {}
 
 
@@ -743,6 +786,7 @@ register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", 
 # operator's note (as withdrawal events above).
 register(PersonalDataSource(label="agent_receivable", model="wallet.AgentReceivableEntry",
                             user_field="agent__user", on_erase="keep",
+                            refuse_erase=_refuse_while_holding_cash,
                             purpose=("The cash an agent holds for the platform, movement by "
                                      "movement. A record of money."),
                             recipients=(),

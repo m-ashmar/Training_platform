@@ -2449,6 +2449,12 @@ msgid ""
 "deleting your account."
 msgstr "لا يزال لديك متدربون فاعلون. أنهِ التدريب مع كل منهم قبل حذف حسابك."
 
+#: training_platform/privacy/views.py
+msgid ""
+"You still hold cash you collected for the platform. Hand it over to the "
+"platform first; your account can be deleted once it is settled."
+msgstr "لا يزال لديك نقد جمعته لصالح المنصة. سلّمه للمنصة أولاً؛ يمكن حذف حسابك بعد تسويته."
+
 #: routine/assignment.py
 msgid "customizations must be an object."
 msgstr "يجب أن تكون التخصيصات كائناً."

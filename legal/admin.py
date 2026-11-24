@@ -12,8 +12,9 @@ close as erased" (Road to 10 R4, 2026-11-23): the one erasure (`CustomUser.retir
 and the request closed in the same transaction. Before it, nothing here could delete an
 account and the console had no page that could, so a web request could not be finished
 without a shell. A request for no active account, an operator account, a trainer still
-coaching, or an erasure refused stays open with the reason; the money the account still
-holds is named, for support to return. The other three actions only close a request,
+coaching, an agent still holding the platform's cash (the owner, 2026-11-24), or an
+erasure refused stays open with the reason; the money the account still holds is named,
+for support to return. The other three actions only close a request,
 stamping who and when. The page shows whether an active account uses the
 address — for the operator only; the public page never says. Nobody adds or deletes a
 request here: the page writes them, and retention removes them 180 days after they are
@@ -212,12 +213,11 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
 
     def _money_note(self, money):
         """The money a deleted account leaves, in the operator's words: what support now
-        returns to the requester (the privacy policy: "contact us first to get it back")."""
-        parts = [f"its wallet holds {row['amount']} {row['currency']}"
-                 for row in money["wallet"]]
-        parts += [f"it still holds {row['amount']} {row['currency']} of the platform's "
-                  f"cash (not settled)" for row in money["agent_cash"]]
-        return "; ".join(parts)
+        returns to the requester (the privacy policy: "contact us first to get it back").
+        An agent's unsettled cash is never part of it: an agent who holds any is not
+        erased (`agent_holds_platform_cash`, the owner's rule of 2026-11-24)."""
+        return "; ".join(f"its wallet holds {row['amount']} {row['currency']}"
+                         for row in money["wallet"])
 
     @admin.action(description="Erase the matching account, then close as erased",
                   permissions=["change"])
@@ -239,8 +239,11 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
         guessed between);
         the account is staff or a superuser (an operator account is never erased from
         this queue); the account is a trainer who still coaches someone (the owner's
-        rule — the trainer ends each coaching first); or the erasure was refused (a held
-        payment or a verification document could not be removed — try again later).
+        rule — the trainer ends each coaching first); the account is an agent who still
+        holds the platform's cash (the owner's rule of 2026-11-24 — record the
+        settlement of each currency first, then run this again); or the erasure was
+        refused (a held payment or a verification document could not be removed — try
+        again later).
         Money the account still holds is named in the message, for support to return.
         """
         from django.db import transaction
@@ -284,6 +287,11 @@ class AccountDeletionRequestAdmin(admin.ModelAdmin):
                 if exc.code == "trainer_has_active_clients":
                     reason = (f"the trainer still coaches {exc.extra.get('active_clients', 0)} "
                               "client(s); they must end each coaching first")
+                elif exc.code == "agent_holds_platform_cash":
+                    held = ", ".join(f"{cash['amount']} {cash['currency']}"
+                                     for cash in exc.extra.get("agent_cash", []))
+                    reason = (f"the agent still holds {held} of the platform's cash; record "
+                              "its settlement first, then erase")
                 else:
                     reason = ("a held payment or a verification document could not be "
                               "removed; nothing was changed, try again later")

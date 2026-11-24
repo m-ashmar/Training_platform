@@ -143,6 +143,25 @@ def receivable_of(profile, currency) -> Decimal:
             .aggregate(total=Sum("amount"))["total"] or ZERO)
 
 
+def platform_cash_held_by(user) -> list[dict]:
+    """The platform's cash `user` holds as an agent and has not settled:
+    `[{"currency", "amount"}]`, the non-zero currencies only, by currency, each amount a
+    decimal string. Empty for an account that never took cash.
+
+    ONE count for what account deletion shows (`money.agent_cash`,
+    `training_platform/privacy/views.py money_left`) and what refuses it (409
+    `agent_holds_platform_cash`, the owner's rule of 2026-11-24), so the preview and the
+    refusal never disagree. Read-only, no lock: the erasure takes the profile lock
+    before it asks (`training_platform/privacy/sources.py`)."""
+    from .models import AgentReceivableEntry
+
+    return [{"currency": row["currency"], "amount": str(row["total"])}
+            for row in (AgentReceivableEntry.objects.filter(agent__user=user)
+                        .values("currency").annotate(total=Sum("amount"))
+                        .order_by("currency"))
+            if row["total"]]
+
+
 def usage_of(profile, currency, now=None) -> Usage:
     """What `profile` may still top up in `currency`. Counts the agent's top-up ledger
     rows (`actor`, `tx_type="topup"`, this currency), the same rows the caps have always

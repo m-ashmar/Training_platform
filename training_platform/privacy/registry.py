@@ -110,6 +110,19 @@ class PersonalDataSource:
     #: undeclared, and `tests/test_store_docs.py` fails, so a model registered here
     #: without them cannot reach the committed inventory unnoticed.
     data_types: tuple[str, ...] | None = None
+    #: A rule that refuses the erasure outright while what this source records is still
+    #: owed, as `refuse_erase(user, queryset, dry_run=...)`. Runs FIRST, before every
+    #: `before_erase`, so the lock it takes comes ahead of theirs (relation rows, user
+    #: rows, wallets). Raises `ErasureRefused`; a dry run never raises and may return a
+    #: dict, merged into this source's report like `before_erase`'s.
+    #:
+    #: Why a step of its own and not a `before_erase`: those run in registration order,
+    #: and the trainer relations' hook locks the erased account's user row. An agent's
+    #: cash is decided under the agent's profile lock, which a top-up takes BEFORE the
+    #: user row (`wallet/agents.py`, LOCK ORDER); a hook that locked the profile after
+    #: the user row would deadlock against a top-up in flight.
+    #: Last, so no positional use shifts.
+    refuse_erase: Callable | None = None
 
     def get_model(self):
         from django.apps import apps
@@ -143,9 +156,12 @@ class ErasureRefused(Exception):
     refusing, because it cannot be retried.
 
     `code` tells the refusals apart for the app: `erasure_refused` (a held payment could
-    not be returned, or a stored identity document could not be deleted; retry later)
-    or `trainer_has_active_clients` (the owner's rule: end coaching with every client
-    first). `extra` says which, for the message: `cause="storage"` for a document.
+    not be returned, or a stored identity document could not be deleted; retry later),
+    `trainer_has_active_clients` (the owner's rule: end coaching with every client
+    first; `extra["active_clients"]`) or `agent_holds_platform_cash` (the owner's rule
+    of 2026-11-24: settle the platform's cash first; `extra["agent_cash"]`, per
+    currency). `extra` also says which `erasure_refused`, for the message:
+    `cause="storage"` for a document.
     """
 
     def __init__(self, message="", *, code="erasure_refused", **extra):
@@ -337,10 +353,15 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
         # as approval and settlement (relation, user rows, wallets) instead of holding
         # the user row while it waits for a relation an approval has locked.
         extra: dict[str, dict] = {}
+        # The refusals before them: their locks come first (`refuse_erase`).
+        for source in registry.values():
+            if source.refuse_erase is not None:
+                extra[source.label] = source.refuse_erase(
+                    user, source.queryset_for(user), dry_run=dry_run) or {}
         for source in registry.values():
             if source.before_erase is not None:
-                extra[source.label] = source.before_erase(
-                    user, source.queryset_for(user), dry_run=dry_run) or {}
+                extra.setdefault(source.label, {}).update(source.before_erase(
+                    user, source.queryset_for(user), dry_run=dry_run) or {})
 
         for source in registry.values():
             qs = source.queryset_for(user)

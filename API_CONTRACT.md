@@ -1999,17 +1999,26 @@ them depends on who is looking. `?lang=ar|en`; Arabic (right-to-left) when absen
 | `DELETE, GET` | `/api/privacy/erase/` | auth | `PersonalDataEraseView` |
 | `GET` | `/api/privacy/export/` | auth | `PersonalDataExportView` |
 
-**Deleting an account, every role (Road to 10 R4, 2026-11-23).** A client, an agent and a
-trainer who coaches nobody are deleted (`DELETE privacy/erase/?confirm=ERASE`, 200); a
-trainer still coaching anyone is refused, 409 `trainer_has_active_clients` with
-`active_clients`. Additive: `GET`, the 400 `confirmation_required` and the 200 each carry
-`money` — `{wallet: [{currency, amount}], held_coaching_months, agent_cash: [{currency,
-amount}], contact_support}`, non-zero amounts only. Money never refuses a deletion; while
-`contact_support` is true the app says, before the person confirms, that the balance
-cannot be spent after deletion and support returns it on request (the privacy policy).
-On the 200 it is what remains (a held month is already back in `wallet`). An agent's
-`agent_cash` is the platform's cash they still hold; deleting does not settle it, and a
-deleted agent leaves the cash directory (`GET /api/wallet/agents/`).
+**Deleting an account, every role (Road to 10 R4, 2026-11-23).** A client, an agent who
+holds none of the platform's cash and a trainer who coaches nobody are deleted (`DELETE
+privacy/erase/?confirm=ERASE`, 200); a trainer still coaching anyone is refused, 409
+`trainer_has_active_clients` with `active_clients`. Additive: `GET`, the 400
+`confirmation_required` and the 200 each carry `money` — `{wallet: [{currency, amount}],
+held_coaching_months, agent_cash: [{currency, amount}], contact_support}`, non-zero
+amounts only. The person's own money never refuses a deletion; while `contact_support`
+is true the app says, before the person confirms, that the balance cannot be spent after
+deletion and support returns it on request (the privacy policy). On the 200 it is what
+remains (a held month is already back in `wallet`). A deleted agent leaves the cash
+directory (`GET /api/wallet/agents/`) and takes no more top-ups.
+
+**An agent holding the platform's cash is refused (the owner, 2026-11-24; additive).**
+`agent_cash` is the cash an agent collected for the platform and has not settled. While
+it lists anything, `DELETE privacy/erase/?confirm=ERASE` answers 409
+`agent_holds_platform_cash` with `agent_cash: [{currency, amount}]` (the same list as
+`money.agent_cash`, decimal strings, per currency) and nothing is changed. It deletes once
+an operator has recorded the settlement of every currency. The same refusal holds for a
+web request (`/legal/delete-account/`): the operator's erase leaves the request open and
+says how much is held. Before, R4 deleted the account and only reported `agent_cash`.
 
 The export discloses nothing the API itself withholds: its `blocks` section is `{id,
 blocked, created_at}` for the blocks this person MADE, never one made against them, and

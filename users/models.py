@@ -749,7 +749,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         deletion cannot destroy a balance in the first place.
 
         Raises `ErasureRefused` (code `trainer_has_active_clients`) for a trainer who
-        still coaches someone: the owner's rule, and nothing is changed.
+        still coaches someone, and (code `agent_holds_platform_cash`) for an agent who
+        still holds the platform's cash: the owner's rules (2026-09-19, 2026-11-24), and
+        nothing is changed.
         """
         from training_platform.privacy import erase_user_data
 
