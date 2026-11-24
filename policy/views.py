@@ -52,8 +52,11 @@ class SupportView(APIView):
 
     Public, like capabilities, and the same answer for every build, version and person.
     No headers needed. 200 `{"email": "support@yalagym.com", "whatsapp": "+9639..." |
-    null}` — `whatsapp` is null until the owner sets a number (`SUPPORT_WHATSAPP`), spaces
-    taken out; build the chat link from it. No codes.
+    null}` — `whatsapp` is null until the owner sets a number (`SUPPORT_WHATSAPP`). It is
+    always the DIGITS with a leading `+` (2026-11-24), whatever was typed between them —
+    spaces, dashes, dots, brackets; an international `00` is read as the `+`, and
+    Arabic-Indic digits as digits — so `https://wa.me/` + the digits after the `+` is the
+    chat link. A value with no digit is null. No codes.
 
     Its own route rather than keys inside `capabilities.links`: that body is the build's
     policy and its legal pages, asserted whole, and support is neither.
@@ -65,8 +68,22 @@ class SupportView(APIView):
         from django.conf import settings
 
         email = (getattr(settings, 'SUPPORT_EMAIL', '') or '').strip() or None
-        whatsapp = ''.join((getattr(settings, 'SUPPORT_WHATSAPP', '') or '').split())
-        return Response({'email': email, 'whatsapp': whatsapp or None})
+        whatsapp = whatsapp_number(getattr(settings, 'SUPPORT_WHATSAPP', '') or '')
+        return Response({'email': email, 'whatsapp': whatsapp})
+
+
+def whatsapp_number(typed: str) -> str | None:
+    """`typed` as a WhatsApp number a `wa.me/` link takes: `+` and its digits only, or
+    None when it holds no digit (`SupportView`). Any decimal digit counts (Arabic-Indic
+    ones too) and is written as an ASCII one; an international `00` with no `+` is
+    read as the `+`."""
+    import unicodedata
+
+    digits = ''.join(str(unicodedata.decimal(ch)) for ch in typed
+                     if unicodedata.decimal(ch, None) is not None)
+    if not typed.strip().startswith('+') and digits.startswith('00'):
+        digits = digits[2:]
+    return f'+{digits}' if digits else None
 
 
 def _if_none_match(header: str | None) -> set:
