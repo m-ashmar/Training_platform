@@ -3086,7 +3086,11 @@ class PasswordResetConfirmView(APIView):
     Step 3: Set a new password using the reset token.
 
     Body: `{reset_token, new_password}`. Consumes the single-use token and updates the
-    user's password. The new password answers the same validator codes as sign-up on
+    user's password, and signs every device out at once: its refresh tokens are
+    blacklisted, and every access token made under the old password answers 401
+    `password_changed` from then on, an open socket closed with it
+    (`users/utils.py end_every_session`; the owner, 2026-11-24). Nothing is signed in:
+    the person signs in with the new password. The new password answers the same validator codes as sign-up on
     `field_errors.new_password` (`password_too_short`, `password_too_common`,
     `password_entirely_numeric`; BACKEND_BUGS B-034).
 
@@ -3141,15 +3145,13 @@ class PasswordResetConfirmView(APIView):
         user.set_password(new_password)
         user.save()
 
-        # Revoke all outstanding refresh tokens — a password reset is exactly the
-        # moment (account recovery/compromise) when previously-issued tokens must
-        # stop working. Access tokens still expire on their own short TTL.
-        try:
-            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
-            for _t in OutstandingToken.objects.filter(user=user):
-                BlacklistedToken.objects.get_or_create(token=_t)
-        except Exception as e:
-            logger.error(f"Failed to blacklist tokens after password reset for user {user.id}: {e}")
+        # Every session ends, at once — a password reset is exactly the moment
+        # (account recovery/compromise) when previously-issued tokens must stop
+        # working: the same revocation as the password change and the console's reset
+        # (`users/utils.py end_every_session`; the owner, 2026-11-24). Access tokens
+        # made under the old password are refused from the commit on.
+        from .utils import end_every_session
+        end_every_session(user)
 
         # The person just proved they own the address: the failures that locked them out
         # are forgiven, or they were locked out again right after resetting (B-017).

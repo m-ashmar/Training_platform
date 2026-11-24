@@ -106,11 +106,14 @@ class PasswordChangeView(APIView):
     Auth: Bearer JWT, any role. Body (JSON): `current_password`, `new_password`. Both
     are trimmed of surrounding spaces, as sign-in trims the password it is given.
 
-    200 `{message, access, refresh}`: the password is changed, EVERY refresh token the
-    account held is blacklisted (each other device is signed out when its access token
-    expires, within the hour — `ACCESS_TOKEN_LIFETIME`, 60 minutes — an open chat socket
-    included, at its first event past that), and this device gets a fresh pair — store both, the old
-    refresh token no longer works. Failed sign-in counts are cleared.
+    200 `{message, access, refresh}`: the password is changed and EVERY device is signed
+    out at once (the owner, 2026-11-24): every refresh token the account held is
+    blacklisted, every access token made under the old password answers 401
+    `password_changed` on its next request, this device's included, and every open
+    socket of the account closes (4001, after an `auth` error frame). This device gets a
+    fresh pair — store BOTH and use them from now on; the old pair no longer works.
+    Failed sign-in counts are cleared. (`users/utils.py end_every_session`,
+    `training_platform/jwt_sessions.py`.)
 
     | status | `code` | when |
     |---|---|---|
@@ -118,7 +121,7 @@ class PasswordChangeView(APIView):
     | `400` | `current_password_wrong` | `current_password` is not the account's password, with `field`; nothing changes |
     | `400` | `password_unchanged` | `new_password` is the current one, with `field` |
     | `400` | `password_not_set` | the account has no password to change (an operator reset it, or an account made without one): set one through the forgot-password flow (`POST /api/auth/forgot-password/`). Answered before anything else and never counted against the limit below (Road to 10 round 4) |
-    | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `401` | `not_authenticated`, `token_not_valid`, `password_changed` | no token; an expired or invalid one; one made before the account's password last changed (another device changed it) |
     | `429` | `throttled` | five wrong current passwords within 15 minutes — counted as each attempt arrives, so requests sent at once past the fifth are refused before their password is checked; `retry_after_seconds` and `Retry-After` say when to try again |
 
     The same on every build.

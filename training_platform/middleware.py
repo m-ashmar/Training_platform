@@ -555,6 +555,11 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
         return response
 
 
+def account_memo_key(user_id) -> str:
+    """The private-cache key of `CacheMiddleware._account_is_usable`'s memo."""
+    return f"acct_usable:{user_id}"
+
+
 class CacheMiddleware(MiddlewareMixin):
     """
     Cache commonly requested data for performance optimization.
@@ -670,7 +675,7 @@ class CacheMiddleware(MiddlewareMixin):
             try:
                 token = AccessToken(auth_header.split(' ', 1)[1])
                 user_id = token.get('user_id')
-                if user_id and self._account_is_usable(user_id):
+                if user_id and self._account_is_usable(user_id, token):
                     return f"user:{user_id}", True
                 if user_id:
                     # The token verifies but the account behind it does not. Falling
@@ -691,28 +696,38 @@ class CacheMiddleware(MiddlewareMixin):
         return f"anon:{get_trusted_client_ip(request)}", False
 
     @staticmethod
-    def _account_is_usable(user_id) -> bool:
-        """Is the account behind this token still allowed to be used?
+    def _account_is_usable(user_id, token=None) -> bool:
+        """Is the account behind this token still allowed to be used, by this token?
 
         `AccessToken(...)` verifies a signature and an expiry and nothing else — it
-        cannot know the account was deactivated, and simplejwt has no revocation for
-        access tokens. This middleware returns a cached response from the middleware
+        cannot know the account was deactivated, or that its password changed since the
+        token was made. This middleware returns a cached response from the middleware
         chain, which runs BEFORE DRF authentication, so a banned account kept reading
         its exercises, templates and achievements for the full TTL while every uncached
         route correctly answered 401.
 
-        One cheap keyed read per cached request, memoised for a minute, so a deactivation
-        takes effect within a minute rather than never.
+        One cheap keyed read per cached request, memoised for a minute: the digest of the
+        account's password hash, or "" for an account that cannot be used. A token made
+        under another password is refused like the API refuses it
+        (`training_platform.jwt_sessions.session_is_current`, the owner's rule of
+        2026-11-24). `users/utils.py end_every_session` drops the memo, so a password
+        change, a reset or a deactivation takes effect at once; any other change of
+        `is_active` within a minute.
         """
         from django.contrib.auth import get_user_model
 
-        cache_key = f"acct_usable:{user_id}"
+        from training_platform.jwt_sessions import digest_is_current, password_digest
+
+        cache_key = account_memo_key(user_id)
         cached = private_cache().get(cache_key)
-        if cached is not None:
-            return bool(cached)
-        usable = get_user_model().objects.filter(pk=user_id, is_active=True).exists()
-        private_cache().set(cache_key, 1 if usable else 0, 60)
-        return usable
+        if not isinstance(cached, str):          # absent, or an int from before 2026-11-24
+            password = (get_user_model().objects.filter(pk=user_id, is_active=True)
+                        .values_list("password", flat=True).first())
+            cached = password_digest(password) if password is not None else ""
+            private_cache().set(cache_key, cached, 60)
+        if not cached:
+            return False
+        return token is None or digest_is_current(token, cached)
 
     def _build_key(self, request, identity, rule=None):
         """

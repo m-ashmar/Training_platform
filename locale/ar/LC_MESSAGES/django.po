@@ -6266,3 +6266,15 @@ msgid ""
 msgstr ""
 "لا توجد كلمة مرور لحسابك بعد. عيّنها من «نسيت كلمة المرور» وسنرسل إليك رمزاً "
 "بالبريد الإلكتروني."
+
+#: training_platform/jwt_sessions.py
+msgid "Token contained no recognizable user identification"
+msgstr "لا يحمل الرمز هوية مستخدم معروفة"
+
+#: training_platform/jwt_sessions.py
+msgid "User is inactive"
+msgstr "الحساب غير مفعّل"
+
+#: training_platform/jwt_sessions.py
+msgid "Your password was changed. Sign in again."
+msgstr "تم تغيير كلمة المرور. سجّل الدخول من جديد."

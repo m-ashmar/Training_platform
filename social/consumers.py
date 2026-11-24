@@ -4,12 +4,12 @@ import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 
-from training_platform.ws_auth import authenticate_scope
+from training_platform.ws_auth import SessionEndsMixin, authenticate_scope
 
 logger = logging.getLogger(__name__)
 
 
-class SocialConsumer(AsyncWebsocketConsumer):
+class SocialConsumer(SessionEndsMixin, AsyncWebsocketConsumer):
     async def connect(self):
         self.user = await self.get_user_from_token()
         if self.user is None or not self.user.is_authenticated:
@@ -22,6 +22,9 @@ class SocialConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(
             self.user_group_name, self.channel_name
         )
+        # A password change, a reset or a deactivation closes it at once
+        # (`training_platform.ws_auth.SessionEndsMixin`; the owner, 2026-11-24).
+        await self.join_session_group()
         await self.accept()
         # Optionally send a welcome message
         await self.send(
@@ -36,6 +39,7 @@ class SocialConsumer(AsyncWebsocketConsumer):
             await self.channel_layer.group_discard(
                 self.user_group_name, self.channel_name
             )
+        await self.leave_session_group()
 
     async def receive(self, text_data=None, bytes_data=None):
         """Accept and ignore. This socket has no client-to-server protocol.

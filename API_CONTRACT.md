@@ -26,6 +26,21 @@ RS256 JWT. Send `Authorization: Bearer <access>` on every authenticated request.
 Reusing the previous one fails with `token_not_valid` — rotation with blacklisting means
 the old token is dead the moment it is exchanged.
 
+**A password change ends every session AT ONCE (the owner, 2026-11-24; additive).** The
+password change, the forgot-password reset, and an operator's reset or deactivation of
+the account sign every device out on its next request, not when its access token
+expires: an access token made before a change or reset of the password answers **401
+`password_changed`** (a new code) on every route, a cached one included (a deactivated
+account's answers 401 `user_inactive`, as before); the refresh token was blacklisted by the
+same change (401 `token_not_valid`, or `password_changed`), so the person signs in again.
+An open socket (chat, AI coach, the legacy social socket) closes at the change, 4001,
+after an `error` frame with `code: "auth"`. After a password change, the device that made
+it uses the pair the change returns, its old access token included in "every device".
+Each token carries a digest of the password it was made under (simplejwt's
+`hash_password` claim; `training_platform/jwt_sessions.py`). Tokens issued before this
+deploy carry none and keep working; their first refresh adds it. Nobody is signed out by
+the deploy itself.
+
 ### Registration flow
 
 ```
@@ -86,14 +101,17 @@ POST /api/auth/forgot-password/         {email}                       -> 200 (al
 POST /api/auth/forgot-password/verify/  {email, otp_code}             -> 200 {reset_token}
                                         | 400 otp_invalid | otp_expired | too_many_attempts
 POST /api/auth/password/change/  {current_password, new_password}  (signed in; S2.8)
-                                        -> 200 {message, access, refresh}: every other
-                                           session ends, store the new pair
+                                        -> 200 {message, access, refresh}: every session
+                                           ends at once (other devices' access tokens
+                                           answer 401 password_changed, open sockets
+                                           close), store the new pair and use it
                                         | 400 current_password_wrong | password_unchanged
                                           | password_not_set (no password yet: use
                                             forgot-password; never a guess)
                                           | field_errors.new_password (as at sign-up)
                                         | 429 throttled (5 wrong in 15 min)
-POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200
+POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200: every
+                                           session ends at once, as on a change
                                         | 400 field_errors.new_password: password_too_short |
                                           password_too_common | password_entirely_numeric (as at sign-up)
 ```

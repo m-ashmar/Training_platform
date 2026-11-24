@@ -409,6 +409,11 @@ def erase_user_data(user, *, dry_run: bool = False) -> dict:
     else:
         with transaction.atomic():
             _run()
+            # The profile's anonymisation deactivated the account: every device signed
+            # out at once, open sockets included (the owner, 2026-11-24).
+            from users.utils import end_every_session
+
+            end_every_session(user)
     return report
 
 

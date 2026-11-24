@@ -303,7 +303,8 @@ EXCHANGE_RATE_MAX_AGE_DAYS = int(get_env("EXCHANGE_RATE_MAX_AGE_DAYS", "7"))
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # simplejwt's, with the password-change revocation (`jwt_sessions`).
+        'training_platform.jwt_sessions.SessionJWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -489,6 +490,15 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
     'SLIDING_TOKEN_LIFETIME': timedelta(minutes=60),
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
+
+    # A password change ends every session AT ONCE (the owner, 2026-11-24): each token
+    # carries a digest of the password hash it was made under, and a token made under
+    # an older one is refused, 401 `password_changed`. Checked by our authentication
+    # and refresh (`training_platform/jwt_sessions.py`), which also accept a token from
+    # before this setting, so its deploy signs nobody out.
+    'CHECK_REVOKE_TOKEN': True,
+    'REVOKE_TOKEN_CLAIM': 'hash_password',
+    'TOKEN_REFRESH_SERIALIZER': 'training_platform.jwt_sessions.SessionTokenRefreshSerializer',
 }
 
 # ========================

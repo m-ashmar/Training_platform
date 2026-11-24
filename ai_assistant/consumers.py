@@ -26,7 +26,7 @@ from ai_assistant.services.security import InputSanitizer
 from ai_assistant.store_safe import build_of_scope
 from training_platform.disclaimers import ai_coach_disclaimer
 from training_platform.i18n import LanguageContext
-from training_platform.ws_auth import authenticate_scope
+from training_platform.ws_auth import SessionEndsMixin, authenticate_scope
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def reserve_daily_slot(user_id, max_messages, *, store=None, now=None):
     return True, max_messages - current, resets_at
 
 
-class AIChatConsumer(AsyncWebsocketConsumer):
+class AIChatConsumer(SessionEndsMixin, AsyncWebsocketConsumer):
     """
     WebSocket endpoint: ws://host/ws/ai/chat/?token=<JWT>
 
@@ -192,6 +192,9 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             await self.close(code=4003)
             return
 
+        # A password change, a reset or a deactivation closes it at once
+        # (`training_platform.ws_auth.SessionEndsMixin`; the owner, 2026-11-24).
+        await self.join_session_group()
         await self.accept()
 
         # Log behavior event
@@ -212,6 +215,18 @@ class AIChatConsumer(AsyncWebsocketConsumer):
             f"AI chat disconnected: user={getattr(self.user, 'id', '?')}, "
             f"code={close_code}"
         )
+        await self.leave_session_group()
+
+    async def close_for_ended_session(self):
+        """The account's session ended while this socket was open: the same `auth`
+        error and 4001 as a message sent with a credential that no longer holds."""
+        with LanguageContext.for_user(self.user):
+            await self.send(text_data=json.dumps({
+                "type": "error",
+                "content": str(_("Your session has expired. Please sign in again.")),
+                "code": "auth",
+            }))
+        await self.close(code=4001)
 
     async def receive(self, text_data=None, bytes_data=None):
         """Handle incoming WebSocket messages."""
