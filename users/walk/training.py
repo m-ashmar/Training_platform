@@ -6,11 +6,12 @@ there, and nothing here writes platform data. Everything a state does goes throu
 the app's own routes (`walk.api`) or, where there is no route, the service the route
 or the console calls:
 
-* money: the agent's top-up route (`shared.top_up`), the coaching request and its
-  acceptance (`shared.coach_client`: month 1 held), the template's `generate/` that
-  writes the client's programme and pays month 1 out, `users/coaching.py renew` for
-  each later month (THIS relation only, never the sweep over every account), and the
-  product's `buy/` route;
+* money: the agent's top-up route (`shared.top_up`, at the state's ONE agent, in the
+  client's own currency), the coaching request and its acceptance
+  (`shared.coach_client`: month 1 held), the template's `generate/` that writes the
+  client's programme and pays month 1 out, `users/coaching.py renew` for each later
+  month (THIS relation only, never the sweep over every account), and the product's
+  `buy/` route;
 * the free first workout: `trial-workout/`;
 * a workout older than the session routes take (30 days) is written as rows, as
   `seed_review_accounts` and `users/walk/progress.py` write them, with its activity
@@ -18,6 +19,12 @@ or the console calls:
   (`AchievementEngine.bulk_check_for_user`), by the days it happened.
 
 A date that time makes is moved, and then the scheduled function is called.
+
+What each state hands its agent in cash is declared beside it, and its `@needs` checks a
+new agent's caps against those same constants (`framework.agent_cash_gaps`) before any
+state writes anything: a cap below what a state moves refuses the run up front, naming
+the state, the setting and the amount, instead of failing it part-way. No state here
+buys or prices a subscription plan.
 """
 from __future__ import annotations
 
@@ -25,9 +32,15 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from . import state
+from .framework import agent_cash_gaps, needs
 
-#: A coaching month's fee in the trainer's currency (SYP, the platform's default).
+#: A coaching month's fee, in a new wallet's currency: the trainer's, which is the
+#: client's (both are fresh accounts).
 COACHING_FEE = Decimal("20000.00")
+
+#: A product's price, in a new wallet's currency (the trainer's, which is the buyer's):
+#: every product the walk trainers draft (`trainer.draft_product`).
+PRODUCT_PRICE = Decimal("15000.00")
 
 #: The trainer's week, from the starter catalogue: four workouts (push, pull, legs,
 #: upper) and three rest days. (catalogue key, sets, reps)
@@ -61,10 +74,11 @@ def the_operator(walk):
 
 
 def fund(walk, client, amount):
-    """Cash for `client`'s wallet through the agent's own top-up route, as many top-ups
-    as the agent's per-transaction cap needs. The state's agent is made on first use."""
+    """Cash for `client`'s wallet, taken by the state's ONE agent (made on first use)
+    through the agent's own top-up route, in the client's currency (`shared.top_up`,
+    which hands an amount above the per-top-up cap over in parts). What a state hands
+    over is declared beside it, for its `@needs`."""
     from users.models import CustomUser
-    from wallet.models import AgentProfile
 
     from .shared import open_agent, top_up
 
@@ -72,24 +86,23 @@ def fund(walk, client, amount):
         agent = CustomUser.objects.get(pk=walk.accounts["agent"]["id"])
     else:
         agent = open_agent(walk)
-    profile = AgentProfile.objects.get(user=agent)
-    cap = profile.per_transaction_limit or Decimal(amount)
-    left = Decimal(amount)
-    while left > 0:
-        chunk = min(left, cap)
-        top_up(walk, agent, client, f"{chunk:.2f}")
-        left -= chunk
+    top_up(walk, agent, client, f"{Decimal(amount):.2f}")
 
 
-def paid_coaching(walk, client, coach, *, months=1):
+def paid_coaching(walk, client, coach, *, months):
     """`coach` charges `COACHING_FEE` a month; `client` has `months` of it in the wallet,
-    asks, and is accepted (`shared.coach_client`): month 1 is held."""
+    asks, and is accepted (`shared.coach_client`): month 1 is held. `months` is the
+    state's declared constant, the one its `@needs` reads."""
     from .shared import coach_client
 
+    if coach.trainer_hourly_rate and coach.trainer_hourly_rate != COACHING_FEE:
+        # The agent's day is declared from COACHING_FEE: another fee would move more.
+        raise ValueError(f"paid_coaching: the coach charges {coach.trainer_hourly_rate}, "
+                         f"the states declare {COACHING_FEE}")
     if not coach.trainer_hourly_rate:
         coach.trainer_hourly_rate = COACHING_FEE
         coach.save(update_fields=["trainer_hourly_rate"])
-    fund(walk, client, coach.trainer_hourly_rate * months)
+    fund(walk, client, COACHING_FEE * months)
     return coach_client(walk, client, coach)
 
 
@@ -203,6 +216,23 @@ def workout_days(days):
 
 
 # ------------------------------------------------------------------ 1. programmes
+#: Months of the fee each coached state's client is handed in cash, at the state's one
+#: agent, on one day (and held unsettled: no settlement happens in a state). Read by the
+#: state and by its `@needs`.
+FINISHED_MONTHS = 4     # month 1 held, months 2 and 3 renewed, one month to spare
+TODAY_MONTHS = 1        # month 1, held
+
+
+@needs("programme_finished")
+def _what_programme_finished_takes():
+    return agent_cash_gaps("programme_finished", in_a_day=COACHING_FEE * FINISHED_MONTHS)
+
+
+@needs("programme_training_today")
+def _what_programme_training_today_takes():
+    return agent_cash_gaps("programme_training_today", in_a_day=COACHING_FEE * TODAY_MONTHS)
+
+
 @state("programme_finished", area="training", role="client",
        summary="A trainer's 9-week programme that ended: week 9 of 9, `finished`, its "
                "missed days marked; the coaching still paid, month 3 running.")
@@ -212,7 +242,7 @@ def programme_finished(walk):
     me = walk.account()
     trainer = walk.account("trainer", role="trainer")
     today = timezone.localdate()
-    relation = paid_coaching(walk, me, trainer, months=4)
+    relation = paid_coaching(walk, me, trainer, months=FINISHED_MONTHS)
     start = today - timedelta(days=70)
     routine = programme(walk, trainer, me, start=start)
     relation = coaching_since(relation, 70)
@@ -233,7 +263,7 @@ def programme_training_today(walk):
     me = walk.account()
     trainer = walk.account("trainer", role="trainer")
     today = timezone.localdate()
-    relation = paid_coaching(walk, me, trainer)
+    relation = paid_coaching(walk, me, trainer, months=TODAY_MONTHS)
     start = today - timedelta(days=15)
     routine = programme(walk, trainer, me, start=start)
     relation = coaching_since(relation, 15)
@@ -246,6 +276,18 @@ def programme_training_today(walk):
 
 
 # ------------------------------------------------------------------ 2. a bought programme
+#: The buyer is handed this many times PRODUCT_PRICE in cash, at the state's one agent,
+#: on one day: the programme, with something left over. Read by the state and by its
+#: `@needs`.
+TIMES_THE_PRICE = 2
+
+
+@needs("bought_programme_missed_day")
+def _what_the_bought_programme_takes():
+    return agent_cash_gaps("bought_programme_missed_day",
+                           in_a_day=PRODUCT_PRICE * TIMES_THE_PRICE)
+
+
 @state("bought_programme_missed_day", area="training", role="client",
        summary="A programme bought from a trainer (3 sessions a week, 4 weeks) 12 days "
                "in: four sessions done, days 7 to 4 ago missed, session 5 today.")
@@ -261,7 +303,10 @@ def bought_programme_missed_day(walk):
     me = walk.account()
     trainer = walk.account("trainer", role="trainer")
     product = product_on_sale(walk, trainer)
-    fund(walk, me, product.price * 2)
+    if product.price != PRODUCT_PRICE:          # what its `@needs` priced the day from
+        raise ValueError(f"bought_programme_missed_day: the product costs {product.price}, "
+                         f"the state declares {PRODUCT_PRICE}")
+    fund(walk, me, PRODUCT_PRICE * TIMES_THE_PRICE)
     walk.api(me, "post", f"/api/v1/products/{product.pk}/buy/",
              {"idempotency_key": f"walk-{uuid.uuid4().hex}"})
     routine = Routine.objects.get(purchase__product=product, purchase__buyer=me)

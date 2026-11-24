@@ -207,3 +207,37 @@ def test_a_second_run_leaves_nothing_more_on_the_operators_desk(walk_run):
     assert first == (1, 1)
     walk_run(*names)
     assert desk() == first
+
+
+# ------------------------------------------------------------------ what the states move
+def _declared(name):
+    """What a state that takes agent cash hands its one agent in a day, from the
+    constants the state and its `@needs` both read (`users/walk/training.py`)."""
+    from users.walk import training as t
+
+    return {"programme_finished": t.COACHING_FEE * t.FINISHED_MONTHS,
+            "programme_training_today": t.COACHING_FEE * t.TODAY_MONTHS,
+            "bought_programme_missed_day": t.PRODUCT_PRICE * t.TIMES_THE_PRICE}[name]
+
+
+@pytest.mark.parametrize("name", ["programme_finished", "programme_training_today",
+                                  "bought_programme_missed_day"])
+def test_a_cap_below_what_a_state_moves_refuses_it_up_front(walk_run, settings, name):
+    """A new agent's daily cap one below what the state hands its agent: the command
+    refuses before anything is written, naming the setting, the state and the amount
+    (`framework.agent_cash_gaps`). At the amount itself the state builds: it moves no
+    more than it declares."""
+    from django.core.management import CommandError
+
+    from users.models import CustomUser
+
+    amount = _declared(name)
+    settings.AGENT_DEFAULT_DAILY_LIMIT = amount - 1
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        walk_run(name)
+    assert f"AGENT_DEFAULT_DAILY_LIMIT at least {amount:,} ({name}" in str(refused.value), \
+        str(refused.value)
+    assert not CustomUser.objects.filter(email__startswith=f"walk.{name}").exists()
+
+    settings.AGENT_DEFAULT_DAILY_LIMIT = amount
+    assert walk_run(name)["accounts"]["agent"]
