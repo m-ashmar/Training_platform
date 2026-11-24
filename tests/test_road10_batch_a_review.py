@@ -203,3 +203,36 @@ def test_s28_an_account_with_no_password_is_told_so_and_never_throttled(make_use
         assert not person.has_usable_password()
     finally:
         ratelimit_cache().clear()
+
+
+# ------------------------------------------------------------------ the console's reset
+def test_s28_the_operators_password_reset_ends_every_session(make_user, api):
+    """The console's reset made the password unusable and left every refresh token
+    alive: each signed-in device stayed signed in for up to seven days (Road to 10
+    round 4). Now the same revocation the password change makes."""
+    from django.contrib.admin.sites import site as stock_site
+    from django.contrib.messages.storage.fallback import FallbackStorage
+    from django.contrib.sessions.middleware import SessionMiddleware
+    from django.test import RequestFactory
+
+    from admin_dashboard.admin import admin_site
+    from users.models import CustomUser
+
+    person = make_user(_name("reset"), email_verified=True)
+    phones = [api().post("/api/auth/token/", {"email": person.email, "password": OLD},
+                         content_type=JSON).json()["refresh"] for _ in range(2)]
+    operator = make_user(_name("resetop"), user_type="admin")
+
+    for site in (admin_site, stock_site):
+        request = RequestFactory().post("/", {"_reset_password": "1"})
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.user = operator
+        request._messages = FallbackStorage(request)
+        site._registry[CustomUser].response_change(request, person)
+        person.refresh_from_db()
+        assert not person.has_usable_password()
+
+    for refresh in phones:
+        dead = api().post("/api/auth/token/refresh/", {"refresh": refresh},
+                          content_type=JSON)
+        assert dead.status_code == 401, dead.content

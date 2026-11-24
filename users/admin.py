@@ -263,14 +263,26 @@ class CustomUserAdmin(UserAdmin):
         told the operator what it was. Anyone who read this file could sign in as any
         account an operator had ever "helped". An account is recovered through the OTP
         flow, which is the only path that proves the person owns the address.
+
+        It also ends every session the account has (Road to 10 round 4): an operator
+        resets a password because the account may be in someone else's hands, and
+        leaving its refresh tokens alive kept every signed-in device signed in for up
+        to seven days. The same revocation the password change makes
+        (`users/utils.py end_every_session`), in the same transaction as the reset.
         """
         if '_reset_password' in request.POST:
-            obj.set_unusable_password()
-            obj.save(update_fields=['password'])
+            from django.db import transaction
+
+            from .utils import end_every_session
+
+            with transaction.atomic():
+                obj.set_unusable_password()
+                obj.save(update_fields=['password'])
+                ended = end_every_session(obj)
             messages.success(
                 request,
-                f"{obj.email} can no longer sign in with a password. "
-                f"Ask them to use 'forgot password' to set a new one."
+                f"{obj.email} can no longer sign in with a password, and was signed out "
+                f"of {ended} session(s). Ask them to use 'forgot password' to set a new one."
             )
             return HttpResponseRedirect('.')
         return super().response_change(request, obj)

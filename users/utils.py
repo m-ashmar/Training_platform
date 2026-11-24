@@ -498,6 +498,24 @@ def lockout_seconds_left(email: str) -> int:
     return int(ttl) if isinstance(ttl, (int, float)) and ttl > 0 else 15 * 60
 
 
+def end_every_session(user) -> int:
+    """Sign the account out everywhere: blacklist every refresh token it holds, and
+    answer how many were still live.
+
+    Each other device then keeps only its access token, until it expires (within the
+    hour; an open chat socket closes at its first event after that). The revocation a
+    password change makes (`users/password_views.py`) and an operator's password reset
+    in the console (`users/admin.py`, Road to 10 round 4), so the two cannot drift."""
+    from rest_framework_simplejwt.token_blacklist.models import (BlacklistedToken,
+                                                                 OutstandingToken)
+
+    ended = 0
+    for token in OutstandingToken.objects.filter(user=user):
+        _row, created = BlacklistedToken.objects.get_or_create(token=token)
+        ended += int(created)
+    return ended
+
+
 def clear_login_attempts(email: str):
     """Clear the login attempt counter after a successful login."""
     from training_platform.cache import ratelimit_cache

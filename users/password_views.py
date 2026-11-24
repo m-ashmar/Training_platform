@@ -161,18 +161,16 @@ class PasswordChangeView(APIView):
                              'code': 'password_unchanged', 'field': 'new_password'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        from rest_framework_simplejwt.token_blacklist.models import (BlacklistedToken,
-                                                                     OutstandingToken)
         from rest_framework_simplejwt.tokens import RefreshToken
 
-        from .utils import clear_login_attempts
+        from .utils import clear_login_attempts, end_every_session
 
         with transaction.atomic():
             user.set_password(new)
             user.save(update_fields=['password'])
-            # Every session ends: the same revocation the reset makes.
-            for token in OutstandingToken.objects.filter(user=user):
-                BlacklistedToken.objects.get_or_create(token=token)
+            # Every session ends: the same revocation the reset and the console's
+            # password reset make (`users/utils.py end_every_session`).
+            end_every_session(user)
         clear_login_attempts(user.email)
         fresh = RefreshToken.for_user(user)
         logger.info("Password changed for user %s; other sessions ended", user.pk)
