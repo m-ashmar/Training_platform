@@ -415,11 +415,11 @@ def write_manifest(path: Path, data: dict) -> None:
 
 
 # ------------------------------------------------------------------ what the states need
-# Declared here, with the framework's own checks, at the manager's ruling (2026-11-24):
-# what the money worker's states need (`coaching.py`, `wallet.py`) and what the
-# environment must allow for any state to move money. An area may declare its own beside
-# its states instead (`diet.py` does). Each check only reads, and says each gap in the
-# words an operator acts on.
+# The plans the money worker's states buy (`coaching.py`), declared here at the manager's
+# ruling (2026-11-24). Everything else a state needs is declared beside it, in its area
+# module: the cash its agent takes (`agent_cash_gaps`) and the withdrawals its trainer
+# requests (`withdrawal_gaps`), from the amounts it declares there. Each check only
+# reads, and says each gap in the words an operator acts on.
 
 @needs("coaching_frozen", "plan_lapsed")
 def _a_plan_with_the_diet_a_new_wallet_can_pay():
@@ -466,7 +466,9 @@ def agent_cash_gaps(state: str, *, in_a_day, unsettled=None) -> list[str]:
     (default `in_a_day`) for the platform before a settlement. A cap is refused at
     `used + amount > cap` (`wallet.agents`), so each must be at least the total. An
     unset ceiling is the monthly cap, as the agent reads it. The per-top-up cap is not
-    a limit here: `shared.top_up` hands an amount over in parts."""
+    a limit on the total (`shared.top_up` hands an amount over in parts), but one SET to
+    0 takes nothing. Every state that takes agent cash declares it (no floor stands in
+    for a state that does not)."""
     from .shared import new_wallet_currency
 
     currency = new_wallet_currency()
@@ -479,6 +481,11 @@ def agent_cash_gaps(state: str, *, in_a_day, unsettled=None) -> list[str]:
                     if _setting("AGENT_DEFAULT_RECEIVABLE_CEILING" + suffix)
                     else "AGENT_DEFAULT_MONTHLY_LIMIT" + suffix + " (no ceiling is set)")
     gaps = []
+    per_top_up = _setting("AGENT_DEFAULT_PER_TRANSACTION_LIMIT" + suffix)
+    if per_top_up is not None and per_top_up <= 0 < in_a_day:
+        gaps.append(f"the setting AGENT_DEFAULT_PER_TRANSACTION_LIMIT{suffix} above 0, or "
+                    f"unset ({state}: one new agent takes {_amount(in_a_day)} {currency}; "
+                    f"at 0 it takes no top-up at all)")
     for name, cap, needed, what in (
             ("AGENT_DEFAULT_DAILY_LIMIT" + suffix, daily, in_a_day, "takes in a day"),
             ("AGENT_DEFAULT_MONTHLY_LIMIT" + suffix, monthly, in_a_day, "takes in a month"),
@@ -516,56 +523,4 @@ def withdrawal_gaps(state: str, *, smallest, in_a_day) -> list[str]:
         gaps.append(f"PAYOUT_DAILY_CAP[{currency}] at least {_amount(in_a_day)} ({state}: "
                     f"one trainer requests {_amount(in_a_day)} in a day; it is "
                     f"{'unset' if cap is None else _amount(cap)})")
-    return gaps
-
-
-@needs()
-def _a_new_agent_may_take_cash_in_the_base_currency():
-    """The FLOOR, for every run: a new agent's caps are the settings' defaults
-    (`ensure_agent_profile`), and a daily or monthly cap of 0, or a set per-top-up cap
-    or ceiling of 0, means that agent takes no cash at all. What each state really moves
-    is checked by its area's own `@needs` with `agent_cash_gaps` (the amounts declared
-    beside the state); this catches a state that has not declared them yet."""
-    from decimal import Decimal
-
-    from django.conf import settings
-
-    from .shared import new_wallet_currency
-
-    currency = new_wallet_currency()
-    suffix = _base_suffix(currency)
-    gaps = []
-    for name, required in (("AGENT_DEFAULT_DAILY_LIMIT", True),
-                           ("AGENT_DEFAULT_MONTHLY_LIMIT", True),
-                           ("AGENT_DEFAULT_PER_TRANSACTION_LIMIT", False),
-                           ("AGENT_DEFAULT_RECEIVABLE_CEILING", False)):
-        value = getattr(settings, name + suffix, None)
-        if value in (None, "") and not required:
-            continue            # unset: no cap of its own, as ensure_agent_profile reads it
-        if value in (None, "") or Decimal(str(value)) <= 0:
-            gaps.append(f"the setting {name + suffix} above 0 (a new agent's {currency} cap: "
-                        f"at 0 it takes no cash)")
-    return gaps
-
-
-@needs("trainer_withdrawal_requested", "trainer_withdrawal_sent",
-       "trainer_withdrawal_refused")
-def _withdrawals_in_the_base_currency():
-    """The FLOOR for the money worker's withdrawal states until they declare their
-    amounts (`withdrawal_gaps`): `payouts.services` refuses a withdrawal without a
-    minimum and a daily cap set for its currency. (`inbox_every_kind` declares its own,
-    in `inbox.py`.)"""
-    from decimal import Decimal
-
-    from django.conf import settings
-
-    from .shared import new_wallet_currency
-
-    currency = new_wallet_currency()
-    gaps = []
-    if (getattr(settings, "PAYOUT_MIN_AMOUNT", {}) or {}).get(currency) is None:
-        gaps.append(f"a {currency} entry in the setting PAYOUT_MIN_AMOUNT")
-    cap = (getattr(settings, "PAYOUT_DAILY_CAP", {}) or {}).get(currency)
-    if cap is None or Decimal(str(cap)) <= 0:
-        gaps.append(f"a {currency} entry above 0 in the setting PAYOUT_DAILY_CAP")
     return gaps
