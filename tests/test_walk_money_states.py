@@ -297,3 +297,19 @@ def test_a_second_run_leaves_the_withdrawal_queue_as_the_first(api, make_user, w
         old = Withdrawal.objects.get(pk=first["states"][name]["ids"]["withdrawal"])
         assert old.state == "failed" and old.failure_reason
 
+
+def test_a_second_run_leaves_no_held_month_behind(walk_run):
+    """A month held for a programme never sent is given back to its client when the
+    state is reset (M3); a paid-out month holds nothing. Escrow is the same after run 2
+    as after run 1."""
+    from users.models import TrainerClientRelation
+    from wallet.utils import get_escrow_wallet
+
+    states = ("client_awaiting_first_program", "coaching_frozen")
+    first = walk_run(*states)
+    held_after_first = get_escrow_wallet("SYP").balance
+    walk_run(*states)
+    assert get_escrow_wallet("SYP").balance == held_after_first
+    old = TrainerClientRelation.objects.get(
+        pk=first["states"]["client_awaiting_first_program"]["ids"]["relation"])
+    assert old.hold_reference == ""

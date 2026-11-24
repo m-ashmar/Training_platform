@@ -36,9 +36,27 @@ from decimal import Decimal
 from django.utils import timezone
 
 from . import state
-from .framework import WalkRefused
+from .framework import WalkRefused, on_retire
 from .shared import coach_client, starter_exercise
 from .wallet import COACH_RATE, agent, call, coach, funded_client, key, top_up
+
+
+# ------------------------------------------------------------------ on a reset
+@on_retire
+def _return_the_held_months_of_retired_walk_clients(users):
+    """A month held for a programme never sent (`client_awaiting_first_program`) stays in
+    escrow when its client is retired, a little more of it every run. It is given back
+    the way an erasure gives it back (`users.trainer_relations.release_hold`: nothing
+    was delivered for it, so it returns to the client), under the relation's lock. A
+    paid-out month (every other money state's) holds nothing and is left alone. Walk
+    data only: `users` are walk accounts being retired."""
+    from users.models import TrainerClientRelation
+    from users.trainer_relations import release_hold
+
+    held = (TrainerClientRelation.objects.filter(client__in=users)
+            .exclude(hold_reference="").select_related("client").order_by("pk"))
+    for relation in held:
+        release_hold(relation, relation.client)
 
 
 # ------------------------------------------------------------------ coaching steps
