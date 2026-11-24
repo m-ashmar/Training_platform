@@ -247,7 +247,22 @@ class HomeView(APIView):
          "current": "profile"}
 
         `state` is `done`, `current` or `todo`; `current` is the first unfinished step.
-        The `coach` step is `awaiting` while a request is open, sent or received (S2.1).
+        The `coach` step is `awaiting` while a request is open, sent or received (S2.1),
+        and then — ONLY then — carries which way and with whom (BACKEND_BUGS B-200)::
+
+            {"code": "coach", "done": false, "state": "awaiting",
+             "direction": "waiting",          waiting | invited: the hero's `step`
+             "request_id": 41,                the hero's `request_id`
+             "trainer": {"id": 7, "first_name": "Rami"}}
+
+        The same facts as `find_trainer_hero`, by the same rule
+        (`home/first_day.py open_request_facts`), but sent whatever hero leads: this
+        section is answered to every client with no coach, and a client with no coach
+        who is training (a bought programme) gets `workout_hero` and no
+        `find_trainer_hero`. `waiting`: cancel with `client/cancel-trainer-request/`;
+        `invited`: answer with `client/respond-to-invite/`. A request the client can
+        no longer see (the trainer suspended or hidden, a block either way) is not
+        open: no `awaiting`, no name.
         `missing` is exactly `onboarding_missing` from `client/profile/`, so the app can
         send the person to the same fields.
 
