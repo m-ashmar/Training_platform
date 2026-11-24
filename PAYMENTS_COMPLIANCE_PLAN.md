@@ -11,6 +11,8 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 (media slots, onboarding fields, trainer matching and proof, chat, home, ...). Its state
 and order live in `BACKEND_DELTA.md`, not here.
 
+**PAUSED 2026-11-25 for two days (the owner). The section «PAUSED 2026-11-25 for two days» right below is the current state and the place to resume; the paragraph after this line is the state of 2026-11-24.**
+
 **Where things stand (2026-11-24):** Road to 10 is the work now: phase 0, batch A, phase 3,
 S2.7, batch B, S2.13, the review round of every landed batch, Part 4's R4, R5, R8 and R1,
 round 3 (B-199, the console and password fixes), round 4's fixes, the dev-only walk
@@ -22,6 +24,120 @@ are the later Road to 10 phases as the owner
 orders (the Road to 10 section below has the table per batch). The fix run
 resumed on 2026-11-24 (the owner's order): `fx/w2-chat` and `fx/w2-backups` are still on their
 branches (its section).
+
+## PAUSED 2026-11-25 for two days (the owner) — resume here FIRST
+
+The owner paused all work on 2026-11-25 for two days ("make everyone finish their current work
+and commit"). Nothing was pushed: a push waits for the owner's word in the manager's chat. This
+section is the whole state a fresh session needs. The sections below are history. The live
+table of the app side is `ROAD_TO_10_STATUS.md` (project root, not in git).
+
+### Landed on `spec/payments-compliance` (in order; each its own full gate, `--create-db`)
+
+| Landing | Head on the main line | Full gate (fresh database) | What |
+|---|---|---|---|
+| the fix run's first resumed landing | `6cc72d8` | `bd8016a`: 3425 passed, 0 failed | `fx/w2-diet`, `fx/w2-small`, `fx/w2-ci`, the walk seed's polish |
+| 2a | `707b19f` | `0c61013`: 3580 passed, 0 failed | the owner's decisions 2, 4, 5, 8, 9, 10, 12; ACC-1, ACC-2, SOC-2, G5, B-201, `fx/w2-chat` |
+| 3 | `2044b20` (fast-forwarded 2026-11-25 01:29 +04, under the app manager's «go»; `2044b20` is the gated `454c6af` plus one docs commit) | `454c6af`: 3692 passed, 2 xfailed (`afe4a32`'s strict xfails, S-417), 0 failed | RTN-1 (G1, G2, G6, G9 and eleven SIDE rows), PAY-1 to PAY-3, ShamCash as kind "reviewed"; routine 0038 |
+
+origin (GitHub) is at `9b286e7`. The live server runs `f77b3e1`, and updating it is the owner's
+step (DEPLOY_CHECKLIST §12.5 lists what each landing's update needs).
+
+### Built on a branch, NOT landed (the next landings, in this order)
+
+| Landing | Branch, tip at the pause | What it carries | Proven by its locked runs | Not proven yet |
+|---|---|---|---|---|
+| 4 | `claude/road10-phase3-632678` at `c4c408b` (01:30): the cut must be AT OR AFTER `54f6ced` | the diet rows; NOT-1 with three NEW push types (`coach_diet_plan_replaced`, `diet_plan_assignment`, `routine_unassignment`) and `scheduled_by` on `coaching_ending_soon`; the former-coach write refusals (`47e9d58`, Arabic `c17ef8a`, closing S-417); the pointer fixes and display values (`b3e4523`); B-202 and its pin; the store labels; `ids=`; `declares_allergy` on the client's and the trainer's reads (`b67eb28`, `27a0f85`); B-203 step 2a (`598527d`: `snack_count`, and the `save_plan` dating fix); SOC-1 with EXC-11 (`8d648b2`, `38ee178` S-304, `2e53bfa` S-303 and S-305); `54f6ced`; the one-call replace `f8265bd` (RTN-1's last row); EXC-6 and EXC-7 `000e2b6` (S-334, S-344 HIGH: a refusal never names another person's username); `c4c408b` EXC-12, A DUPLICATE (see below) | the WHOLE `tests/test_regression_gate.py` at `0d8a00e` (fresh database): 304 passed, 1 failed (the Arabic of the former-coach refusal, fixed in `c17ef8a`; the catalogue tests pass after it); per-commit test files: `b67eb28`/`27a0f85` the 23-test round trip of `declares_allergy`, `598527d` tests/test_road10_b203_snacks_built.py (7); pieces 2 (on `49e6d4f`) and 3 (the 33 files that read `field_errors`) were queued: final report not received at writing | no full gate on any tip after `afe4a32`; `54f6ced` was found by a test outside the gate file (test_fx_media `test_s053`), so the full gate is what proves it; `f8265bd` and `000e2b6` have no whole-file run yet; the branch lacks landing 3's money side (`ebee0af`): the merge-tree forecast conflicts on the `.mo` only |
+| 4b | `claude/road10-money-bb9d57` at `de34de3` (01:05) | the client-text sweep's batches EXC-9, 10, 8, 5, 13, 14, 12, 15, 16; the tool-result sanitiser (`9311bf3`, closing S-412); the encoder fix (`0618341`, closing S-415); the new code `media_not_saved`; the receipt renderers (`81217b7`); the shared expired-session sentence (`9b8f10b`); the metric labels (`b2eb5d5`); the media tests' sentence lists (`de34de3`, an allow-list change by the manager's ruling) | per-commit test files: tests/test_exc5_tool_results_sanitised.py (62), tests/test_exc5_tool_truncation_no_vocabulary.py (5), tests/test_exc15_metric_labels.py (20), tests/test_x21_receipt_renderers.py; `makemigrations --check` clean on `b2eb5d5` (the worker's word); its four locked runs e1 to e4, each with the whole gate file, were queued: final report not received at writing | no full gate; the merged tree with landing 4 (the files both lines touch: `ai_assistant/consumers.py`, `notifications/views.py`, `users/coaching.py`, `users/serializers.py`, `users/views.py`; the merge-tree forecast conflicts on the `.mo` only) |
+| 5 | `claude/road10-batch-b-4a061f` at `702976a` (00:31) | item 3 (accounts made outside sign-up default to Arabic, users 0050), PLT-1, PLT-2, TST-1, pinned at `7f2101c`; then EXC-1 `c8899f9`, EXC-2 `1c1d0aa`, EXC-3 `0f99c53` with `189d3e4` and `820165a`, EXC-4 `acbc4e2` with T-7 additive `702976a` | the worker pinned item 3, PLT-1, PLT-2 and TST-1 at `7f2101c` as the merge point; the seven EXC commits after it (`c8899f9`..`702976a`) came after the pin; what its runs proved: final report not received at writing | no merge line sent; no full gate; the narrow-fixture rebuild's result is in the final report |
+| with the first landing it is green and reviewed for | `fx/w2-backups-finish` at `5720c57` (2a merged in) | the backups (the crypto and the scripts still to review; the real drill is the owner's day) | 2a merged in (`5720c57`); final report not received at writing | the integrator's review of the crypto and the scripts; the real drill (the owner's day, once the bucket exists) |
+
+NEVER merge `a971d7d` and `32ee4fb` (the platform worker's unused duplicate of EXC-15 and
+EXC-16, once `fx/exc15-16-parked`; that branch is deleted, the commits are on no branch). The
+money worker's versions stand.
+
+EXC-12 IS BUILT TWICE: `6fcf7ea` on the money branch (the social socket's welcome frame says
+"Connected.") and `c4c408b` on the phase 3 branch ("You are connected."). Both change
+`social/consumers.py`, `social/views.py` and the `.po` with different wording, so landings 4 and
+4b would conflict on them. EXC-12: `6fcf7ea` on the money branch stands; `c4c408b` on the phase 3 branch is a duplicate and must not be merged; if the branch tip still contains it at landing 4, cut at `000e2b6` (the manager's ruling, 2026-11-25: its note that EXC-12 had moved sat in the worker's queue while it worked).
+
+What each landing's integrator must check at its merge, written down so it is not lost:
+- 4: rebuild the `.mo` from the merged `.po`; run the catalogue tests and `tests/test_home.py`
+  before queuing the gate (Home's `QUERY_CEILING` is 49 on the main line; if the merged tree
+  reads 50, the manager hears before anything is re-recorded); `tests/diet_quality.py`'s
+  baseline unmoved; `tests/test_road10_b203_snacks_built.py`; the app's `main` must have the
+  three new push types' rows and the data keys `scheduled_by` and `replaced_routine_id` before
+  the «go» (its gate test goes red otherwise); run `registry_diff.py 2044b20 <cut>` and report
+  every key documented in a paragraph by hand.
+- 4b: the shared pattern list in `ai_assistant/services/security.py` (also read by the
+  chat-message check and the system prompt's names: run those paths' tests); the encoder
+  fallback's character cut never splits an Arabic character or the JSON; `Payment.description`
+  on read for receipts, the Arabic PDF, the console and reconciliation; `raise_refusal`'s
+  subclasses still caught by every `except`; an empty AI reply gives the day's slot back once,
+  never below zero; `makemigrations --check` (the metric labels); the media tests' sentence
+  lists changed as an allow-list only; DEPLOY §12.5: run `sync_achievements` after the update.
+- 5: after msgcat, no `#-#-#-#-#` block in the `.po`, and "Your session has expired. Please sign
+  in again." has ONE Arabic sentence (both 4b and 5 say it); users 0050 in the app warning.
+
+### On resume, in this order (the manager, 2026-11-25)
+
+1. The app side runs routine 0038 on `yalla_app_dev` first thing (the landing 3 hand-off has the
+   three commands); no backend session touches that database.
+2. Before any landing: the HIGH allergen parser fix on the phase 3 branch (S-414, not started,
+   measured on the harness), then B-203's 2-meal caps (the list below).
+3. Landing 4: the phase 3 branch, cut at or after `54f6ced`, and at `000e2b6` if `c4c408b` is still
+   on it. The app's `main` must first carry the rows for its three new push types and the data
+   keys `scheduled_by` and `replaced_routine_id`, or its gate test goes red at the «go».
+4. Landing 4b: the money branch, tip `de34de3` or later.
+5. Landing 5: batch B at `7f2101c`, then its EXC commits.
+6. The backups branch when it is green and reviewed.
+
+Nothing is pushed: origin is at `9b286e7` and the main line 121 commits ahead (103 without
+merges). The push waits for the owner's word in the manager's chat.
+
+Where the workers' final reports are: each worker's last message in its own chat (phase 3,
+money, batch B); anything the manager receives goes into its memory file
+`project-payments-compliance-spec.md`. A cell above that reads "final report not received at
+writing" is filled from there.
+
+### NOT built, FIRST on resume (in this order)
+
+1. SIDE_BUGS S-414 (HIGH): the English-sentence allergy reading ("I have an allergy to kiwi"
+   reads kiwi as safe). With the phase 3 worker: one parser for every path that reads the
+   text for safety, measured on `tests/diet_quality.py`; review the numbers before and after,
+   `test_allergen_safety` untouched, and no path left with a parser of its own.
+2. BACKEND_BUGS B-203's 2-meal caps (the per-goal cap on counted snacks, measured, then the
+   manager's ruling); B-203 stays open until then.
+3. The LOW rows of EXC-6 and EXC-7 (about 50 sentences); `000e2b6` built the HIGH and MEDIUM ones.
+4. B-204 (filed by the app manager, MEDIUM, ours): `wallet/views.py` `ClientTransferView` calls
+   `idempotency.complete` after `_pay_trainer`'s own transaction has committed, so a crash
+   between them leaves the key in flight for good. And a question for the money worker: do the
+   agent top-up, the client transfer and the withdrawal each replay the first result for the
+   same key? That read-only answer is the money worker's FIRST job on resume, with B-204.
+
+### The owner's open decisions (one list)
+
+1. The push: nothing since `9b286e7` is on GitHub, and the server update after it.
+2. The AI coach's reply is not checked on its way out on store builds (SIDE_BUGS S-413, HIGH).
+3. The AI code that names the provider.
+4. A "something else" allergy input in the app.
+5. Whether the 10-minute `already_paid` window counts any payment method.
+6. The five backlog money questions: G11 (S-300), G12, S-263, S-251, S-181.
+7. A console action to end a coaching at once (S-309).
+8. The statement import as the ShamCash launch road.
+9. "and trainers" in CLAUDE.md's rate-limit line (the owner's numbers say clients; decision 12
+   gave trainers the same 1,500).
+10. The badge wording.
+
+### What the LIVE SERVER still lacks (it runs `f77b3e1`)
+
+Everything since `f77b3e1`: origin's `9b286e7`, then the fix run's first resumed landing, 2a and 3
+on the main line, and
+the branches above. Two HIGH bugs found on 2026-11-25 are live there today:
+- the AI coach's first data question of every new chat fails, and every one on a server with
+  no route to tiktoken's host (SIDE_BUGS S-415, fixed in landing 4b by `0618341`);
+- an allergy written as an English sentence naming a food outside the 14 tags is not read, so
+  that food is served (SIDE_BUGS S-414, not built yet).
 
 ## Build order
 
