@@ -83,6 +83,47 @@ def password_from_environment() -> str:
     return password
 
 
+def bootstrap_gaps() -> list[str]:
+    """What `bootstrap_platform` writes and is missing here, one entry per step the
+    states rely on (its own steps, read from its own sources). Empty on a dev server
+    that ran it. The command refuses ONCE, before any state, when this is not empty:
+    a state never creates platform data (a sellable plan, a catalogue row) itself."""
+    from achievements.models import Achievement
+    from diet.models import DietPlanTemplate, FoodItem
+    from policy.models import ChannelCapabilities
+    from routine.data.exercise_catalogue import STARTER_EXERCISES
+    from routine.data.platform_templates import PLATFORM_TEMPLATES
+    from routine.models import Exercise, RoutineTemplate
+    from subscription.models import SubscriptionFeature, SubscriptionPlan
+
+    starter = {exercise.key for exercise in STARTER_EXERCISES}
+    templates = {template.key for template in PLATFORM_TEMPLATES}
+    checks = (
+        ("channel capabilities", ChannelCapabilities.objects.exists()),
+        ("quota features", SubscriptionFeature.objects.exists()),
+        ("a subscription plan on sale",
+         SubscriptionPlan.objects.filter(is_active=True, price__gt=0).exists()),
+        ("diet plan templates", DietPlanTemplate.objects.exists()),
+        ("achievements", Achievement.objects.exists()),
+        ("starter exercises",
+         Exercise.objects.filter(catalogue_key__in=starter).count() == len(starter)),
+        ("platform templates",
+         RoutineTemplate.objects.filter(platform_key__in=templates).count()
+         == len(templates)),
+        ("food catalogue", FoodItem.objects.filter(needs_review=False).exists()),
+    )
+    return [name for name, present in checks if not present]
+
+
+def refuse_unless_bootstrapped() -> None:
+    gaps = bootstrap_gaps()
+    if gaps:
+        raise WalkRefused(
+            f"Refusing to run: this database has not been bootstrapped (missing: "
+            f"{', '.join(gaps)}). Run `manage.py bootstrap_platform` first; the walk "
+            f"states use what it writes and never create it themselves.")
+
+
 # ------------------------------------------------------------------ addresses
 def address(state_name: str, part: str | None = None) -> str:
     local = f"{PREFIX}{state_name}" + (f".{part}" if part else "")
@@ -220,24 +261,6 @@ class Walk:
             raise WalkApiRefused(f"{method.upper()} {path} as {user.email} answered "
                                  f"{response.status_code}: {body}")
         return response.status_code, body
-
-    def require_bootstrap(self) -> None:
-        """Refuse a state on a database `bootstrap_platform` has not prepared: the
-        starter exercises, the platform's templates and the badges."""
-        from achievements.models import Achievement
-        from routine.models import Exercise, RoutineTemplate
-
-        gaps = []
-        if not Exercise.objects.filter(is_global=True, is_active=True).exclude(
-                catalogue_key__isnull=True).exclude(catalogue_key="").exists():
-            gaps.append("the starter exercises")
-        if not RoutineTemplate.objects.exclude(platform_key__isnull=True).exists():
-            gaps.append("the platform's templates")
-        if not Achievement.objects.exists():
-            gaps.append("the badges")
-        if gaps:
-            raise WalkRefused(f"this database lacks {', '.join(gaps)}: run "
-                              f"`manage.py bootstrap_platform` first.")
 
     # What the walk scripts read ---------------------------------------------
     def ids(self, **ids) -> None:

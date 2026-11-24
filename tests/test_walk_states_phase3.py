@@ -2,33 +2,13 @@
 `operator.py`, `progress.py`): each made by `seed_walk_states --only <state>`, and each
 checked through the API the screen reads.
 """
-import io
-import json
-
 import pytest
-from django.core.management import call_command
+
+from tests.walk_fixtures import walk_platform, walk_run  # noqa: F401  (the shared fixtures)
 
 pytestmark = pytest.mark.django_db
 
-PASSWORD = "Walk-Throughs-2026!"
 FALLBACK = "You have a new notification."
-
-
-@pytest.fixture
-def seeded(monkeypatch, tmp_path, django_capture_on_commit_callbacks):
-    """A bootstrapped database (exercises, the platform's templates, the badges), and a
-    runner that resets one state and answers its manifest entry."""
-    monkeypatch.setenv("WALK_ACCOUNTS_PASSWORD", PASSWORD)
-    call_command("bootstrap_platform", "--skip-food-catalogue", stdout=io.StringIO())
-    manifest = tmp_path / "walk.json"
-
-    def run(name):
-        with django_capture_on_commit_callbacks(execute=True):
-            call_command("seed_walk_states", "--only", name, "--manifest", str(manifest),
-                         stdout=io.StringIO())
-        return json.loads(manifest.read_text(encoding="utf-8"))["states"][name]
-
-    return run
 
 
 def _user(entry, part="main"):
@@ -42,10 +22,10 @@ def _rows(body):
 
 
 # ------------------------------------------------------------------ 1. challenges
-def test_client_challenges(seeded, api):
+def test_client_challenges(walk_run, api):
     from django.utils import timezone
 
-    entry = seeded("client_challenges")
+    entry = walk_run("client_challenges")
     me = _user(entry)
     ids = entry["ids"]
     assert len(ids["hosted"]) == 3
@@ -71,8 +51,8 @@ def test_client_challenges(seeded, api):
 
 
 # ------------------------------------------------------------------ 2. reports
-def test_client_reports(seeded, api):
-    entry = seeded("client_reports")
+def test_client_reports(walk_run, api):
+    entry = walk_run("client_reports")
     me = _user(entry)
     ids = entry["ids"]
     mine = _rows(api(me).get("/api/v1/reports/mine/").json())
@@ -95,10 +75,10 @@ def _inbox(api, user, build):
     return {row["notification_type"]: row for row in _rows(rows)}
 
 
-def test_inbox_every_kind(seeded, api):
+def test_inbox_every_kind(walk_run, api):
     from users.walk.inbox import kinds_for
 
-    entry = seeded("inbox_every_kind")
+    entry = walk_run("inbox_every_kind")
     me, coach = _user(entry), _user(entry, "coach")
 
     mine = _inbox(api, me, "apk")
@@ -121,8 +101,8 @@ def test_inbox_every_kind(seeded, api):
 
 
 # ------------------------------------------------------------------ 4. the operator
-def test_operator_staff(seeded, api):
-    entry = seeded("operator_staff")
+def test_operator_staff(walk_run, api):
+    entry = walk_run("operator_staff")
     operator = _user(entry)
     assert entry["role"] == "admin"
     counts = api(operator).get("/api/v1/ops/queue-counts/")
@@ -130,8 +110,8 @@ def test_operator_staff(seeded, api):
 
 
 # ------------------------------------------------------------------ 5. progress
-def test_client_progress(seeded, api):
-    entry = seeded("client_progress")
+def test_client_progress(walk_run, api):
+    entry = walk_run("client_progress")
     me = _user(entry)
 
     progress = {row["achievement"]["key"]: row
