@@ -6,6 +6,8 @@ including virus scanning, file type validation, and content sanitization.
 """
 
 import os
+import math
+import struct
 import time
 import hashlib
 import logging
@@ -891,8 +893,11 @@ class VideoFacts:
     """What the bytes themselves say: container, stored extension, duration if declared.
 
     `duration_seconds` is None when the container does not declare one where we can read
-    it without decoding (WebM keeps it in the Segment Info element). The size cap still
-    applies, and the metadata task fills the duration with ffprobe afterwards.
+    it without decoding (`probe_declared_duration`: a WebM recorded live, with no
+    Info/Duration, is the usual one). The size cap still applies, and a worker measures
+    the duration with ffprobe afterwards — the media kit's metadata task
+    (`mediakit.tasks.fill_video_metadata`) and the chat's (`chat.tasks.
+    fill_media_duration`).
     """
 
     __slots__ = ('container', 'extension', 'duration_seconds', 'size')
@@ -978,46 +983,41 @@ def _iso_boxes(fp, start, end, depth=0):
 
 
 def probe_declared_duration(file, container) -> float | None:
-    """The duration the container declares, read without decoding anything.
+    """The duration the container declares, read without decoding anything and at a
+    bounded cost — a few small reads, never the whole file:
 
-    ISO BMFF keeps it in `moov/mvhd` as `duration / timescale`. We read that so an
-    oversize-in-TIME upload is refused at the door rather than after the bytes are
-    stored and a worker gets round to it. A file that declares nothing (WebM, or an MP4
-    whose `moov` we cannot find) returns None and is capped on size alone — and so does
-    one with more than `MAX_ISO_BOXES_PER_LEVEL` boxes before its `moov`: the walk stops
-    there rather than spend the request's CPU on it.
+      iso       `moov/mvhd`, as `duration / timescale` (the box walk, `_iso_boxes`);
+      ogg       the last page's granule position on the stream's own clock — Opus at
+                48 kHz less its pre-skip, Vorbis at its sample rate — read from the
+                file's last `OGG_MAX_PAGE` bytes (`_ogg_duration`);
+      matroska  `Segment/Info/Duration` times `TimecodeScale`, read from the first
+                `MATROSKA_HEAD_BYTES` (`_matroska_duration`).
+
+    We read it so an oversize-in-TIME upload is refused at the door rather than after
+    the bytes are stored and a worker gets round to it. An Ogg or a WebM used to be
+    capped on size alone — about 50 minutes of Opus fit in a 10 MB voice note
+    (BACKEND_BUGS B-177). A file that declares nothing readable returns None and is
+    capped on size alone: a WebM written live (a browser's MediaRecorder writes no
+    Info/Duration), an Ogg whose codec clock is not read here or that does not end on a
+    whole page, an MP4 whose `moov` we cannot find — and one with more than
+    `MAX_ISO_BOXES_PER_LEVEL` boxes before its `moov`, where the walk stops rather than
+    spend the request's CPU on it. A worker measures those after the send.
+
+    A declared length that rounds to nothing (under half a millisecond) is None too, never
+    0.0: a 0.0 was stored as the recording's length, and the worker that measures a
+    recording measures only one with NO length, so the card read 0:00 for good (the
+    adversarial review of B-177, 2026-11-24).
     """
-    if container != 'iso':
-        return None
     try:
-        file.seek(0, os.SEEK_END)
-        end = file.tell()
-        for box_type, payload, box_end in _iso_boxes(file, 0, end):
-            if box_type != b'moov':
-                continue
-            for inner_type, inner_start, inner_end in _iso_boxes(file, payload, box_end, 1):
-                if inner_type != b'mvhd':
-                    continue
-                file.seek(inner_start)
-                body = file.read(min(32, inner_end - inner_start))
-                if len(body) < 20:
-                    return None
-                version = body[0]
-                if version == 1:
-                    if len(body) < 32:
-                        return None
-                    timescale = int.from_bytes(body[20:24], 'big')
-                    duration = int.from_bytes(body[24:32], 'big')
-                else:
-                    timescale = int.from_bytes(body[12:16], 'big')
-                    duration = int.from_bytes(body[16:20], 'big')
-                if not timescale:
-                    return None
-                # 0xFFFFFFFF is "unknown" in a version-0 header.
-                if duration in (0, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
-                    return None
-                return round(duration / timescale, 3)
-        return None
+        if container == 'iso':
+            seconds = _iso_duration(file)
+        elif container == 'ogg':
+            seconds = _ogg_duration(file)
+        elif container == 'matroska':
+            seconds = _matroska_duration(file)
+        else:
+            return None
+        return seconds if seconds else None
     except _TooManyBoxes:
         logger.info("video declares more than %d boxes on one level; duration not read",
                     MAX_ISO_BOXES_PER_LEVEL)
@@ -1032,6 +1032,228 @@ def probe_declared_duration(file, container) -> float | None:
             logger.debug("could not rewind the upload", exc_info=True)
 
 
+def _iso_duration(file):
+    """An MP4's, MOV's or M4A's `moov/mvhd` duration, or None."""
+    file.seek(0, os.SEEK_END)
+    end = file.tell()
+    for box_type, payload, box_end in _iso_boxes(file, 0, end):
+        if box_type != b'moov':
+            continue
+        for inner_type, inner_start, inner_end in _iso_boxes(file, payload, box_end, 1):
+            if inner_type != b'mvhd':
+                continue
+            file.seek(inner_start)
+            body = file.read(min(32, inner_end - inner_start))
+            if len(body) < 20:
+                return None
+            version = body[0]
+            if version == 1:
+                if len(body) < 32:
+                    return None
+                timescale = int.from_bytes(body[20:24], 'big')
+                duration = int.from_bytes(body[24:32], 'big')
+            else:
+                timescale = int.from_bytes(body[12:16], 'big')
+                duration = int.from_bytes(body[16:20], 'big')
+            if not timescale:
+                return None
+            # 0xFFFFFFFF is "unknown" in a version-0 header.
+            if duration in (0, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+                return None
+            return round(duration / timescale, 3)
+    return None
+
+
+#: The longest an Ogg page can be: a 27-byte header, a 255-entry segment table and 255
+#: segments of 255 bytes. A file that ends on a whole page has its last page start
+#: inside its last this-many bytes, which is all of the tail the duration read reads.
+OGG_MAX_PAGE = 27 + 255 + 255 * 255
+#: The head an Ogg's first page — its codec's identification header — is read from.
+OGG_HEAD_BYTES = 512
+#: How many `OggS` in the tail the read examines before it gives up. One is the last
+#: page; any other is those four bytes turning up inside compressed audio. A tail made
+#: of them is not a recording, and is capped on size alone.
+OGG_MAX_CANDIDATES = 64
+#: A page on which no packet ends carries this granule position: no time.
+_OGG_NO_GRANULE = 0xFFFFFFFFFFFFFFFF
+#: The granule position is a SIGNED 64-bit number (RFC 3533: "-1" in two's complement is
+#: the page above). Read unsigned, every negative one was a length of thousands of
+#: years — 2**63 read 192,153,584,101,141 seconds — and the upload was refused as too
+#: long. Any other negative granule declares no time.
+_OGG_NEGATIVE_GRANULE = 1 << 63
+
+
+def _ogg_page(buffer, at):
+    """`(header_type, granule, serial, end)` of the Ogg page starting at `at` in
+    `buffer`, `end` being where it stops; None when the bytes there are not a whole
+    page header."""
+    if at + 27 > len(buffer) or buffer[at:at + 4] != _OGG_MAGIC or buffer[at + 4] != 0:
+        return None
+    header_type = buffer[at + 5]
+    if header_type > 0x07:
+        return None
+    table_end = at + 27 + buffer[at + 26]
+    if table_end > len(buffer):
+        return None
+    return (header_type, int.from_bytes(buffer[at + 6:at + 14], 'little'),
+            bytes(buffer[at + 14:at + 18]), table_end + sum(buffer[at + 27:table_end]))
+
+
+def _ogg_clock(packet):
+    """`(samples per second, samples to skip)` of the stream whose identification
+    header `packet` is; None for a codec whose clock is not read here (FLAC, Speex)."""
+    if packet.startswith(b'OpusHead') and len(packet) >= 19:
+        # RFC 7845: the granule counts 48 kHz samples whatever the input rate, and the
+        # first `pre-skip` of them are the encoder's priming, not the recording.
+        return 48000, int.from_bytes(packet[10:12], 'little')
+    if packet.startswith(b'\x01vorbis') and len(packet) >= 16:
+        return int.from_bytes(packet[12:16], 'little'), 0
+    return None
+
+
+def _ogg_duration(file):
+    """An Ogg's length: its last page's granule position, on its codec's clock.
+
+    Two reads, both bounded: the first page (the codec's identification header, which
+    says what the granule counts) and the file's last `OGG_MAX_PAGE` bytes. The last
+    page is found walking back over `OggS` in that tail, and a candidate counts only if
+    its own length lands exactly where the file ends — or where the page after it,
+    already found, begins — so four bytes inside compressed audio are never read as a
+    page. Only the first stream's pages count. None when the file does not end on a
+    whole page, the codec's clock is not read here, or the tail holds more than
+    `OGG_MAX_CANDIDATES` false starts."""
+    file.seek(0)
+    head = file.read(OGG_HEAD_BYTES)
+    first = _ogg_page(head, 0)
+    if first is None or not first[0] & 0x02:        # the first page opens the stream
+        return None
+    clock = _ogg_clock(head[27 + head[26]:])
+    if clock is None or not clock[0]:
+        return None
+    rate, skip = clock
+    serial = first[2]
+
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    start = max(0, size - OGG_MAX_PAGE)
+    file.seek(start)
+    tail = file.read(size - start)
+    ends_at = look = len(tail)
+    for _candidate in range(OGG_MAX_CANDIDATES):
+        at = tail.rfind(_OGG_MAGIC, 0, look)
+        if at < 0:
+            return None
+        look = at + len(_OGG_MAGIC) - 1            # the next one starts before this
+        page = _ogg_page(tail, at)
+        if page is None or page[3] != ends_at:
+            continue
+        ends_at = at
+        _header_type, granule, page_serial, _end = page
+        if page_serial != serial or granule == _OGG_NO_GRANULE:
+            continue
+        if granule >= _OGG_NEGATIVE_GRANULE:
+            return None                     # a negative position: no length declared
+        seconds = (granule - skip) / rate
+        return round(seconds, 3) if seconds > 0 else None
+    return None
+
+
+#: How much of a WebM's head the duration read looks at. `Info` sits right after the
+#: EBML header and the `SeekHead`, a few hundred bytes in, in the output of every muxer
+#: we know of; one further in than this is not looked for.
+MATROSKA_HEAD_BYTES = 64 * 1024
+#: How many elements the read steps over, in all, before it gives up.
+MATROSKA_MAX_ELEMENTS = 256
+_EBML_SEGMENT, _EBML_INFO, _EBML_CLUSTER = 0x18538067, 0x1549A966, 0x1F43B675
+_EBML_TIMECODE_SCALE, _EBML_DURATION = 0x2AD7B1, 0x4489
+
+
+def _ebml_number(buffer, at, max_length):
+    """`(value, length)` of the EBML variable-length number at `at`, its length marker
+    kept in `value`; None when it is not one, or longer than `max_length` bytes."""
+    if at >= len(buffer):
+        return None
+    first = buffer[at]
+    length = 9 - first.bit_length()        # 0x80.. is 1 byte, 0x01.. is 8, 0x00 none
+    if not first or length > max_length or at + length > len(buffer):
+        return None
+    return int.from_bytes(buffer[at:at + length], 'big'), length
+
+
+def _ebml_element(buffer, at):
+    """`(id, data_start, data_end)` of the EBML element at `at` — `data_end` None for
+    an element of unknown size (a live recording's Segment) — or None when the bytes
+    there are not an element header."""
+    head = _ebml_number(buffer, at, 4)
+    if head is None:
+        return None
+    element_id, id_length = head
+    size = _ebml_number(buffer, at + id_length, 8)
+    if size is None:
+        return None
+    raw, size_length = size
+    all_ones = (1 << (7 * size_length)) - 1
+    value = raw & all_ones
+    data = at + id_length + size_length
+    return element_id, data, (None if value == all_ones else data + value)
+
+
+def _matroska_duration(file):
+    """A WebM's declared length: `Segment/Info/Duration` times `TimecodeScale`
+    (nanoseconds per tick, a million unless the file says otherwise).
+
+    One read, the first `MATROSKA_HEAD_BYTES`, and at most `MATROSKA_MAX_ELEMENTS`
+    elements stepped over. None when no Info comes before the first Cluster inside that
+    window, or Info carries no Duration — a WebM a browser recorded live has none."""
+    file.seek(0)
+    head = file.read(MATROSKA_HEAD_BYTES)
+    at, end, in_segment = 0, len(head), False
+    for _step in range(MATROSKA_MAX_ELEMENTS):
+        if at >= end:
+            return None
+        element = _ebml_element(head, at)
+        if element is None:
+            return None
+        element_id, data, data_end = element
+        if not in_segment:
+            if element_id == _EBML_SEGMENT:
+                in_segment, at = True, data
+                end = end if data_end is None else min(end, data_end)
+            elif data_end is None:
+                return None
+            else:
+                at = data_end
+            continue
+        if element_id == _EBML_INFO:
+            if data_end is None:
+                return None
+            return _matroska_info_duration(head, data, min(data_end, len(head)))
+        if element_id == _EBML_CLUSTER or data_end is None:
+            return None                             # the media began with no Info
+        at = data_end
+    return None
+
+
+def _matroska_info_duration(head, at, end):
+    """The seconds an `Info` element's children declare, or None."""
+    scale, duration = 1_000_000, None
+    for _step in range(MATROSKA_MAX_ELEMENTS):
+        element = _ebml_element(head, at) if at < end else None
+        if element is None or element[2] is None or element[2] > end:
+            break
+        element_id, data, data_end = element
+        payload = head[data:data_end]
+        if element_id == _EBML_TIMECODE_SCALE and 0 < len(payload) <= 8:
+            scale = int.from_bytes(payload, 'big')
+        elif element_id == _EBML_DURATION and len(payload) in (4, 8):
+            duration = struct.unpack('>f' if len(payload) == 4 else '>d', payload)[0]
+        at = data_end
+    if duration is None or not scale or not math.isfinite(duration) or duration <= 0:
+        return None
+    seconds = duration * scale / 1e9
+    return round(seconds, 3) if math.isfinite(seconds) else None
+
+
 def process_uploaded_video(file, max_bytes=None, max_seconds=None) -> VideoFacts:
     """Validate an uploaded video by its CONTENT. The one function video views use.
 
@@ -1044,7 +1266,8 @@ def process_uploaded_video(file, max_bytes=None, max_seconds=None) -> VideoFacts
       * the size is capped (`MEDIA_VIDEO_MAX_BYTES`), measured on the file, not on the
         Content-Length a client can lie about;
       * the duration is capped (`MEDIA_VIDEO_MAX_SECONDS`) when the container declares
-        one where it can be read without decoding.
+        one where it can be read without decoding (`probe_declared_duration`: an MP4's
+        or MOV's `mvhd`, and since BACKEND_BUGS B-177 a WebM's Info/Duration too).
 
     The extension the file is STORED under comes from the detected container, never from
     the client's filename — the same rule as images, and the reason `.php` uploads could
@@ -1101,8 +1324,9 @@ def process_uploaded_video(file, max_bytes=None, max_seconds=None) -> VideoFacts
 # iOS and most Android builds), Opus in Ogg, or Opus/Vorbis in WebM (Android, Chrome).
 # Like video it is stored as it arrived — no transcoder is needed to accept one — so
 # the container is sniffed from its magic bytes, the size is measured on the file and
-# the duration is read from the container where it declares one, with the same box
-# walk video uses (`probe_declared_duration`).
+# the duration is read from the container where it declares one, by the reader video
+# uses (`probe_declared_duration`): an M4A's `mvhd`, and since BACKEND_BUGS B-177 an
+# Ogg's last page and a WebM's Info/Duration, so the 90 s cap holds for those too.
 
 #: ISO BMFF brands a recorder writes for sound: the audio-only brands, the generic
 #: MPEG-4 ones an Android recorder stamps on an AAC file, and 3GPP.
@@ -1137,7 +1361,9 @@ def process_uploaded_audio(file, max_bytes=None, max_seconds=None) -> VideoFacts
 
     The caps default to the video ones (`MEDIA_VIDEO_MAX_BYTES`,
     `MEDIA_VIDEO_MAX_SECONDS`): a voice note is not a longer thing than a clip, and a
-    second pair of numbers would be a second thing to keep in step.
+    second pair of numbers would be a second thing to keep in step. The duration cap
+    applies to every container that declares a length (`probe_declared_duration`): an
+    M4A, an Ogg (Opus or Vorbis), a WebM with Info/Duration.
 
     Raises `ValidationError` with a stable `code`: `no_file`, `empty_file`,
     `media_audio_too_large`, `media_not_audio`, `media_audio_too_long`.

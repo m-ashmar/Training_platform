@@ -18,7 +18,9 @@ the guard reads the bytes, so a real file from disk would prove less.
 """
 import io
 import os
+import shutil
 import struct
+import subprocess
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -32,6 +34,11 @@ pytestmark = pytest.mark.django_db
 
 CHAT = '/api/v1/chat'
 MEDIA = f'{CHAT}/media/'
+
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+    reason="ffmpeg is not installed on this machine: the real-recording tests need it "
+           "(the length readers and the worker are tested on hand-built bytes below)")
 
 
 @pytest.fixture(autouse=True)
@@ -254,6 +261,39 @@ def test_a_bad_form_names_its_code(api, pair, conversation):
     assert wrong_kind.json()['code'] == 'validation_error'
 
 
+def test_a_guard_refusal_carries_the_api_envelope(api, pair, conversation, settings,
+                                                  media_root):
+    """BACKEND_BUGS B-149: the upload guard's 400s were written by hand in the view as
+    `{error, code}`, so this one route answered two envelope shapes — every other
+    refusal of the API (and this route's own `validation_error`) carries
+    `field_errors`. They now reach the API's exception handler, which keeps the
+    guard's own `code` and writes the one envelope."""
+    from routine.models import Exercise
+
+    _trainer, client = pair
+    squat = Exercise.objects.create(name="Squat")
+    settings.MEDIA_VIDEO_MAX_SECONDS = 10
+    not_audio = SimpleUploadedFile("note.m4a", b"MZ\x90\x00" + b"\x00" * 200,
+                                   content_type="audio/mp4")
+    cases = [
+        ('voice', not_audio, {}, 'media_not_audio'),
+        ('video', video(30.0), {}, 'media_video_too_long'),
+        ('video', None, {}, 'media_file_required'),
+        ('image', photo_with_gps(), {'exercise_id': squat.pk}, 'exercise_only_on_video'),
+    ]
+    for kind, file, extra, code in cases:
+        refused = _post(api, client, conversation, kind, file, **extra)
+        assert refused.status_code == 400, (code, refused.content)
+        body = refused.json()
+        assert body['code'] == code, body
+        assert body['detail'] and body['error'] == body['detail'], body
+        assert 'field_errors' in body, f"{code}: no field_errors in {body}"
+        [entry] = body['field_errors']['non_field_errors']
+        assert entry['message'] == body['detail'], body
+        assert body['non_field_errors'] == [body['detail']], body
+    assert not _stored_files(media_root)
+
+
 # ---------------------------------------------------------------- privacy
 def test_only_the_two_people_in_the_thread_ever_get_the_media(api, make_user, pair,
                                                               conversation):
@@ -396,3 +436,348 @@ def test_a_video_without_a_caption_says_what_it_is_in_the_recipients_language(
     note = Notification.objects.get(recipient=trainer, event_type='chat_message')
     assert note.metadata['context']['preview'] == "فيديو"
     assert note.metadata['data']['message_id']
+
+
+# ------------------------------------------------- the length of a recording (B-177)
+# BACKEND_BUGS B-177: an Ogg or WebM voice note (or WebM video) stored
+# `duration_seconds = None` — the declared-duration reader read MP4 only — so the card's
+# clock read 0:00, and the 90 s cap was never applied to those containers (about 50
+# minutes of Opus fit under the 10 MB cap). The request now reads an Ogg's last page and
+# a WebM's Info/Duration, bounded and without decoding, and a worker measures what
+# declares nothing (a WebM a browser recorded live).
+def _ogg_page(payload: bytes, *, granule: int, sequence: int, flags: int = 0,
+              serial: int = 7) -> bytes:
+    """One Ogg page around `payload` (the CRC left zero: the reader does not check it)."""
+    lacing, rest = [], len(payload)
+    while rest >= 255:
+        lacing.append(255)
+        rest -= 255
+    lacing.append(rest)
+    return (b"OggS" + bytes([0, flags]) + struct.pack("<Q", granule)
+            + struct.pack("<I", serial) + struct.pack("<I", sequence) + b"\x00" * 4
+            + bytes([len(lacing)]) + bytes(lacing) + payload)
+
+
+def ogg_opus_bytes(seconds: float, pre_skip: int = 312) -> bytes:
+    """An Ogg Opus stream as a recorder writes it: the OpusHead page, the tags page,
+    audio pages, and a last page whose granule says `seconds` (plus the pre-skip)."""
+    head = (b"OpusHead" + bytes([1, 1]) + struct.pack("<H", pre_skip)
+            + struct.pack("<I", 48000) + b"\x00\x00\x00")
+    return b"".join([
+        _ogg_page(head, granule=0, sequence=0, flags=0x02),
+        _ogg_page(b"OpusTags" + b"\x00" * 16, granule=0, sequence=1),
+        _ogg_page(b"\x5a" * 3000, granule=48000 + pre_skip, sequence=2),
+        _ogg_page(b"\x5a" * 300, granule=int(seconds * 48000) + pre_skip, sequence=3,
+                  flags=0x04),
+    ])
+
+
+def _ebml(element_id: bytes, payload: bytes, *, unknown_size=False) -> bytes:
+    size = (b"\x01" + b"\xff" * 7 if unknown_size
+            else ((1 << 56) | len(payload)).to_bytes(8, "big"))
+    return element_id + size + payload
+
+
+def webm_bytes(*, ticks=None, scale=1_000_000, cluster_first=False) -> bytes:
+    """A WebM head: the EBML header, a Segment of unknown size (as a live recorder
+    writes it) holding a Void, Info — with `Duration` = `ticks` of `scale` ns, or none
+    — and a Cluster."""
+    children = _ebml(b"\x2a\xd7\xb1", scale.to_bytes(4, "big"))
+    if ticks is not None:
+        children = _ebml(b"\x44\x89", struct.pack(">d", ticks)) + children
+    info = _ebml(b"\x15\x49\xa9\x66", children)
+    cluster = _ebml(b"\x1f\x43\xb6\x75", b"\x00" * 512)
+    body = _ebml(b"\xec", b"\x00" * 40) + (cluster + info if cluster_first
+                                            else info + cluster)
+    return (_ebml(b"\x1a\x45\xdf\xa3", _ebml(b"\x42\x82", b"webm"))
+            + _ebml(b"\x18\x53\x80\x67", body, unknown_size=True))
+
+
+def test_the_declared_length_of_an_ogg_and_a_webm_is_read_without_decoding(monkeypatch):
+    from training_platform import file_security
+    from training_platform.file_security import probe_declared_duration
+
+    def read(data, container):
+        return probe_declared_duration(io.BytesIO(data), container)
+
+    assert read(ogg_opus_bytes(7.0), 'ogg') == 7.0
+    assert read(ogg_opus_bytes(95.5, pre_skip=0), 'ogg') == 95.5
+    assert read(webm_bytes(ticks=12345.0), 'matroska') == 12.345
+    assert read(webm_bytes(ticks=4000.0, scale=500_000), 'matroska') == 2.0
+
+    # What declares nothing is still None — never a guess.
+    assert read(webm_bytes(), 'matroska') is None, "a live WebM has no Duration"
+    assert read(webm_bytes(ticks=9000.0, cluster_first=True), 'matroska') is None
+    # An Ogg that does not END on a whole page (cut short, or with bytes after it).
+    whole = ogg_opus_bytes(7.0)
+    assert read(whole[:-5], 'ogg') is None
+    assert read(whole + b"\x00" * 64, 'ogg') is None
+    # Four bytes "OggS" inside the last page's audio are not a page.
+    fake = whole[:-200] + b"OggS" + b"\x5a" * 196
+    assert read(fake, 'ogg') == 7.0
+    # Bounded: a tail of nothing but false starts gives up, it does not walk them all
+    # (the head's page, then at most OGG_MAX_CANDIDATES in the tail).
+    walked = []
+    real_page = file_security._ogg_page
+    monkeypatch.setattr(file_security, '_ogg_page',
+                        lambda *a: walked.append(1) or real_page(*a))
+    assert read(whole[:200] + b"OggS" * 3200, 'ogg') is None
+    assert len(walked) <= file_security.OGG_MAX_CANDIDATES + 1, len(walked)
+    monkeypatch.undo()
+    # A codec whose clock the reader does not know is left to the worker.
+    flac = whole.replace(b"OpusHead", b"\x7fFLAC\x01\x00\x00", 1)
+    assert read(flac, 'ogg') is None
+
+
+def test_a_length_that_rounds_to_nothing_is_none_and_measured_later(
+        api, pair, conversation, monkeypatch, django_capture_on_commit_callbacks):
+    """The adversarial review of B-177 (2026-11-24), found by fuzzing the readers: a
+    declared length under half a millisecond rounded to 0.0 and was returned AS the
+    length — an Ogg whose last granule is its pre-skip plus one sample, a WebM whose
+    Duration is a fraction of a tick, an MP4 of one tick in ten thousand. It was stored,
+    and the worker measures only a recording with NO length (`send_media_message`
+    queues it for `duration_seconds is None`, `fill_media_duration` skips any other),
+    so the note read 0:00 for good. Each is None now, and the send queues the worker."""
+    from training_platform.file_security import probe_declared_duration
+
+    def read(data, container):
+        return probe_declared_duration(io.BytesIO(data), container)
+
+    tiny_ogg = ogg_opus_bytes(1 / 48000)                  # granule = pre-skip + 1
+    one_tick = (_box(b"ftyp", b"M4A " + struct.pack(">I", 512) + b"isom")
+                + _box(b"moov", _mvhd(0.0001, timescale=10000))
+                + _box(b"mdat", b"\x00" * 64))
+    assert read(tiny_ogg, 'ogg') is None
+    assert read(webm_bytes(ticks=0.0001), 'matroska') is None
+    assert read(one_tick, 'iso') is None
+    # A real length still reads, however short (two of Opus's 2.5 ms frames).
+    assert read(ogg_opus_bytes(0.005), 'ogg') == 0.005
+
+    trainer, _client = pair
+    queued = []
+    monkeypatch.setattr("chat.media.queue_duration", queued.append)
+    with django_capture_on_commit_callbacks(execute=True):
+        sent = _post(api, trainer, conversation, 'voice',
+                     SimpleUploadedFile("tiny.ogg", tiny_ogg, content_type="audio/ogg"))
+    assert sent.status_code == 201, sent.content
+    assert sent.json()['media']['duration_seconds'] is None
+    assert queued == [sent.json()['id']], "the worker was not asked to measure it"
+
+
+def test_a_negative_granule_declares_no_length(api, pair, conversation):
+    """The adversarial review of B-177 (2026-11-24): the granule position is a signed
+    64-bit number (RFC 3533), and the reader read it unsigned. A last page at 2**63
+    declared 192,153,584,101,141 seconds, and a voice note of a few seconds was refused
+    as `media_audio_too_long`. A negative granule declares nothing now: None, capped on
+    size alone, and measured by the worker. A last page of -1 (no packet ends on it) is
+    still skipped for the page before it."""
+    from training_platform.file_security import probe_declared_duration
+
+    def last_page_at(granule):
+        whole = ogg_opus_bytes(7.0)
+        cut = whole.rfind(b"OggS")
+        return (whole[:cut + 6] + struct.pack("<Q", granule) + whole[cut + 14:])
+
+    def read(data):
+        return probe_declared_duration(io.BytesIO(data), 'ogg')
+
+    assert read(last_page_at(2 ** 63)) is None
+    assert read(last_page_at(2 ** 64 - 2)) is None            # -2
+    assert read(last_page_at(2 ** 64 - 1)) == 1.0             # -1: the page before it
+    assert read(last_page_at(2 ** 63 - 1)) > 90               # a huge positive: declared
+
+    trainer, _client = pair
+    sent = _post(api, trainer, conversation, 'voice',
+                 SimpleUploadedFile("note.ogg", last_page_at(2 ** 63),
+                                    content_type="audio/ogg"))
+    assert sent.status_code == 201, sent.content
+    assert sent.json()['media']['duration_seconds'] is None
+
+
+def test_an_ogg_or_webm_voice_note_is_capped_and_timed_on_the_request(
+        api, pair, conversation, settings, media_root):
+    """The route, on hand-built bytes (no ffmpeg needed): the length is on the answer,
+    and the 90 s cap — the same refusal code as an M4A's — now holds for them too."""
+    from chat.models import Message
+
+    trainer, _client = pair
+    for name, data, seconds in (("note.ogg", ogg_opus_bytes(7.0), 7.0),
+                                ("note.webm", webm_bytes(ticks=12345.0), 12.345)):
+        sent = _post(api, trainer, conversation, 'voice',
+                     SimpleUploadedFile(name, data, content_type="audio/ogg"))
+        assert sent.status_code == 201, sent.content
+        assert sent.json()['media']['duration_seconds'] == seconds
+
+    settings.MEDIA_VIDEO_MAX_SECONDS = 5
+    before = Message.objects.count()
+    for data in (ogg_opus_bytes(7.0), webm_bytes(ticks=12345.0)):
+        refused = _post(api, trainer, conversation, 'voice',
+                        SimpleUploadedFile("long.ogg", data, content_type="audio/ogg"))
+        assert refused.status_code == 400, refused.content
+        assert refused.json()['code'] == 'media_audio_too_long'
+    long_video = _post(api, trainer, conversation, 'video',
+                       SimpleUploadedFile("clip.webm", webm_bytes(ticks=12345.0),
+                                          content_type="video/webm"))
+    assert long_video.status_code == 400
+    assert long_video.json()['code'] == 'media_video_too_long'
+    assert Message.objects.count() == before
+
+
+def _recording(tmp_path, name, *args):
+    """A real recording the local ffmpeg makes from a generated tone; skipped where
+    this ffmpeg lacks the encoder."""
+    out = tmp_path / name
+    made = subprocess.run([shutil.which('ffmpeg'), '-v', 'error', '-y', '-f', 'lavfi',
+                           '-i', 'sine=frequency=440:duration=3', *args, str(out)],
+                          capture_output=True, timeout=60)
+    if made.returncode != 0:
+        pytest.skip(f"this ffmpeg cannot write {name}: {made.stderr[-200:]!r}")
+    return out.read_bytes()
+
+
+@needs_ffmpeg
+def test_an_ogg_voice_note_carries_its_length(api, pair, conversation, tmp_path,
+                                              monkeypatch,
+                                              django_capture_on_commit_callbacks):
+    """The proving test of B-177: a real three-second Opus/Ogg voice note (what an
+    Android recorder writes) — and a Vorbis one, and a WebM written to a file — is
+    answered with its length, read on the request: no worker is queued for a
+    container that declares one."""
+    from chat import media
+
+    queued = []
+    # `raising=False`: so that, on the code before B-177 (which had no worker), this
+    # fails on the missing length and not on the stand-in.
+    monkeypatch.setattr(media, 'queue_duration', queued.append, raising=False)
+    trainer, client = pair
+    for name, args in (("opus.ogg", ('-c:a', 'libopus')),
+                       ("vorbis.ogg", ('-c:a', 'libvorbis')),
+                       ("seekable.webm", ('-c:a', 'libopus'))):
+        note = SimpleUploadedFile(name, _recording(tmp_path, name, *args),
+                                  content_type="audio/ogg")
+        with django_capture_on_commit_callbacks(execute=True):
+            sent = _post(api, client, conversation, 'voice', note)
+        assert sent.status_code == 201, sent.content
+        seconds = sent.json()['media']['duration_seconds']
+        assert seconds is not None and abs(seconds - 3.0) < 0.1, (name, seconds)
+    assert queued == [], "a declared length was sent to the worker"
+    newest = api(trainer).get(
+        f"{CHAT}/conversations/{conversation.pk}/messages/").json()['results'][0]
+    assert abs(newest['media']['duration_seconds'] - 3.0) < 0.1
+
+
+@needs_ffmpeg
+def test_a_webm_recorded_live_is_measured_by_a_worker(
+        api, pair, conversation, tmp_path, monkeypatch,
+        django_capture_on_commit_callbacks):
+    """A browser's MediaRecorder writes a WebM with no Duration (ffmpeg writing to a
+    pipe makes the same file, and its `format=duration` is N/A). The send answers with
+    null; once the row commits a worker measures the recording with ffprobe — the end
+    of its last packet — stores it, and the thread hears `message.updated`."""
+    from chat import events
+    from chat.models import Message
+
+    trainer, client = pair
+    out = tmp_path / "live.webm"
+    with open(out, "wb") as sink:
+        made = subprocess.run([shutil.which('ffmpeg'), '-v', 'error', '-f', 'lavfi', '-i',
+                               'sine=frequency=440:duration=3', '-c:a', 'libopus',
+                               '-f', 'webm', 'pipe:1'],
+                              stdout=sink, stderr=subprocess.PIPE, timeout=60)
+    if made.returncode != 0:
+        pytest.skip(f"this ffmpeg cannot write a live WebM: {made.stderr[-200:]!r}")
+    frames = []
+    monkeypatch.setattr(events, 'broadcast',
+                        lambda conversation_id, kind, payload:
+                        frames.append((kind, payload)))
+
+    with django_capture_on_commit_callbacks(execute=True):
+        sent = _post(api, client, conversation, 'voice',
+                     SimpleUploadedFile("live.webm", out.read_bytes(),
+                                        content_type="audio/webm"))
+        assert sent.status_code == 201, sent.content
+        assert sent.json()['media']['duration_seconds'] is None
+    stored = Message.objects.get(pk=sent.json()['id']).duration_seconds
+    assert stored is not None and abs(stored - 3.0) < 0.1, stored
+    [(_kind, payload)] = [f for f in frames if f[0] == 'message.updated']
+    assert payload['message']['id'] == sent.json()['id']
+    assert payload['message']['media']['duration_seconds'] == stored
+    [row] = api(trainer).get(
+        f"{CHAT}/conversations/{conversation.pk}/messages/").json()['results']
+    assert row['media']['duration_seconds'] == stored
+
+
+def _stored_recording(conversation, sender, *, duration=None, kind='voice'):
+    from django.core.files.base import ContentFile
+
+    from chat.models import Message
+
+    row = Message(conversation=conversation, sender=sender, kind=kind,
+                  duration_seconds=duration)
+    row.attachment.save(f"{kind}.webm", ContentFile(webm_bytes()), save=False)
+    row.save()
+    return row
+
+
+def test_the_length_worker_without_ffprobe_downloads_nothing(pair, conversation,
+                                                             monkeypatch, caplog):
+    """The media kit's rule, kept: with no ffprobe on the worker nothing is written,
+    nothing is downloaded, and the worker says so once — not once per message."""
+    import logging
+
+    from chat.tasks import fill_media_duration
+    from mediakit import tasks as video_tools
+
+    _trainer, client = pair
+    rows = [_stored_recording(conversation, client) for _ in range(2)]
+    monkeypatch.setattr(video_tools.shutil, "which", lambda name: None)
+    monkeypatch.setattr(video_tools, "_MISSING_TOOLS", set())
+    downloads = []
+    monkeypatch.setattr(video_tools, "local_copy_of",
+                        lambda f: downloads.append(f.name) or ("/nonexistent", False))
+    with caplog.at_level(logging.WARNING, logger="mediakit.tasks"):
+        results = [fill_media_duration(row.pk) for row in rows]
+    assert [r['state'] for r in results] == ['unmeasured', 'unmeasured']
+    assert downloads == [], "a recording was downloaded with no ffprobe to read it"
+    said = [r for r in caplog.records if "ffprobe is not installed" in r.getMessage()]
+    assert len(said) == 1, [r.getMessage() for r in caplog.records]
+    for row in rows:
+        row.refresh_from_db()
+        assert row.duration_seconds is None
+
+
+def test_the_length_worker_writes_only_onto_the_row_it_measured(pair, conversation,
+                                                                 monkeypatch):
+    """At-least-once delivery and a message taken back mid-run: a known length is never
+    overwritten, a photo or a missing row is skipped, and a recording its sender took
+    back while it was measured gets no length."""
+    from chat import tasks
+    from chat.services import tombstone
+
+    _trainer, client = pair
+    known = _stored_recording(conversation, client, duration=12.0)
+    assert tasks.fill_media_duration(known.pk)['state'] == 'skipped'
+    assert tasks.fill_media_duration(99999999)['state'] == 'missing'
+    photo = _stored_recording(conversation, client, kind='image')
+    assert tasks.fill_media_duration(photo.pk)['state'] == 'skipped'
+
+    taken_back = _stored_recording(conversation, client)
+
+    def measure_while_taken_back(_source):
+        tombstone(type(taken_back).objects.get(pk=taken_back.pk), client)
+        return 3.0
+
+    monkeypatch.setattr(tasks, "_measured_seconds", measure_while_taken_back)
+    assert tasks.fill_media_duration(taken_back.pk)['state'] == 'superseded'
+    taken_back.refresh_from_db()
+    assert taken_back.duration_seconds is None
+    assert tasks.fill_media_duration(taken_back.pk)['state'] == 'skipped'
+
+    fresh = _stored_recording(conversation, client)
+    monkeypatch.setattr(tasks, "_measured_seconds", lambda _source: 3.25)
+    assert tasks.fill_media_duration(fresh.pk) == {
+        "message": fresh.pk, "duration": 3.25, "state": "ready"}
+    fresh.refresh_from_db()
+    assert fresh.duration_seconds == 3.25
+    known.refresh_from_db()
+    assert known.duration_seconds == 12.0

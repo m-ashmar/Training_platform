@@ -36,8 +36,10 @@ Protocol (JSON, one object per frame):
                                                          is relative to the API host)
       {"type": "message.updated", "message": {...}}      a message already sent now
                                                          reads differently: today, a
-                                                         video's `media.poster_url` was
-                                                         filled by the worker. Replace
+                                                         video's `media.poster_url`, or
+                                                         a voice note's or video's
+                                                         `media.duration_seconds`, was
+                                                         filled by a worker. Replace
                                                          the row you hold by `id`
       {"type": "message.read", "conversation", "reader", "read_at"}
       {"type": "message.deleted", "conversation", "message", "deleted_at"}

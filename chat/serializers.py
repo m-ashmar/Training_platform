@@ -34,7 +34,8 @@ class MessageSerializer(serializers.ModelSerializer):
     `program` (2026-09-27); all three are present on every message:
 
         "media": null | {"url": "<signed, expires within the hour>",
-                         "duration_seconds": 18.4 | null,   voice, video
+                         "duration_seconds": 18.4 | null,   voice, video: declared,
+                                            or measured by a worker after the send
                          "width": 1080 | null, "height": 1350 | null,   image
                          "poster_url": "<signed>" | null},   video, once cut
         "exercise": null | {"id": 12, "name": "Deadlift"}   the move a video shows

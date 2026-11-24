@@ -299,7 +299,10 @@ class HomeView(APIView):
         `media_url()` the thread's `media.url` is, handed only to this client, who is
         one of the two people in the thread — play it, never store it; a later home
         load carries a fresh one. `duration_seconds` is what the recording's container
-        declares, null when it declares nothing readable (a WebM, an Ogg). `body` is the
+        declares (an M4A, an Ogg, a WebM with Info/Duration), or, for one that declares
+        nothing (a WebM recorded live), what a worker measured after the send
+        (BACKEND_BUGS B-177) — null until then, or for good where the worker has no
+        ffprobe: play it with no clock. `body` is the
         caption, often empty. `body` is cut at 200 characters, the same preview the
         conversation list sends. `unread_count` is the same number
         `GET /api/v1/chat/conversations/` reports, by construction.

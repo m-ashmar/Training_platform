@@ -752,10 +752,20 @@ refused here —, `corrupt_image`, `invalid_aspect_ratio` (over 10:1), `unreadab
 `image_too_many_pixels`, and `mime_detection_failed` / `file_validation_error` when the
 guard itself fails), and for a photo `upload_busy` (503, 2026-09-27: every image-decode
 slot of the server is taken — nothing was stored or counted; send it again after
-`Retry-After`). The push quotes the caption, or says "Photo" / "Voice note" /
-"Video" in the recipient's language — never a link. A chat video's poster frame comes
-later, from a worker (above); a WebM or Ogg file declares no duration, so
-`duration_seconds` may be null.
+`Retry-After`). Every refusal is the API's one envelope: a refusal of the exercise or of
+the upload guard (`exercise_only_on_video`, `unknown_exercise`, `media_file_required` and
+the guards' codes) also carries its sentence in `field_errors.non_field_errors` and the
+top-level `non_field_errors` (additive, 2026-11-21, BACKEND_BUGS B-149; it used to be
+`{detail, error, code}` alone) — branch on `code`. The push quotes the caption, or says
+"Photo" / "Voice note" / "Video" in the recipient's language — never a link. A chat
+video's poster frame comes later, from a worker (above). `duration_seconds` is what the
+container declares, read on the request without decoding — an MP4/MOV/M4A's `mvhd`, an
+Ogg's last page, a WebM's Info/Duration — and the 90 s cap holds for each (Ogg and WebM
+since 2026-11-21, BACKEND_BUGS B-177: their length was not read, so only their size was
+capped). A container that declares none (a WebM a browser recorded live) is answered
+with `duration_seconds: null`, measured after the send by a worker with ffprobe
+(`chat.tasks.fill_media_duration`) and announced with `message.updated`; where the
+worker has no ffprobe it stays null.
 
 `refusal` / the send's 403 `code`, in the order they are decided: `no_relation` (never an
 approved pair and never a paid month), `blocked` (either of the two blocked the other —
@@ -777,7 +787,9 @@ local server). Client frames
 `{"type": "message.send", body, client_uuid?}` (or a program card: `kind: "program"`
 and the card's fields, as on REST) and `{"type": "message.read"}`; server frames
 `message.new`, `message.updated` (a message already sent now reads differently —
-today, a video's `poster_url` arrived; replace the row by `id`), `message.read`,
+today, a video's `poster_url` arrived, or a voice note's or video's `duration_seconds`
+was measured; replace the row by `id`; a program card keeps its `program` on it while
+both people may still read its routine, BACKEND_BUGS B-150), `message.read`,
 `message.deleted` and `{"type": "error", code, detail}`. `message.send` is text or a
 program card; a media message sent
 over REST reaches both sockets as `message.new`. A socket send runs the same checks and the same

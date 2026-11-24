@@ -454,6 +454,42 @@ def test_the_socket_sends_a_card_and_carries_a_poster_when_it_lands(
         assert frame['message']['media']['poster_url']
 
 
+def test_an_updated_frame_keeps_its_program_card(api, pair, conversation, monkeypatch):
+    """BACKEND_BUGS B-150: `message.updated` is the message AS IT NOW READS, and a
+    program card reads with its card. The frame was serialized with no reader, so
+    `program` was always null on it, and the app replaced the row with a card drawn
+    «لم يعد متاحاً» until the next read. One frame serves both people in the thread, so
+    the card rides along while BOTH may read its routine — and not once the client was
+    taken off it, exactly as the client's own read of the thread answers."""
+    from chat import events, tasks
+
+    trainer, client = pair
+    routine = _program(trainer, client)
+    card = _card(api, trainer, conversation, routine_id=routine.pk, day=2)
+    assert card.status_code == 201, card.content
+    frames = []
+    monkeypatch.setattr(events, 'broadcast',
+                        lambda conversation_id, kind, payload:
+                        frames.append((conversation_id, kind, payload)))
+
+    tasks._announce_poster(card.json()['id'])
+    [(conversation_id, kind, payload)] = frames
+    assert (conversation_id, kind) == (conversation.pk, 'message.updated')
+    program = payload['message']['program']
+    assert program is not None, "message.updated dropped the program card"
+    assert (program['routine_id'], program['day'], program['day_name']) == (
+        routine.pk, 2, "دفع")
+
+    routine.assigned_to.remove(client)
+    frames.clear()
+    tasks._announce_poster(card.json()['id'])
+    [(_conversation_id, _kind, payload)] = frames
+    assert payload['message']['program'] is None, \
+        "the frame showed the client a routine they may no longer read"
+    [row] = _history(api, client, conversation)
+    assert row['program'] is None
+
+
 # =========================================================================== POSTERS
 def _jpeg_bytes(w=64, h=48):
     buffer = io.BytesIO()

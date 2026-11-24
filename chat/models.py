@@ -182,8 +182,12 @@ class Message(models.Model):
     #: on a text message. Private: served only through `media_url()`, signed.
     attachment = models.FileField(upload_to=_attachment_upload_to, max_length=255,
                                   blank=True)
-    #: Voice and video: what the container declares, read without decoding. Null when
-    #: it declares nothing readable (a WebM, an Ogg) — never a number the client sent.
+    #: Voice and video: what the container declares, read without decoding (an
+    #: M4A/MP4's `mvhd`, an Ogg's last page, a WebM's Info/Duration); for a container
+    #: that declares nothing (a WebM recorded live), what a worker measured with
+    #: ffprobe after the send (`chat.tasks.fill_media_duration`, BACKEND_BUGS B-177).
+    #: Null until then, or for good where the worker has no ffprobe — never a number
+    #: the client sent.
     duration_seconds = models.FloatField(null=True, blank=True)
     #: A photo's pixel size, so the app can lay the bubble out before it loads.
     width = models.PositiveIntegerField(null=True, blank=True)
