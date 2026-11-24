@@ -780,7 +780,7 @@ class AssignClientView(APIView):
     | `403` | `user_blocked` | one of you blocked the other |
     | `404` | `not_found` | no such client |
     | `409` | `request_already_pending` | the same, found by the database as two invitations crossed |
-    | `429` | `too_many_invitations` | 25 invitations are already waiting for an answer |
+    | `429` | `too_many_invitations` | 25 invitations are already waiting for an answer; one to a client in a block with you (either of you blocked the other) does not count, since nobody can answer it (SIDE_BUGS S-201) |
 
     Every refusal but `user_blocked` and `too_many_invitations` answered only its
     status default before (the owner, 2026-09-24: every refusal names its own code).
@@ -816,8 +816,15 @@ class AssignClientView(APIView):
             # person, not a query, so a working trainer needs a handful and a scraper
             # needs thousands.
             OUTSTANDING_INVITE_LIMIT = 25
-            outstanding = TrainerClientRelation.objects.filter(
-                trainer=request.user, status='pending', initiated_by='trainer').count()
+            # An invitation nobody can answer does not count: one to a client who
+            # blocked this trainer, or whom the trainer blocked, is hidden from the
+            # client while the block stands (SIDE_BUGS S-201, the fix run's ACC-1; the
+            # client's side was fixed by ca234f8). It filled the 25 for good.
+            outstanding = (TrainerClientRelation.objects
+                           .filter(trainer=request.user, status='pending',
+                                   initiated_by='trainer')
+                           .exclude(client_id__in=blocked_ids(request.user))
+                           .count())
             if outstanding >= OUTSTANDING_INVITE_LIMIT:
                 return Response(
                     {'error': _('You have too many invitations awaiting a reply. '
