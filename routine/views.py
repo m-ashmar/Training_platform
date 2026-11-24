@@ -3924,6 +3924,13 @@ class AnalyticsViewSet(viewsets.ViewSet):
         week or month) in both lists, and both are bucketed by the day the training
         happened. `completion_trend` was bucketed by when its row was last written and
         answered a datetime (SIDE_BUGS S-123).
+
+        `completed` counts the days whose progress is `completed`: every set done, or the
+        person closed the day as done ("complete", "complete anyway" after the
+        unlogged-sets warning, "log the whole day"; `PERSON_CLOSED_VIAS`). A workout
+        FINISHED with nothing logged is not one — it closes the day short and nobody said
+        the work was done — so it is not counted (the fix run's trend row, kept on
+        purpose). The streak is stricter still: a day with sets missed never counts there.
         """
         from .models import ExerciseSetLog, RoutineProgress
         from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
