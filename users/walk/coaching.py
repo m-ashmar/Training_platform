@@ -47,13 +47,59 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from functools import partial
 
 from django.utils import timezone
 
 from . import state
-from .framework import WalkRefused, on_retire
+from .framework import WalkRefused, agent_cash_gaps, needs, on_retire
 from .shared import coach_client, plan_for, starter_exercise, top_up
 from .wallet import COACH_RATE, agent, call, coach, funded_client, key, money_of
+
+# ------------------------------------------------------------------ what the states move
+#: What a walk client is handed beyond what they pay: a little, never a second month.
+SPARE = Decimal("5000")
+
+#: The cash each state's client is handed at the state's ONE new agent, on one day,
+#: beside the price of the plan it buys where it buys one (`PLAN`). Read by each state
+#: AND by its `@needs` (`_cash_gaps`), so the check before anything is written cannot
+#: drift from what the state tops up. In a new wallet's currency.
+CASH = {
+    "coaching_frozen": COACH_RATE + SPARE,           # + the plan: one month, not a second
+    "coaching_renews_soon": COACH_RATE * 2 + SPARE,  # the next month covered
+    "coaching_stops_soon": COACH_RATE * 2 + SPARE,
+    "plan_lapsed": Decimal("0"),
+    "plan_not_renewing": Decimal("0"),
+    "plan_renewal_due": Decimal("0"),
+    "client_request_waiting": COACH_RATE + SPARE,
+    "client_awaiting_first_program": COACH_RATE + SPARE,
+    "client_invited_by_coach": COACH_RATE + SPARE,
+    "client_wallet_covers_plan": Decimal("0"),        # the plan's price exactly
+}
+
+#: The states that buy (or price) a plan, and whether it has the diet: `plan_for` in the
+#: state, `shared.choose_plan` (the same choice, for a new client) in the check.
+PLAN = {"coaching_frozen": True, "plan_lapsed": True, "plan_not_renewing": False,
+        "plan_renewal_due": False, "client_wallet_covers_plan": False}
+
+
+def _cash_gaps(name):
+    """One new agent takes the state's `CASH`, and the price of its plan, in a day and
+    holds it unsettled. With no plan on sale for it, the framework's own plan need names
+    that gap, so none is added here."""
+    from .shared import choose_plan, new_wallet_currency
+
+    total = CASH[name]
+    if name in PLAN:
+        plan = choose_plan(new_wallet_currency(), diet=PLAN[name])
+        if plan is None:
+            return []
+        total += plan.price
+    return agent_cash_gaps(name, in_a_day=total)
+
+
+for _name in CASH:
+    needs(_name)(partial(_cash_gaps, _name))
 
 
 # ------------------------------------------------------------------ on a reset
@@ -185,13 +231,13 @@ def plan_ends_at(subscription, when):
         start_date=subscription.start_date - shift, end_date=subscription.end_date - shift)
 
 
-def subscribed_client(walk, *, diet=False, extra=Decimal("0")):
-    """A client (main account) who bought the cheapest plan on sale in their own
-    currency (`shared.plan_for`) from a wallet an agent topped up with its price (and
-    `extra` more)."""
+def subscribed_client(walk, name):
+    """A client (main account) of state `name` who bought the cheapest plan on sale in
+    their own currency (`shared.plan_for`, with the diet as `PLAN` says) from a wallet an
+    agent topped up with its price and the state's `CASH`."""
     client = walk.account(role="client")
-    plan = plan_for(client, diet=diet)
-    top_up(walk, agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
+    plan = plan_for(client, diet=PLAN[name])
+    top_up(walk, agent(walk), client, plan_price(plan, client).amount + CASH[name])
     return client, buy_plan(walk, client, plan)
 
 
@@ -219,9 +265,10 @@ def coach_diet_plan(trainer, client):
 def coaching_frozen(walk):
     trainer = coach(walk)
     client = walk.account(role="client")
-    plan = plan_for(client, diet=True)
+    plan = plan_for(client, diet=PLAN["coaching_frozen"])
     # The plan's price and one month of coaching, and a little: not a second month.
-    top_up(walk, agent(walk), client, plan_price(plan, client).amount + COACH_RATE + 5000)
+    top_up(walk, agent(walk), client,
+           plan_price(plan, client).amount + CASH["coaching_frozen"])
     subscription = buy_plan(walk, client, plan)
     relation = coach_client(walk, client, trainer)
     routine = first_programme(walk, trainer, client)
@@ -244,7 +291,7 @@ def coaching_frozen(walk):
        summary="A paid coaching month ending in under 3 days; the wallet covers the "
                "next one and the renewal reminder has gone out.")
 def coaching_renews_soon(walk):
-    trainer, client, relation, routine = coached(walk, funds=COACH_RATE * 2 + 5000)
+    trainer, client, relation, routine = coached(walk, funds=CASH["coaching_renews_soon"])
     month_ends_at(relation, timezone.now() + timedelta(days=2, hours=20))
     remind_now(relation)
     walk.ids(trainer=trainer.pk, relation=relation.pk, routine=routine.pk)
@@ -254,7 +301,7 @@ def coaching_renews_soon(walk):
        summary="A paid coaching month ending in under 3 days that the client asked not "
                "to renew (stop_renewal on); the ending reminder has gone out.")
 def coaching_stops_soon(walk):
-    trainer, client, relation, routine = coached(walk, funds=COACH_RATE * 2 + 5000)
+    trainer, client, relation, routine = coached(walk, funds=CASH["coaching_stops_soon"])
     call(walk, client, "post", "/api/v1/coaching/renewal/", {"renew": False})
     month_ends_at(relation, timezone.now() + timedelta(days=2, hours=20))
     remind_now(relation)
@@ -266,7 +313,7 @@ def coaching_stops_soon(walk):
        summary="A plan paid from the wallet whose cover ended: frozen (the diet plans "
                "readable, nothing usable) and asked to re-subscribe.")
 def plan_lapsed(walk):
-    client, subscription = subscribed_client(walk, diet=True)
+    client, subscription = subscribed_client(walk, "plan_lapsed")
     plan_ends_at(subscription, timezone.now() - timedelta(days=1, hours=2))
     lapse_now(subscription)
     plan_reminders_now(subscription)
@@ -276,7 +323,7 @@ def plan_lapsed(walk):
 @state("plan_not_renewing", area="coaching", role="client",
        summary="An active plan the client turned off renewing: it runs to its end date.")
 def plan_not_renewing(walk):
-    client, subscription = subscribed_client(walk)
+    client, subscription = subscribed_client(walk, "plan_not_renewing")
     call(walk, client, "post",
          f"/api/subscription/v1/subscriptions/{subscription.pk}/cancel/", {})
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
@@ -285,7 +332,7 @@ def plan_not_renewing(walk):
 @state("plan_renewal_due", area="coaching", role="client",
        summary="An active plan ending within 3 days: renewal_due, and the reminder sent.")
 def plan_renewal_due(walk):
-    client, subscription = subscribed_client(walk)
+    client, subscription = subscribed_client(walk, "plan_renewal_due")
     plan_ends_at(subscription, timezone.now() + timedelta(days=2, hours=12))
     plan_reminders_now(subscription)
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
@@ -297,7 +344,7 @@ def plan_renewal_due(walk):
                "(the quote shown; the fee is held only once the trainer accepts).")
 def client_request_waiting(walk):
     trainer = coach(walk)
-    client = funded_client(walk, amount=COACH_RATE + 5000)
+    client = funded_client(walk, amount=CASH["client_request_waiting"])
     relation = ask_for(walk, client, trainer)
     walk.ids(trainer=trainer.pk, request=relation.pk)
 
@@ -306,8 +353,8 @@ def client_request_waiting(walk):
        summary="A client the trainer accepted: month 1 held, the first programme not "
                "sent yet.")
 def client_awaiting_first_program(walk):
-    trainer, client, relation, _routine = coached(walk, funds=COACH_RATE + 5000,
-                                                  deliver=False)
+    trainer, client, relation, _routine = coached(
+        walk, funds=CASH["client_awaiting_first_program"], deliver=False)
     walk.ids(trainer=trainer.pk, relation=relation.pk)
 
 
@@ -317,7 +364,7 @@ def client_invited_by_coach(walk):
     from users.models import TrainerClientRelation
 
     trainer = coach(walk)
-    client = funded_client(walk, amount=COACH_RATE + 5000)
+    client = funded_client(walk, amount=CASH["client_invited_by_coach"])
     call(walk, trainer, "post", "/api/auth/trainer/assign-client/",
          {"client_id": client.pk, "message": "أهلاً! أنا مدرّبك المقترح لبرنامج القوة."})
     relation = TrainerClientRelation.objects.get(trainer=trainer, client=client)
@@ -330,6 +377,7 @@ def client_invited_by_coach(walk):
                "currency exactly.")
 def client_wallet_covers_plan(walk):
     client = walk.account(role="client")
-    plan = plan_for(client)
-    top_up(walk, agent(walk), client, plan_price(plan, client).amount)
+    plan = plan_for(client, diet=PLAN["client_wallet_covers_plan"])
+    top_up(walk, agent(walk), client,
+           plan_price(plan, client).amount + CASH["client_wallet_covers_plan"])
     walk.ids(plan=plan.pk)
