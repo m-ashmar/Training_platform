@@ -113,7 +113,10 @@ class PasswordChangeView(APIView):
     socket of the account closes (4001, after an `auth` error frame). This device gets a
     fresh pair — store BOTH and use them from now on; the old pair no longer works.
     Failed sign-in counts are cleared. (`users/utils.py end_every_session`,
-    `training_platform/jwt_sessions.py`.)
+    `training_platform/jwt_sessions.py`.) The person is emailed "your password was
+    changed; if this wasn't you, reset it and contact support", in their saved language,
+    with no link, whatever their notification preferences say
+    (`notifications/channels/email.py queue_password_changed`; the owner, 2026-11-24).
 
     | status | `code` | when |
     |---|---|---|
@@ -168,12 +171,16 @@ class PasswordChangeView(APIView):
 
         from .utils import clear_login_attempts, end_every_session
 
+        from notifications.channels.email import queue_password_changed
+
         with transaction.atomic():
             user.set_password(new)
             user.save(update_fields=['password'])
             # Every session ends: the same revocation the reset and the console's
             # password reset make (`users/utils.py end_every_session`).
             end_every_session(user)
+            # And the person is told by email, after the commit (the owner, 2026-11-24).
+            queue_password_changed(user, "change")
         clear_login_attempts(user.email)
         fresh = RefreshToken.for_user(user)
         logger.info("Password changed for user %s; other sessions ended", user.pk)

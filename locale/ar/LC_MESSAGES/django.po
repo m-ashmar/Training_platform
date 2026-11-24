@@ -6278,3 +6278,43 @@ msgstr "الحساب غير مفعّل"
 #: training_platform/jwt_sessions.py
 msgid "Your password was changed. Sign in again."
 msgstr "تم تغيير كلمة المرور. سجّل الدخول من جديد."
+
+#: notifications/channels/email.py
+msgid "Your password was changed"
+msgstr "تم تغيير كلمة المرور"
+
+#: notifications/channels/email.py
+#, python-format
+msgid "The password of your %(brand)s account was changed."
+msgstr "تم تغيير كلمة المرور لحسابك في %(brand)s."
+
+#: notifications/channels/email.py
+#, python-format
+msgid ""
+"If this wasn't you, reset your password now with \"Forgot password\" on the "
+"app's sign-in screen, and contact support at %(support)s."
+msgstr ""
+"إن لم تكن أنت من غيّرها، فأعد تعيين كلمة المرور الآن من «نسيت كلمة المرور» في "
+"شاشة تسجيل الدخول في التطبيق، وتواصل مع الدعم على %(support)s."
+
+#: notifications/channels/email.py
+msgid ""
+"If it was you, there is nothing to do. Your other devices were signed out."
+msgstr "إن كنت أنت، فلا داعي لأي إجراء. تم تسجيل خروج أجهزتك الأخرى."
+
+#: notifications/channels/email.py
+msgid "When"
+msgstr "الوقت"
+
+#: notifications/channels/email.py
+msgid "How"
+msgstr "الطريقة"
+
+#: notifications/channels/email.py
+msgid "With a code sent to this address"
+msgstr "برمز أُرسل إلى هذا العنوان"
+
+#: notifications/channels/email.py
+msgid "In the app, while signed in"
+msgstr "من التطبيق، أثناء تسجيل الدخول"
+

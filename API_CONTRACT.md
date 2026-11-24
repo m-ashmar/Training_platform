@@ -1107,6 +1107,7 @@ anything to buy, on any build:
 | `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
 | `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
 | `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
+| none — a security notice, never switched off | `password_changed` (the owner, 2026-11-24): "your password was changed; if this wasn't you, reset it with Forgot password and contact support" (the support address as text), when and how (signed in, or with an emailed code). On a change while signed in (`POST auth/password/change/`) and on a forgot-password reset (`POST auth/forgot-password/confirm/`); not on an operator's reset. No inbox row and no push. Like the account emails (the sign-up and reset codes), no preference stops it, and it is not among `email_event_types` |
 
 Preferences govern the email as they govern the push: `channels.email: false` on a type's
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the

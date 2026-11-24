@@ -3090,7 +3090,9 @@ class PasswordResetConfirmView(APIView):
     blacklisted, and every access token made under the old password answers 401
     `password_changed` from then on, an open socket closed with it
     (`users/utils.py end_every_session`; the owner, 2026-11-24). Nothing is signed in:
-    the person signs in with the new password. The new password answers the same validator codes as sign-up on
+    the person signs in with the new password. The person is emailed "your password was
+    changed" (`notifications/channels/email.py queue_password_changed`; the owner,
+    2026-11-24), as on a change while signed in. The new password answers the same validator codes as sign-up on
     `field_errors.new_password` (`password_too_short`, `password_too_common`,
     `password_entirely_numeric`; BACKEND_BUGS B-034).
 
@@ -3152,6 +3154,9 @@ class PasswordResetConfirmView(APIView):
         # made under the old password are refused from the commit on.
         from .utils import end_every_session
         end_every_session(user)
+        # And the person is told by email, after the commit (the owner, 2026-11-24).
+        from notifications.channels.email import queue_password_changed
+        queue_password_changed(user, "reset")
 
         # The person just proved they own the address: the failures that locked them out
         # are forgiven, or they were locked out again right after resetting (B-017).

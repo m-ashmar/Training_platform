@@ -41,6 +41,12 @@ Not a gate, and just as silent: **a new app with a `FileField` must be added to
 replaced row leaves its file in storage for ever — account erasure included. Nothing
 fails; the bytes simply stay (found building `trainer_verification`, 2026-09-24).
 
+**A token minted from a stale user object is refused** (2026-11-24). Every token
+carries a digest of the password hash it was made under, and a token made under another
+one answers 401 `password_changed` (`training_platform/jwt_sessions.py`). After a
+password change or reset made THROUGH THE API, the test's `user` object still holds the
+old hash, so `api(user)` mints a dead token: `user.refresh_from_db()` first.
+
 Two more that fail silently (found building `payouts`, 2026-09-24):
 
 - **`Wallet.owner_type` is not the owner's role.** It is written once, when the wallet is

@@ -10,6 +10,10 @@ The payments spec, section 7, lists an email for five events, and only for these
   | Plan expired                            | yes, once for each cover that ends      |
   | Withdrawal requested, paid, failed      | yes                                     |
 
+And one notice the spec does not list, the owner's of 2026-11-24: "your password was
+changed" (`password_changed`, `queue_password_changed`), on a change while signed in and
+on a forgot-password reset.
+
 Two ways in:
 
 * An inbox notification whose `event_type` is in `NOTIFICATION_EMAILS`
@@ -46,7 +50,9 @@ sign-up code) and has not been erased. And only when the person's notification
 preferences let email through for that kind (`UserNotificationPreference.
 is_channel_enabled(..., 'email')`: the `all` row, then the type's own row; `is_enabled:
 false` stops push and email, `channels.email: false` stops email only). Both are asked
-when the email is queued AND again when it is sent.
+when the email is queued AND again when it is sent. A security notice
+(`password_changed`) has no preference and is never stopped by one, like the account
+emails (the sign-up and reset codes, `users/tasks.py`): its kind's `preference` is None.
 
 What an email may say
 ---------------------
@@ -101,12 +107,12 @@ class TransientEmailFailure(Exception):
 
 
 # --------------------------------------------------------------------- who gets one
-def refusal(user, preference: str) -> str | None:
+def refusal(user, preference: str | None) -> str | None:
     """Why `user` must not be emailed about `preference`, or None when they may be.
 
     `inactive` (suspended or erased), `unverified` (the address was never confirmed by
     the sign-up code), `no_address`, `muted` (their notification preferences stop email
-    for this type).
+    for this type; never for a `preference` of None, a security notice).
     """
     from notifications.models import UserNotificationPreference
 
@@ -117,7 +123,8 @@ def refusal(user, preference: str) -> str | None:
     address = (user.email or "").strip()
     if not address or address.lower().endswith(ERASED_DOMAIN):
         return "no_address"
-    if not UserNotificationPreference.is_channel_enabled(user, preference, "email"):
+    if preference is not None and not UserNotificationPreference.is_channel_enabled(
+            user, preference, "email"):
         return "muted"
     return None
 
@@ -126,21 +133,25 @@ def refusal(user, preference: str) -> str | None:
 @dataclass
 class Composed:
     """One email, in the active language: a title (the subject, and the heading), the
-    paragraphs, the facts as label/value rows, and the attachments."""
+    paragraphs, the facts as label/value rows, and the attachments. `settable` is False
+    for a notice no preference can stop (`password_changed`): its footer does not offer
+    the notification settings."""
     title: str
     paragraphs: list[str]
     rows: list[tuple[str, str]] = field(default_factory=list)
     attachments: list[tuple[str, bytes, str]] = field(default_factory=list)
+    settable: bool = True
 
 
 @dataclass(frozen=True)
 class EmailKind:
     """`name` is `EmailDelivery.kind`. `preference` is the `event_type` whose
-    notification preferences govern it. `compose(delivery)` writes it in the active
+    notification preferences govern it, or None for a security notice nothing can turn
+    off (`password_changed`). `compose(delivery)` writes it in the active
     language, or returns None when it is no longer true (the payment was refunded, the
     plan was renewed): nothing is sent then."""
     name: str
-    preference: str
+    preference: str | None
     compose: Callable
 
 
@@ -155,6 +166,19 @@ def _local_date(user, moment) -> str:
     except (ZoneInfoNotFoundError, ValueError):
         zone = ZoneInfo("UTC")
     return timezone.localtime(moment, zone).strftime("%Y-%m-%d")
+
+
+def _local_time(user, moment) -> str:
+    """`moment` as the recipient's local date and time to the minute, in digits."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if moment is None:
+        return ""
+    try:
+        zone = ZoneInfo(getattr(user, "preferred_timezone", "") or settings.TIME_ZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("UTC")
+    return timezone.localtime(moment, zone).strftime("%Y-%m-%d %H:%M")
 
 
 def _moment(value):
@@ -265,6 +289,31 @@ def _withdrawal_composer(event_type: str):
     return compose
 
 
+def _compose_password_changed(delivery) -> Composed | None:
+    """Your password was changed; if this wasn't you, reset it and contact support (the
+    owner, 2026-11-24). No link at all — not to the app, not to a reset page: a link in
+    a security notice is what a phishing copy of it would carry. The support address
+    is written out as text."""
+    from users.utils import _brand
+
+    how = delivery.context.get("how")
+    return Composed(
+        title=_("Your password was changed"),
+        paragraphs=[
+            _("The password of your %(brand)s account was changed.") % {"brand": _brand()},
+            _("If this wasn't you, reset your password now with \"Forgot password\" on the "
+              "app's sign-in screen, and contact support at %(support)s.")
+            % {"support": settings.SUPPORT_EMAIL},
+            _("If it was you, there is nothing to do. Your other devices were signed out."),
+        ],
+        rows=[(_("When"), _local_time(delivery.recipient,
+                                       _moment(delivery.context.get("at")))),
+              (_("How"), _("With a code sent to this address") if how == "reset"
+               else _("In the app, while signed in"))],
+        settable=False,
+    )
+
+
 #: Every email this channel can send. The `preference` of the receipt is
 #: `payment_confirmed`, the spec's name for the event: until a push of that type exists,
 #: only the `all` preference row reaches it.
@@ -277,12 +326,15 @@ KINDS = {kind.name: kind for kind in (
     EmailKind("withdrawal_paid", "withdrawal_paid", _withdrawal_composer("withdrawal_paid")),
     EmailKind("withdrawal_failed", "withdrawal_failed",
               _withdrawal_composer("withdrawal_failed")),
+    # A security notice: no preference governs it (`refusal`).
+    EmailKind("password_changed", None, _compose_password_changed),
 )}
 
 
 def email_preference_types() -> list[str]:
     """The `event_type`s a preference can set `channels.email` on to any effect."""
-    return sorted({kind.preference for kind in KINDS.values()})
+    return sorted({kind.preference for kind in KINDS.values()
+                   if kind.preference is not None})
 
 
 # -------------------------------------------------------------- the inbox's emails
@@ -396,6 +448,26 @@ def queue_receipt(payment):
         return None
 
 
+def queue_password_changed(user, how: str):
+    """Owe `user` the "your password was changed" email (the owner, 2026-11-24), once
+    for this password. `how` is `change` (signed in, `users/password_views.py`) or
+    `reset` (the forgot-password reset, `users/views.py PasswordResetConfirmView`). Call
+    it in the transaction that sets the password: the worker sends it after the commit.
+    Keyed on the new password hash's digest, so each change is its own notice and a
+    replay of the same one is not. NEVER raises: the change stands whatever the email
+    does. Returns the `EmailDelivery`, or None."""
+    from training_platform.jwt_sessions import password_digest
+
+    try:
+        return queue(user, "password_changed",
+                     key=f"password_changed:{password_digest(user.password)}",
+                     context={"at": timezone.now().isoformat(), "how": how})
+    except Exception:
+        logger.exception("The password-changed email for user %s could not be queued",
+                         getattr(user, "pk", None))
+        return None
+
+
 def publish(delivery_id) -> bool:
     """Hand one queued email to the worker. Never raises: a message that could not be
     published leaves its row `queued` for `sweep_unsent_emails`."""
@@ -504,9 +576,9 @@ def render(recipient, composed: Composed):
     name = (recipient.first_name or "").strip()
     # The punctuation is the language's own: "Hello Sara," / "مرحبًا سارة،".
     greeting = (_("Hello %(name)s,") % {"name": name}) if name else _("Hello,")
-    footer = [_("You can choose which emails you receive in the app's notification "
-                "settings."),
-              _("This is an automated message. Please do not reply to this email.")]
+    footer = ([_("You can choose which emails you receive in the app's notification "
+                 "settings.")] if composed.settable else [])
+    footer.append(_("This is an automated message. Please do not reply to this email."))
 
     text = [greeting, "", composed.title, ""]
     for paragraph in composed.paragraphs:
