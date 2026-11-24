@@ -19,7 +19,10 @@ PASSWORD = "Walk-Throughs-2026!"
 
 @pytest.fixture
 def walk_env(monkeypatch, tmp_path):
+    """The password, a manifest path, and a database `bootstrap_platform` prepared (the
+    states need its exercises, templates and badges)."""
     monkeypatch.setenv("WALK_ACCOUNTS_PASSWORD", PASSWORD)
+    call_command("bootstrap_platform", "--skip-food-catalogue", stdout=io.StringIO())
     return tmp_path / "walk_states.json"
 
 
@@ -41,9 +44,22 @@ def probe_state():
     STATES.pop("framework_probe", None)
 
 
+_capture = None
+
+
+@pytest.fixture(autouse=True)
+def _commits(django_capture_on_commit_callbacks):
+    """Every run's after-commit work (recounts, notices) runs, as it does outside a test."""
+    global _capture
+    _capture = django_capture_on_commit_callbacks
+    yield
+    _capture = None
+
+
 def _run(manifest, *args):
     out = io.StringIO()
-    call_command("seed_walk_states", "--manifest", str(manifest), *args, stdout=out)
+    with _capture(execute=True):
+        call_command("seed_walk_states", "--manifest", str(manifest), *args, stdout=out)
     return json.loads(manifest.read_text(encoding="utf-8")), out.getvalue()
 
 
@@ -88,6 +104,15 @@ def test_a_second_run_gives_the_same_starting_state(walk_env):
     fresh = CustomUser.objects.get(pk=again["ids"]["user"])
     assert fresh.email == entry["email"]
     assert _shape(fresh) == shape
+
+    # Every state comes back with the same shape: the same ids recorded, the same
+    # accounts, all of them fresh.
+    for name, was in first["states"].items():
+        now = second["states"][name]
+        assert set(now["ids"]) == set(was["ids"]), name
+        assert set(now["accounts"]) == set(was["accounts"]), name
+        assert not {a["id"] for a in now["accounts"].values()} & \
+            {a["id"] for a in was["accounts"].values()}, name
 
     # The old account is retired, not deleted: off its address, switched off, and
     # everything it wrote still there.
@@ -147,3 +172,16 @@ def test_the_manifest_matches_the_database_and_holds_no_secret(walk_env, probe_s
             assert (user.email, user.user_type, user.is_active) == (account["email"],
                                                                     account["role"], True)
             assert user.email.startswith("walk.") and user.email.endswith("@yalla.test")
+
+
+def test_nothing_but_the_command_knows_the_walk_accounts():
+    """Rule zero: a walk account is served what any account is. No source outside the
+    command and `users/walk/` imports the walk package or names its address prefix."""
+    from tests.test_bootstrap_commands import _first_party_sources
+
+    allowed = ("users/walk/", "users/management/commands/seed_walk_states.py")
+    readers = sorted(str(rel) for rel, text in _first_party_sources()
+                     if ("users.walk" in text or "@yalla.test" in text
+                         or "walk_states" in text)
+                     and not str(rel).startswith(allowed))
+    assert readers == []

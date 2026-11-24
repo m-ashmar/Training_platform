@@ -18,6 +18,12 @@ the same file:
     users/walk/wallet.py     wallet and agents
     users/walk/community.py  community
     users/walk/inbox.py      inbox
+    users/walk/operator.py   the operator's pages
+    users/walk/progress.py   progress, badges and body measurements
+
+`users/walk/shared.py` holds what several areas use (a coaching made through the request
+and its answer). `walk.api(user, method, path, data)` calls a real route as an account,
+with the build declared, for what has no service function.
 
 **Adding one.** In the area's module::
 
@@ -54,6 +60,8 @@ AREAS = {
     "wallet": "wallet and agents",
     "community": "community",
     "inbox": "inbox",
+    "operator": "the operator's pages",
+    "progress": "progress, badges and body measurements",
 }
 
 ROLES = ("client", "trainer", "agent", "admin")

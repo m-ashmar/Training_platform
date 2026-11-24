@@ -50,6 +50,11 @@ class WalkRefused(Exception):
     """The command must not run; the message says why."""
 
 
+class WalkApiRefused(Exception):
+    """A route a state called answered what the state did not expect: the state's
+    transaction is rolled back and the command says which route answered what."""
+
+
 # ------------------------------------------------------------------ the guards
 def refuse_unless_development(settings) -> None:
     """Only under the development settings: never production, never anything else."""
@@ -181,6 +186,58 @@ class Walk:
         user.save()
         self.accounts[key] = {"email": user.email, "role": role, "id": user.pk}
         return user
+
+    # The real routes, for what has no service function ------------------------
+    def api(self, user, method: str, path: str, data=None, *, build: str = "apk",
+            version: str = "1.0.0", expect=(200, 201)):
+        """Call a REAL route as `user`, with the build declared, and answer
+        `(status, body)`.
+
+        For what the platform does through a route and no service function — a
+        challenge made or joined, a post, a report, a measurement, a goal, a set synced
+        the way the phone syncs it. The URL is resolved and its view called with a
+        request authenticated as `user` (no token is minted; the middleware stack is
+        not run). A status outside `expect` raises `WalkApiRefused` with the body, so a
+        state never builds on a refusal it did not mean."""
+        from django.urls import resolve
+        from rest_framework.test import APIRequestFactory, force_authenticate
+
+        factory = APIRequestFactory()
+        headers = {"HTTP_X_APP_CHANNEL": build, "HTTP_X_APP_VERSION": version,
+                   "HTTP_ACCEPT_LANGUAGE": "ar"}
+        maker = getattr(factory, method.lower())
+        if method.lower() == "get":
+            request = maker(path, data or {}, **headers)
+        else:
+            request = maker(path, data or {}, format="json", **headers)
+        force_authenticate(request, user=user)
+        match = resolve(path.split("?")[0])
+        response = match.func(request, *match.args, **match.kwargs)
+        if hasattr(response, "render"):
+            response.render()
+        body = json.loads(response.content) if response.content else None
+        if response.status_code not in expect:
+            raise WalkApiRefused(f"{method.upper()} {path} as {user.email} answered "
+                                 f"{response.status_code}: {body}")
+        return response.status_code, body
+
+    def require_bootstrap(self) -> None:
+        """Refuse a state on a database `bootstrap_platform` has not prepared: the
+        starter exercises, the platform's templates and the badges."""
+        from achievements.models import Achievement
+        from routine.models import Exercise, RoutineTemplate
+
+        gaps = []
+        if not Exercise.objects.filter(is_global=True, is_active=True).exclude(
+                catalogue_key__isnull=True).exclude(catalogue_key="").exists():
+            gaps.append("the starter exercises")
+        if not RoutineTemplate.objects.exclude(platform_key__isnull=True).exists():
+            gaps.append("the platform's templates")
+        if not Achievement.objects.exists():
+            gaps.append("the badges")
+        if gaps:
+            raise WalkRefused(f"this database lacks {', '.join(gaps)}: run "
+                              f"`manage.py bootstrap_platform` first.")
 
     # What the walk scripts read ---------------------------------------------
     def ids(self, **ids) -> None:
