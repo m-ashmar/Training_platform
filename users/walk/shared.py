@@ -23,7 +23,6 @@ def starter_exercise(walk, offset: int = 0):
     """A global catalogue exercise (`bootstrap_platform`), the `offset`-th by id."""
     from routine.models import Exercise
 
-    walk.require_bootstrap()
     return (Exercise.objects.filter(is_global=True, is_active=True)
             .exclude(catalogue_key__isnull=True).exclude(catalogue_key="")
             .order_by("id")[offset])

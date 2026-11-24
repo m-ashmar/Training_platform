@@ -41,6 +41,28 @@ The name is the state's id in the manifest and in its addresses: lower case, dig
 `_` only. Every account a state makes is a `walk.<state>…@yalla.test` account, and those
 are the only accounts the command ever touches.
 
+**Platform data is assumed, never made.** The command refuses ONCE, before any state, on
+a database `bootstrap_platform` has not prepared (`framework.bootstrap_gaps`). A state
+never creates "if missing" a sellable plan, a catalogue exercise, a food or a template:
+it uses what bootstrap wrote, and a dev database gets nothing else from it.
+
+**An upload goes through the real route** (`walk.api(...)` with a file, e.g. a trainer's
+verification documents), never a file written by hand.
+
+**Testing a state.** One test per state, in your area's test file, through the API the
+screen reads, with the SHARED fixtures (`tests/walk_fixtures.py`)::
+
+    from tests.walk_fixtures import walk_platform, walk_run  # noqa: F401
+
+    def test_client_waiting_for_coach(walk_run, api):
+        entry = walk_run("client_waiting_for_coach")   # its manifest entry
+        ...
+
+`walk_platform` gives the test's database what a dev server has after bootstrap_platform
+(the real command, inside the test's transaction; the session's food catalogue) and puts
+`MEDIA_ROOT` and `PRIVATE_MEDIA_ROOT` in the test's `tmp_path`, so an upload never lands
+in the project's real media folders.
+
 **Nothing reads these accounts but the command.** Rule zero: the server serves a walk
 account exactly what it serves any account. There is no flag, group or column that marks
 one, and nothing at request time may look at the address.

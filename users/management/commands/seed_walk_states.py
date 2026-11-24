@@ -19,7 +19,11 @@ manifest. The manifest is updated after each state, so it always matches the dat
 **What it refuses.** Any settings but the development ones (`settings_local`):
 production never runs it. A missing or weak `WALK_ACCOUNTS_PASSWORD`: the password is
 taken from the environment only, and is never printed or written anywhere, the manifest
-included. An unknown `--only` state.
+included. An unknown `--only` state. A database `bootstrap_platform` has not prepared
+(`users/walk/framework.py bootstrap_gaps`: the channel capabilities, quota features, a
+plan on sale, the diet templates, the badges, the starter exercises, the platform's
+templates, the food catalogue), with ONE message naming what is missing: the states use
+that data and never create it.
 
 **What it never touches.** Any account whose address is not `walk.*@yalla.test` — the
 app builders' own accounts (`yalla_gym/app/tool/seed_local_backend.py`: rami@, samer@,
@@ -83,6 +87,9 @@ class Command(BaseCommand):
                                f"--list shows them.")
         try:
             password = framework.password_from_environment()
+            # Once, before any state: every state relies on what bootstrap_platform
+            # writes, and none of them creates platform data itself.
+            framework.refuse_unless_bootstrapped()
         except framework.WalkRefused as exc:
             raise CommandError(str(exc))
 

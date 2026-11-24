@@ -12,17 +12,16 @@ import uuid
 import pytest
 from django.core.management import CommandError, call_command
 
-pytestmark = pytest.mark.django_db
+from tests.walk_fixtures import WALK_PASSWORD as PASSWORD
+from tests.walk_fixtures import walk_platform  # noqa: F401  (the shared fixture)
 
-PASSWORD = "Walk-Throughs-2026!"
+pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture
-def walk_env(monkeypatch, tmp_path):
-    """The password, a manifest path, and a database `bootstrap_platform` prepared (the
-    states need its exercises, templates and badges)."""
-    monkeypatch.setenv("WALK_ACCOUNTS_PASSWORD", PASSWORD)
-    call_command("bootstrap_platform", "--skip-food-catalogue", stdout=io.StringIO())
+def walk_env(walk_platform, tmp_path):
+    """A database as a dev server has it after bootstrap_platform, media in tmp_path,
+    the password set (`tests/walk_fixtures.py`), and a manifest path."""
     return tmp_path / "walk_states.json"
 
 
@@ -185,3 +184,17 @@ def test_nothing_but_the_command_knows_the_walk_accounts():
                          or "walk_states" in text)
                      and not str(rel).startswith(allowed))
     assert readers == []
+
+
+def test_it_refuses_once_on_a_database_not_bootstrapped(monkeypatch, tmp_path):
+    """ONE message before any state, naming what is missing; nothing written."""
+    from users.models import CustomUser
+
+    monkeypatch.setenv("WALK_ACCOUNTS_PASSWORD", PASSWORD)
+    manifest = tmp_path / "walk.json"
+    with pytest.raises(CommandError, match="has not been bootstrapped") as refused:
+        _run(manifest)
+    assert "bootstrap_platform" in str(refused.value)
+    assert "starter exercises" in str(refused.value)
+    assert not manifest.exists()
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()

@@ -30,7 +30,6 @@ def client_progress(walk):
 
     from .shared import coach_client
 
-    walk.require_bootstrap()
     me = walk.account(weight=84)
     coach = walk.account("coach", role="trainer", trainer_hourly_rate=0)
     coach_client(walk, me, coach)
