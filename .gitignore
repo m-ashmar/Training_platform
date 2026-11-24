@@ -107,3 +107,6 @@ logs/
 # them through.
 deploy/.env
 deploy/.env.*
+
+# The walk-through states manifest (manage.py seed_walk_states), development only.
+/var/
