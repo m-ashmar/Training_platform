@@ -13,8 +13,9 @@ and order live in `BACKEND_DELTA.md`, not here.
 
 **Where things stand (2026-11-24):** Road to 10 is the work now: phase 0, batch A, phase 3,
 S2.7, batch B, S2.13, the review round of every landed batch, Part 4's R4, R5, R8 and R1,
-round 3 (B-199, the console and password fixes), round 4's fixes and the dev-only walk
-seed are on this branch (full gate at `7d02bcc` on a fresh database: 3333 passed, 0 failed, 0 skipped); next are the later Road to 10 phases as the owner
+round 3 (B-199, the console and password fixes), round 4's fixes, the dev-only walk
+seed and round 5 (the inbox's language, B-200) are on this branch (full gate at `bd087df` on a fresh database: 3359 passed, 0 failed, 0 skipped); next
+are the later Road to 10 phases as the owner
 orders (the Road to 10 section below has the table per batch). The fix run is
 paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
@@ -201,6 +202,15 @@ full gate at `7c5f927` on a fresh database: 3162 passed, 2 failed, 0 skipped; th
 | Phase 0 review, round 4 (S0.3, S2.1, S2.12, S-257/S-267) | `1e2d1a2`, `9ac47a8`, `1531e61`, `f480342` | LANDED: a name of invisible characters is no name, one rule (`users/names.py`) for `onboarding_missing` and the directory; the client's own request leads Home's hero; the support WhatsApp is `+` and digits; the test setup puts back the migration-seeded tables after a flush |
 | The walk seed (development only) | `ebc6cab`, `507f733`, `b1e68bb`, `1bccaf3`, `b983516`, `604ea11`, `b5e2dae`, `1734e28`, `a0d2d05`, `4fee0ca`, `590e359`, `92aa64b`, `62aed3f`, `ec6581c`, `367ff18`, `a32b91c`, `fd5237a`, `781c8a5` | LANDED: `manage.py seed_walk_states` puts ordinary accounts `walk.<state>@yalla.test` into each state the app's walk-throughs need, through the platform's real routes and services, and writes `var/walk_states.json` (git-ignored, no password or token); refuses any settings but `settings_local`; and any database not on this machine; a reset retires the old accounts and deletes nothing, and closes their open withdrawals (`payouts.services.fail`) and gives back their held months (`release_hold`) so the operator's queues and escrow stay as they were; three sweeps take an optional scope for it (`expire_lapsed_subscriptions`, `send_renewal_reminders`, `remind_upcoming`; None, the beat's call, is every row as before); nothing at request time imports `users/walk` or reads those addresses (a scan test) |
 
+
+**Round 5** (2026-11-24: merged on `road10/integration`, LANDED with the full gate at `bd087df` on a fresh database: 3359 passed, 0 failed, 0 skipped):
+
+| Item | Commits | State |
+|---|---|---|
+| The inbox's language (notification language P1; F1, HIGH) | `d92f459` | LANDED: `routine_assignment`, `session_completed`, `progress_milestone` and `session_reminder` rows store their sentence by key (`variant`) with its params beside the `message`; the inbox renders the variant in the request's language, a push in the saved one; old rows and `custom` read their stored text. F1: the workout reminder was rendered with no language, English for everyone, in the inbox and the push. No migration, no new msgid. Content names inside a notice stay as written (SIDE_BUGS S-294) |
+| BACKEND_BUGS B-200 Home's open request on the checklist | `6660e75` | LANDED: the checklist's `coach` step carries `direction`, `request_id` and `trainer {id, first_name}` while a request is open, from `home/first_day.py open_request_facts`, which the hero reads too; additive |
+| The walk seed on the developers' database (SIDE_BUGS S-295) | `db33f72`, `994ecc4`, `7e90ea8` | LANDED: found on the app side's first real run after the last landing (a 'Pro (USD)' plan, no exchange rate: the 12th state stopped). A plan is chosen in the client's own wallet currency, never across currencies, and no rate is created; `refuse_unless_ready` names every gap once before anything is written; `--keep-going`; walk accounts saved as Arabic; tests/walk_fixtures.py builds the developers' shape. The traps section below has the lesson. S-296 (LOW) keeps the money states' duplicate helpers for a later round |
+
 **S3.7, the routes the app never calls:** CLASSIFIED 2026-11-23, read-only (the table is the
 manager's note `road10-s37-unused-routes.md` in the side-session notes folder). 93 of the 301
 contract routes have no caller in the app: twin 43, dead 20, unbuilt 15, operator 6, machine 5,
@@ -237,7 +247,10 @@ the spec's table); whether `policy_channelcapabilities` belongs on
 from outside Django, a restore included, does not clear it; DEPLOY_CHECKLIST §9 now
 clears it after a restore); and the console's `assigned_trainer` sync, which still
 approves a pending or rejected relation with no consent from the client and no
-charge (older than Road to 10; the money worker's reviewer flagged it).
+charge (older than Road to 10; the money worker's reviewer flagged it); and the default language of an
+account made outside sign-up (`users/models.py:297`: English, while sign-up saves Arabic),
+which decides the language of its pushes and e-mails; changing it touches about 20 to 25
+test files, under 100 assertion lines (the phase 3 worker's count).
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
@@ -549,6 +562,12 @@ is locked (spec §8); the numbers above are the defaults.
 - **`privacy/registry.py` `audit_coverage()` has its own `local` app set.** An app that
   is not in it is silently exempt and the coverage gate passes with the models
   unregistered. A new app goes in that set in the same commit as its first model.
+- **A dev-only tool tested only on a freshly bootstrapped database.** `seed_walk_states`
+  passed every check on test databases holding bootstrap's plans, and failed on the
+  developers' first real run: their database also had a cheaper 'Pro (USD)' plan and no
+  exchange rate, and the states picked a plan by raw price across currencies (SIDE_BUGS
+  S-295, Road to 10 round 5). Test such a tool against a database shaped like the
+  developers' own: tests/walk_fixtures.py `walk_platform` now builds that shape.
 
 ## One step per session — what to paste
 
