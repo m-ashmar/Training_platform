@@ -24,6 +24,26 @@ def _hide_what_a_retired_walk_account_hosted(users):
         bump_everyone()
 
 
+@on_retire
+def _close_the_reports_a_retired_walk_account_filed(users):
+    """A report waits on the operator's desk (the console's queue, the operator phone's
+    `community_reports` count) whoever filed it, so every run of `client_reports` would
+    leave two more. Closed as an operator closes one, through `save()`: dismissed, with
+    the reason in the resolution note."""
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from moderation.models import UNRESOLVED_STATUSES, Report, ReportStatus
+
+    waiting = Report.objects.filter(status__in=UNRESOLVED_STATUSES).filter(
+        Q(reporter__in=users) | Q(target_type="user", target_id__in=[u.pk for u in users]))
+    for report in waiting:
+        report.status = ReportStatus.DISMISSED
+        report.handled_at = timezone.now()
+        report.resolution_note = "Walk-through account reset (seed_walk_states)."
+        report.save()
+
+
 @state("member_with_post", area="community", role="client",
        summary="A client with a post of their own and a comment on it from another member.")
 def member_with_post(walk):

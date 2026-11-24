@@ -198,3 +198,60 @@ def test_it_refuses_once_on_a_database_not_bootstrapped(monkeypatch, tmp_path):
     assert "starter exercises" in str(refused.value)
     assert not manifest.exists()
     assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+
+def test_it_refuses_a_database_not_on_this_machine(walk_env, monkeypatch):
+    """The development settings read DB_HOST from the environment: the module alone does
+    not keep the command off a remote server."""
+    from django.db import connections
+
+    monkeypatch.setitem(connections["default"].settings_dict, "HOST", "db.example.com")
+    with pytest.raises(CommandError, match="not this machine"):
+        _run(walk_env)
+    assert not walk_env.exists()
+
+
+def _what_real_people_see(make_user, api, tag):
+    """What a real client and a real operator are shown, as the ids of walk accounts in
+    it, and the operator's queue counts."""
+    from social.models import Challenge
+    from users.models import CustomUser
+    from wallet.models import AgentProfile
+
+    person = make_user(f"wf_real_{tag}_{uuid.uuid4().hex[:4]}")
+    operator = make_user(f"wf_ops_{tag}_{uuid.uuid4().hex[:4]}", user_type="admin")
+    retired = set(CustomUser.objects.filter(email__startswith="walk.retired.")
+                  .values_list("pk", flat=True))
+
+    def ids(path, key="id"):
+        body = api(person).get(path).json()
+        rows = body["results"] if isinstance(body, dict) and "results" in body else body
+        return {row[key] for row in rows if isinstance(row, dict) and key in row}
+
+    trainers = ids("/api/v1/trainers/?page_size=100")
+    challenges = ids("/api/social/challenges/?page_size=100")
+    hosts = set(Challenge.objects.filter(pk__in=challenges).values_list("creator_id",
+                                                                          flat=True))
+    agents = set(AgentProfile.objects.filter(pk__in=ids("/api/wallet/agents/?page_size=100"))
+                 .values_list("user_id", flat=True))
+    from routine.products import catalogue_for
+
+    sellers = set(catalogue_for(person).values_list("trainer_id", flat=True))
+    queues = {row["key"]: row["count"] for row in
+              api(operator).get("/api/v1/ops/queue-counts/").json()["queues"]}
+    return {"retired_seen": {"directory": trainers & retired, "challenges": hosts & retired,
+                             "agents": agents & retired, "catalogue": sellers & retired},
+            "queues": queues}
+
+
+def test_after_a_second_run_nothing_retired_is_seen(walk_env, make_user, api):
+    """Item by item, where a real person looks: the trainer directory, the challenge list,
+    the agents near you, the programmes on sale — and the operator's queues, which a reset
+    must not fill (an open report, a withdrawal, a verification, a product in review left
+    by a retired walk account is still on the real operator's desk)."""
+    _run(walk_env)
+    first = _what_real_people_see(make_user, api, "one")
+    _run(walk_env)
+    second = _what_real_people_see(make_user, api, "two")
+    assert all(not seen for seen in second["retired_seen"].values()), second["retired_seen"]
+    assert second["queues"] == first["queues"], (first["queues"], second["queues"])

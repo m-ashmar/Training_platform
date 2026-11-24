@@ -66,6 +66,24 @@ def refuse_unless_development(settings) -> None:
             f"are {module or 'unknown'!s} (only {DEVELOPMENT_SETTINGS}).")
 
 
+#: Database hosts on this machine: a loopback address, or a socket (an empty host).
+LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+def refuse_unless_local_database() -> None:
+    """The development settings take the database from the environment (`DB_HOST`,
+    `DB_NAME`), so the settings module alone does not keep this command off a remote
+    server: `DB_HOST=<anything>` would point it there. Refused unless the database is on
+    this machine — a loopback host, a `.localhost` name, or a Unix socket."""
+    from django.db import connections
+
+    host = (connections["default"].settings_dict.get("HOST") or "").strip()
+    if host in LOCAL_HOSTS or host.startswith("/") or host.endswith(".localhost"):
+        return
+    raise WalkRefused(f"Refusing to run: the database host is {host!r}, not this machine. "
+                      f"seed_walk_states writes only to a local development database.")
+
+
 def password_from_environment() -> str:
     """The walk accounts' one password: from the environment, never the code, never
     printed or written anywhere."""

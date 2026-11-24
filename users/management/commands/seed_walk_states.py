@@ -17,7 +17,8 @@ account back into its starting state; ids change, so the scripts read them from 
 manifest. The manifest is updated after each state, so it always matches the database.
 
 **What it refuses.** Any settings but the development ones (`settings_local`):
-production never runs it. A missing or weak `WALK_ACCOUNTS_PASSWORD`: the password is
+production never runs it. A database that is not on this machine (`DB_HOST` is read from
+the environment, so the settings alone would not keep it off a remote server). A missing or weak `WALK_ACCOUNTS_PASSWORD`: the password is
 taken from the environment only, and is never printed or written anywhere, the manifest
 included. An unknown `--only` state. A database `bootstrap_platform` has not prepared
 (`users/walk/framework.py bootstrap_gaps`: the channel capabilities, quota features, a
@@ -71,6 +72,7 @@ class Command(BaseCommand):
 
         try:
             framework.refuse_unless_development(settings)
+            framework.refuse_unless_local_database()
         except framework.WalkRefused as exc:
             raise CommandError(str(exc))
         states = load_states()
