@@ -1514,7 +1514,7 @@ class PaymentService:
         `CheckoutOpen`. Raises `subscription.upgrade.UpgradeRefused` subclasses and
         `ExchangeRateUnavailable` from the quote.
         """
-        from wallet import currency_for as _currency_for
+        from wallet.models import checkout_currency_for
 
         from ..upgrade import quote_upgrade
 
@@ -1541,7 +1541,10 @@ class PaymentService:
                 raise CheckoutOpen(f"Subscription {locked.id} has checkout {payment.id} open",
                                    payment)
 
-            quote = quote_upgrade(locked, to_plan, buyer_currency=_currency_for(locked.user),
+            # Under the wallet's lock while the currency can still change, as a checkout
+            # reads it (`checkout_currency_for`, SIDE_BUGS S-180).
+            quote = quote_upgrade(locked, to_plan,
+                                  buyer_currency=checkout_currency_for(locked.user),
                                   gateway_name=gateway_name)
             if expected_to_pay is not None and quote.to_pay != expected_to_pay:
                 raise UpgradePriceMoved(f"Upgrade of {locked.id} now costs {quote.to_pay}, "
@@ -1708,11 +1711,15 @@ class PaymentService:
         # has to cross and the rate is missing or stale. It is deliberately NOT caught:
         # opening a checkout at an unconverted number would charge dollars to a pound
         # wallet. `subscription/views.py` turns it into a refusal the app can read.
-        from wallet import currency_for as _currency_for
+        #
+        # The buyer's currency is read under the wallet's lock while it can still change
+        # (`checkout_currency_for`, SIDE_BUGS S-180): read unlocked, a currency switch
+        # landing before this commits left the payment in the old currency.
+        from wallet.models import checkout_currency_for
 
         from ..pricing import charge_for
 
-        priced = charge_for(plan.price, plan.currency, _currency_for(subscription.user))
+        priced = charge_for(plan.price, plan.currency, checkout_currency_for(subscription.user))
         payment.amount = priced.amount
         payment.currency = priced.currency
         payment.price_amount = priced.price_amount
