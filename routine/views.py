@@ -286,8 +286,9 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         `RoutineTemplateExercise` CASCADE too, so the delete took the exercise out of
         every routine that used it — clients' assigned programmes included — and out of
         every template, and said nothing. Take it out of those first, or retire it with
-        `is_active=false` (the routines keep it; it leaves the pickers). Checked after
-        `exercise_has_history`, which keeps its answer.
+        `PATCH exercises/{id}/ {"is_active": false}` (G1): the routines and templates
+        that hold it keep it, and it can no longer be added to one (`exercise_retired`).
+        Checked after `exercise_has_history`, which keeps its answer.
         """
         from .models import RoutineExercise, RoutineTemplateExercise
 

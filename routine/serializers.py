@@ -135,6 +135,14 @@ class ExerciseSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
 
     `is_mine`, `created_by_id`, `equipment`, `equipment_display`: see
     `ExerciseAuthoringFieldsMixin`.
+
+    `is_active` (the fix run's G1, 2026-11-24; additive, readable and writable): false
+    is a RETIRED exercise. Its author (or an admin; `IsAdminOrOwnerOrReadOnly`) retires
+    it with `PATCH exercises/{id}/ {"is_active": false}` and brings it back with true —
+    the path `DELETE`'s `exercise_has_history` and `exercise_in_use` point to, which only
+    the console could take. A retired exercise stays in every routine and template that
+    holds it and stays readable; adding it to a routine or a template answers
+    `exercise_retired`. The list still returns it: a picker leaves out `is_active: false`.
     """
     media = ExerciseMediaSerializer(many=True, read_only=True)
     media_slots = serializers.SerializerMethodField()
@@ -157,7 +165,7 @@ class ExerciseSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
                   'target_muscle_display', 'difficulty_level', 'difficulty_level_display',
                   'equipment', 'equipment_display', 'image', 'thumbnail',
                   'media', 'media_slots', 'media_source', 'media_trainer_id',
-                  'is_mine', 'created_by_id']
+                  'is_mine', 'created_by_id', 'is_active']
         # A name may arrive as `name_ar` / `name_en` alone; `validate` still refuses a
         # create with no name at all.
         extra_kwargs = {'name': {'required': False}}
