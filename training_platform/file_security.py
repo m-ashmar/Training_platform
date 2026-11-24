@@ -1002,15 +1002,22 @@ def probe_declared_duration(file, container) -> float | None:
     whole page, an MP4 whose `moov` we cannot find — and one with more than
     `MAX_ISO_BOXES_PER_LEVEL` boxes before its `moov`, where the walk stops rather than
     spend the request's CPU on it. A worker measures those after the send.
+
+    A declared length that rounds to nothing (under half a millisecond) is None too, never
+    0.0: a 0.0 was stored as the recording's length, and the worker that measures a
+    recording measures only one with NO length, so the card read 0:00 for good (the
+    adversarial review of B-177, 2026-11-24).
     """
     try:
         if container == 'iso':
-            return _iso_duration(file)
-        if container == 'ogg':
-            return _ogg_duration(file)
-        if container == 'matroska':
-            return _matroska_duration(file)
-        return None
+            seconds = _iso_duration(file)
+        elif container == 'ogg':
+            seconds = _ogg_duration(file)
+        elif container == 'matroska':
+            seconds = _matroska_duration(file)
+        else:
+            return None
+        return seconds if seconds else None
     except _TooManyBoxes:
         logger.info("video declares more than %d boxes on one level; duration not read",
                     MAX_ISO_BOXES_PER_LEVEL)

@@ -529,6 +529,41 @@ def test_the_declared_length_of_an_ogg_and_a_webm_is_read_without_decoding(monke
     assert read(flac, 'ogg') is None
 
 
+def test_a_length_that_rounds_to_nothing_is_none_and_measured_later(
+        api, pair, conversation, monkeypatch, django_capture_on_commit_callbacks):
+    """The adversarial review of B-177 (2026-11-24), found by fuzzing the readers: a
+    declared length under half a millisecond rounded to 0.0 and was returned AS the
+    length — an Ogg whose last granule is its pre-skip plus one sample, a WebM whose
+    Duration is a fraction of a tick, an MP4 of one tick in ten thousand. It was stored,
+    and the worker measures only a recording with NO length (`send_media_message`
+    queues it for `duration_seconds is None`, `fill_media_duration` skips any other),
+    so the note read 0:00 for good. Each is None now, and the send queues the worker."""
+    from training_platform.file_security import probe_declared_duration
+
+    def read(data, container):
+        return probe_declared_duration(io.BytesIO(data), container)
+
+    tiny_ogg = ogg_opus_bytes(1 / 48000)                  # granule = pre-skip + 1
+    one_tick = (_box(b"ftyp", b"M4A " + struct.pack(">I", 512) + b"isom")
+                + _box(b"moov", _mvhd(0.0001, timescale=10000))
+                + _box(b"mdat", b"\x00" * 64))
+    assert read(tiny_ogg, 'ogg') is None
+    assert read(webm_bytes(ticks=0.0001), 'matroska') is None
+    assert read(one_tick, 'iso') is None
+    # A real length still reads, however short (two of Opus's 2.5 ms frames).
+    assert read(ogg_opus_bytes(0.005), 'ogg') == 0.005
+
+    trainer, _client = pair
+    queued = []
+    monkeypatch.setattr("chat.media.queue_duration", queued.append)
+    with django_capture_on_commit_callbacks(execute=True):
+        sent = _post(api, trainer, conversation, 'voice',
+                     SimpleUploadedFile("tiny.ogg", tiny_ogg, content_type="audio/ogg"))
+    assert sent.status_code == 201, sent.content
+    assert sent.json()['media']['duration_seconds'] is None
+    assert queued == [sent.json()['id']], "the worker was not asked to measure it"
+
+
 def test_an_ogg_or_webm_voice_note_is_capped_and_timed_on_the_request(
         api, pair, conversation, settings, media_root):
     """The route, on hand-built bytes (no ffmpeg needed): the length is on the answer,
