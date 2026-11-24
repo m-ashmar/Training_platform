@@ -1446,8 +1446,9 @@ every build.
 
 Codes: `not_a_trainer` (403), `not_found` (404), `validation_error` (400;
 `field_errors.<field>[0].code`: `template_not_yours`, `price_out_of_range`,
-`preview_days_out_of_range`, `cover_not_yours`), `product_not_editable` (409, `status`),
-`trainer_not_verified` (403), `product_not_submittable` (409, `status`),
+`preview_days_out_of_range`, `cover_not_yours`), `product_not_editable` (409, `status`;
+a product in review or published still takes a PATCH of `place` ALONE — no new review,
+nothing else touched; the fix run's S-249, 2026-11-24, additive), `trainer_not_verified` (403), `product_not_submittable` (409, `status`),
 `product_incomplete` (409, `missing`), `program_too_long` (409, `max_days`,
 `program_days`), `preview_covers_program` (409, `program_days`, `cycle_days`: the preview must be shorter than the template's week, which the program repeats),
 `product_already_retired` (409), `bad_trainer_id` (400), `own_product` (403),
@@ -1817,6 +1818,14 @@ manager's ruling, 2026-11-24; additive).** While the coaching may not be used, t
 back `client.goal`; its training record stays. The three values: `coaching_frozen` and
 `coaching_unpaid` keep the relation approved; `coaching_ended` means it is gone (the file
 answers 403 `not_your_client`, the lists leave the client out). No new code.
+
+**Whether the client answered the activity level (the fix run's G9, 2026-11-24;
+additive).** `trainer/client-profile/` (the list and `{id}/`) and each row of
+`trainer/clients/` carry `activity_level_answered`: false while the client never chose
+a level — `activity_level` then reads its default, `Sedentary`, which says nothing about
+them — and true once they did (a row from before the stamp counts as answered when its
+level is not the default). While false, the file's `tdee` is 0.0, as for any profile it
+cannot compute. Null with the rest of the record while the coaching may not be used.
 
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
@@ -3419,9 +3428,10 @@ English). Prefix `/api/routine/`.
 
 | Endpoint | New codes |
 |---|---|
-| `DELETE exercises/{id}/` | 409 `exercise_has_history` |
+| `DELETE exercises/{id}/` | 409 `exercise_has_history`; 409 `exercise_in_use` with `routines`, `templates` (a routine or template still uses it: remove it there, or retire it with `is_active=false`; the fix run's G2, 2026-11-24, additive) |
 | `POST exercises/create-with-image/` | 400 `missing_fields` (+ `fields`, `field`; minted as `field_required` and unified before it shipped, B-092) |
 | `DELETE routines/{id}/` | 409 `routine_has_history` |
+| `POST routines/`, `PATCH`/`PUT routines/{id}/` | 400 `validation_error` with `field_errors.days[0].code` `days_out_of_range`: `days` outside 1-365, the bound `templates/{id}/generate/` and a bought program already had (the fix run's G6, 2026-11-24, additive) |
 | `POST routines/{id}/assign_to_client/` | 400 `client_id_required`, `not_your_client`, `already_assigned`; 404 `client_not_found`; 500 `routine_assign_failed` |
 | `POST routines/{id}/unassign_from_client/` | 400 `client_id_required`, `not_your_client`, `not_assigned`; 404 `client_not_found`; 500 `routine_unassign_failed` |
 | `POST routines/{id}/update_progress/` | 400 `day_and_status_required`, `bad_day`, `day_out_of_range`, `day_has_no_exercises`; 403 `routine_not_yours` |

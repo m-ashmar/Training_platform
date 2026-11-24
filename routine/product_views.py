@@ -233,6 +233,12 @@ class TrainerProductDetailView(APIView):
     after changing its template (`submit/`), or retire it. 200 with the product.
     Differs by build exactly as POST does (`price`).
 
+    One exception (the fix run's S-249, the manager's ruling 2026-11-24): a product IN
+    REVIEW or PUBLISHED may gain or change its `place` (`home`, `gym`, `""`/null) with a
+    body of `place` ALONE — no new review, nothing else touched (not its price, not its
+    currency), and a published one stays on sale. Any other field beside it, or a
+    retired product, is still 409 `product_not_editable`.
+
     | Status | `code` | When |
     |---|---|---|
     | 400 | `validation_error` | as POST, `field_errors.<field>[0].code` |
@@ -240,9 +246,12 @@ class TrainerProductDetailView(APIView):
     | 403 | `not_a_trainer` | the caller is not a trainer |
     | 403 | `not_available_on_channel` | a `price` was sent from a build that may not show one |
     | 404 | `not_found` | no such product, or not yours |
-    | 409 | `product_not_editable` | it is not a draft; `status` says what it is |
+    | 409 | `product_not_editable` | it is not a draft (beyond a `place`-only edit of one in review or published); `status` says what it is |
     """
     permission_classes = [IsAuthenticated]
+
+    #: What a product past its draft may still change, without a new review.
+    EDITABLE_AFTER_DRAFT = frozenset({"place"})
 
     def get(self, request, pk):
         refused = _trainers_only(request)
@@ -269,11 +278,19 @@ class TrainerProductDetailView(APIView):
                 product = products.lock_own(request.user, pk)
             except RoutineProduct.DoesNotExist:
                 return _not_found()
-            if product.status != ProductStatus.DRAFT:
+            sent = set(serializer.validated_data)
+            if (product.status in (ProductStatus.IN_REVIEW, ProductStatus.PUBLISHED)
+                    and sent and sent <= self.EDITABLE_AFTER_DRAFT):
+                # `place` only (S-249): where it is trained, not what is sold. The price,
+                # the currency and the review stay exactly as they are.
+                serializer.apply(product)
+                product.save(update_fields=["place", "updated_at"])
+            elif product.status != ProductStatus.DRAFT:
                 return _service_refusal(products.ProductNotEditable(status=product.status))
-            serializer.apply(product)
-            product.currency = currency_for(request.user)
-            product.save()
+            else:
+                serializer.apply(product)
+                product.currency = currency_for(request.user)
+                product.save()
         return Response(TrainerProductSerializer(_own_product(request, pk),
                                                  context=_trainer_context(request)).data)
 

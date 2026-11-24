@@ -17,9 +17,8 @@ from .models import EQUIPMENT_CHOICES
 from .serializers import (
     ExerciseSerializer, ExerciseCreateWithImageSerializer, RoutineSerializer, 
     RoutineExerciseSerializer, UserExerciseProgressSerializer, RoutineProgressSerializer,
-    UserRoutineSerializer, ExerciseSetLogSerializer, TrainerRoutineSerializer,
+    ExerciseSetLogSerializer, TrainerRoutineSerializer,
     WorkoutSessionSerializer, RoutineTemplateSerializer,
-    ExerciseMediaSerializer,
     RecentActivitySerializer,
 )
 # NOT imported here any more:
@@ -32,6 +31,10 @@ from .serializers import (
 #   `WorkoutSessionDetailSerializer`, `ClientProfileViewSerializer` — the same, on the
 #   adjacent names (SIDE_BUGS S-055). `ClientProfileViewSerializer` is still used, by
 #   `users/views.py`, which imports it from serializers.py itself.
+#   `UserRoutineSerializer`, `ExerciseMediaSerializer` — imported and never used here
+#   (the fix run's S-169). The first was used nowhere at all and is deleted, with
+#   `WorkoutSessionDetailSerializer`, which nothing read; the second is the nested
+#   `media` of the exercise serializers.
 from .permissions import (
     IsAdminOrOwnerOrReadOnly, 
     IsTrainerOrAdmin,
@@ -229,6 +232,20 @@ class ExerciseFilter(django_filters.FilterSet):
         fields = ['target_muscle', 'exclude']
 
 
+def exercise_owner(user):
+    """Who an exercise `user` creates belongs to: a trainer's is their own; an admin's
+    is the platform catalogue's — no owner, so `is_global`, visible to everyone and
+    editable by an admin — exactly what the console makes (the fix run's S-166,
+    2026-11-24).
+
+    Both create routes let an admin in ("a trainer or an admin") and then saved the admin
+    as the owner, which `Exercise.clean` refuses (`trainer_required`: only a trainer owns
+    an exercise): `create-with-image/` answered 500 `exercise_create_failed`."""
+    if not getattr(user, 'is_trainer', False) and getattr(user, 'is_admin', False):
+        return None
+    return user
+
+
 class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
     """ViewSet for managing exercises.
@@ -265,8 +282,9 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         return visible_exercises_for(self.request.user, base_qs)
 
     def perform_create(self, serializer):
-        """Override to assign the exercise to the creator."""
-        serializer.save(created_by=self.request.user)
+        """The exercise is the creating trainer's own; an admin's is the platform
+        catalogue's (`exercise_owner`)."""
+        serializer.save(created_by=exercise_owner(self.request.user))
 
     def destroy(self, request, *args, **kwargs):
         """Refuse to delete an exercise clients have logged work against.
@@ -279,13 +297,37 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
         409 `exercise_has_history` — someone has logged work against it; retire it with
         `is_active=false` instead (the owner, 2026-09-24: every refusal names its code).
+
+        409 `exercise_in_use` (additive, the fix run's G2, 2026-11-24), with `routines`
+        and `templates` — how many of each still name it — when nobody has logged work
+        against it but a routine or a template still uses it. `RoutineExercise` and
+        `RoutineTemplateExercise` CASCADE too, so the delete took the exercise out of
+        every routine that used it — clients' assigned programmes included — and out of
+        every template, and said nothing. Take it out of those first, or retire it with
+        `PATCH exercises/{id}/ {"is_active": false}` (G1): the routines and templates
+        that hold it keep it, and it can no longer be added to one (`exercise_retired`).
+        Checked after `exercise_has_history`, which keeps its answer.
         """
+        from .models import RoutineExercise, RoutineTemplateExercise
+
         exercise = self.get_object()
         if exercise.progress.exists():
             return Response(
                 {'error': _('Clients have recorded work against this exercise, so it '
                             'cannot be deleted. Set is_active=false to retire it.'),
                  'code': 'exercise_has_history'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        routines = (RoutineExercise.objects.filter(exercise=exercise)
+                    .values('routine_id').distinct().count())
+        templates = (RoutineTemplateExercise.objects.filter(exercise=exercise)
+                     .values('template_id').distinct().count())
+        if routines or templates:
+            return Response(
+                {'error': _('This exercise is still part of a routine or a template, so '
+                            'it cannot be deleted. Remove it from them first, or set '
+                            'is_active=false to retire it.'),
+                 'code': 'exercise_in_use', 'routines': routines, 'templates': templates},
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)
@@ -380,6 +422,10 @@ class ExerciseCreateWithImageView(APIView):
     and expiring like every media URL — read it again, never store it. The row used to
     keep the signed URL itself, which on object storage died an hour after the upload
     (SIDE_BUGS S-070). Removing the media row or the exercise removes the file.
+
+    **Who owns it.** A trainer's exercise is their own; an admin's goes to the platform
+    catalogue (no owner, visible to everyone; `is_mine` false), as the console makes one
+    (`exercise_owner`, S-166 — it answered 500 `exercise_create_failed`).
 
     A fault nobody anticipated answers 500 `exercise_create_failed` with a translated
     sentence and nothing else: the exception text used to BE the response body
@@ -525,7 +571,7 @@ class ExerciseCreateWithImageView(APIView):
 
             # Create the exercise
             exercise = Exercise.objects.create(
-                created_by=request.user,
+                created_by=exercise_owner(request.user),
                 **exercise_data
             )
 
@@ -832,7 +878,9 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         follow it in the routine are taken one calendar day each — and never owed.
         A programme past its `end_date`, or whose every day is done when it does not
         repeat (its days cover its dates, or it has no end date and more than seven
-        days), is `finished`.
+        days), is `finished`. So a cycle of MORE than 7 days with no end date finishes
+        after one pass; with 7 or fewer it repeats weekly; with an end date shorter than
+        its days cover, it repeats until that date (S-282, kept as built).
 
         200::
 
@@ -1423,6 +1471,23 @@ class RoutineExerciseFilter(django_filters.FilterSet):
         fields = ['routine', 'day']
 
 
+def _id_filters(model_, numbers, plain=()):
+    """A FilterSet over `model_` whose `numbers` (a foreign key or a number column) are
+    WHOLE NUMBERS compared with the column, never a lookup of the row they name, and
+    whose `plain` fields are django-filter's own (a choice, a date).
+
+    `filterset_fields` builds a model-choice filter for a foreign key, which validates
+    the id against EVERY row of the table, whoever's: an id that does not exist answered
+    400 and someone else's real one an empty 200 — an existence oracle (the S-119 fix for
+    `routine-exercises/`, the fix run's S-247 for the four viewsets that still had it).
+    Now both are the same empty 200; a value that is not a whole number is still 400."""
+    attrs = {name: _WholeNumberFilter(field_name=(
+        f'{name}_id' if model_._meta.get_field(name).is_relation else name))
+        for name in numbers}
+    attrs['Meta'] = type('Meta', (), {'model': model_, 'fields': [*numbers, *plain]})
+    return type(f'{model_.__name__}IdFilter', (django_filters.FilterSet,), attrs)
+
+
 class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing RoutineExercise objects.
@@ -1464,10 +1529,15 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         user = self.request.user
         if getattr(user, 'is_admin', False):
             return self.queryset
+        # The assigned routines as a SUBQUERY of ids, never a join (the fix run's S-248):
+        # OR-ed with authorship, the to-many `routine__assigned_to` became a LEFT JOIN
+        # that repeated each row once per assignee, and the `.distinct()` that undid it
+        # ran over every selected column — two whole user rows among them.
+        assigned = Routine.objects.filter(assigned_to=user).values('id')
         return self.queryset.filter(
-            Q(routine__assigned_to=user)
+            Q(routine_id__in=assigned)
             | Q(routine__created_by=user, routine__purchase__isnull=True)
-        ).distinct()
+        )
 
 
 class RoutineProgressViewSet(viewsets.ModelViewSet):
@@ -1494,7 +1564,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     permission_classes = [IsTrainerOrAdmin | IsClientOrAssignedTrainer]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['routine', 'user', 'day', 'status']
+    # `?routine=&user=&day=` as numbers, `?status=` a choice (S-247, `_id_filters`).
+    filterset_class = _id_filters(RoutineProgress, ('routine', 'user', 'day'), ('status',))
 
     def perform_create(self, serializer):
         """Stamp the owner and refuse progress against someone else's routine.
@@ -2208,7 +2279,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     permission_classes = [IsSetLogCreatorOrTrainerOrAdmin]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['workout_session', 'date']
+    # `?workout_session=` as a number, `?date=` a date (S-247, `_id_filters`).
+    filterset_class = _id_filters(ExerciseSetLog, ('workout_session',), ('date',))
 
     def get_queryset(self):
         """
@@ -3067,7 +3139,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     # parameter, so a client could not write one handler for a paging error (S-032).
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['user', 'routine', 'status']
+    # `?user=&routine=` as numbers, `?status=` a choice (S-247, `_id_filters`).
+    filterset_class = _id_filters(WorkoutSession, ('user', 'routine'), ('status',))
     
     def get_permissions(self):
         from .permissions import IsSessionOwnerOrTrainerOrAdmin, IsRoutineOwnerOrAssigned
@@ -3861,6 +3934,13 @@ class AnalyticsViewSet(viewsets.ViewSet):
         week or month) in both lists, and both are bucketed by the day the training
         happened. `completion_trend` was bucketed by when its row was last written and
         answered a datetime (SIDE_BUGS S-123).
+
+        `completed` counts the days whose progress is `completed`: every set done, or the
+        person closed the day as done ("complete", "complete anyway" after the
+        unlogged-sets warning, "log the whole day"; `PERSON_CLOSED_VIAS`). A workout
+        FINISHED with nothing logged is not one — it closes the day short and nobody said
+        the work was done — so it is not counted (the fix run's trend row, kept on
+        purpose). The streak is stricter still: a day with sets missed never counts there.
         """
         from .models import ExerciseSetLog, RoutineProgress
         from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
@@ -3907,8 +3987,9 @@ class AnalyticsViewSet(viewsets.ViewSet):
     def admin_dashboard(self, request):
         """
         Admin/trainer dashboard: summary stats for the caller's clients (a trainer's
-        approved clients; every client for an admin). 403 `not_a_trainer` for anyone
-        else (the owner, 2026-09-24; it was the generic `permission_denied`).
+        approved clients; every client for an admin; never the caller — a trainer was a
+        row of their own list, S-172). 403 `not_a_trainer` for anyone else (the owner,
+        2026-09-24; it was the generic `permission_denied`).
 
         Output: `{dashboard: [{client_id, username, total_volume, completion_rate,
         max_streak}], count, next, previous}` — PAGINATED over clients, by id, 25 a page,
@@ -3927,12 +4008,15 @@ class AnalyticsViewSet(viewsets.ViewSet):
             return Response({'error': _('Permission denied.'), 'code': 'not_a_trainer'},
                             status=403)
 
-        # Get all clients for this trainer/admin with optimized queries
-        if request.user.is_trainer:
-            ids = accessible_user_ids(request.user)
-            clients = CustomUser.objects.filter(id__in=ids or [])
-        else:
-            clients = CustomUser.objects.filter(user_type='client')
+        # The CLIENTS: a trainer's approved ones, every one for an admin. Never the
+        # caller: `accessible_user_ids` always holds the caller's own id (it answers
+        # "whose training data may I read"), so a trainer was a row of their own client
+        # list (the fix run's S-172). And an admin who is also a trainer got None from
+        # it, read as "nobody", and saw an empty list.
+        ids = accessible_user_ids(request.user)
+        clients = CustomUser.objects.filter(user_type='client')
+        if ids is not None:
+            clients = clients.filter(id__in=ids)
 
         # Nothing is prefetched: every figure below is an aggregate with its own query.
         # `exercise_progress__set_logs` was prefetched here and never read (~36k
@@ -3960,25 +4044,27 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # Create volume lookup dictionary
         volume_lookup = {item['user_exercise_progress__user']: item['total_volume'] for item in volume_data}
         
-        # Bulk aggregate completion data for all clients
-        completion_data = RoutineProgress.objects.filter(
-            user_id__in=client_ids
-        ).values('user').annotate(
-            total_days=Count('id'),
-            completed_days=Count('id', filter=Q(status='completed'))
-        )
-        
-        # Create completion lookup dictionary
+        # Completion over the DAYS of each routine, the way `analytics/completion`
+        # counts it (the fix run's S-173): distinct days per (client, routine), then
+        # summed per client. Counting ROWS put every stranded `not_started` scaffold
+        # (stamped with the routine's start date, while a completed day is written at
+        # its training date) in the denominator, so a client who trained every day of
+        # their routine never reached 100% here, while the analytics screen said 100.
         completion_lookup = {}
-        for item in completion_data:
-            user_id = item['user']
-            total_days = item['total_days']
-            completed_days = item['completed_days']
-            completion_lookup[user_id] = {
-                'total_days': total_days,
-                'completed_days': completed_days,
-                'completion_rate': round(100 * completed_days / total_days, 2) if total_days else 0
-            }
+        for item in (RoutineProgress.objects.filter(user_id__in=client_ids)
+                     .values('user', 'routine')
+                     .annotate(days=Count('day', distinct=True),
+                               completed=Count('day', distinct=True,
+                                               filter=Q(status='completed')))
+                     .order_by()):
+            totals = completion_lookup.setdefault(item['user'],
+                                                  {'total_days': 0, 'completed_days': 0})
+            totals['total_days'] += item['days']
+            totals['completed_days'] += item['completed']
+        for totals in completion_lookup.values():
+            totals['completion_rate'] = (
+                round(100 * totals['completed_days'] / totals['total_days'], 2)
+                if totals['total_days'] else 0)
         
         # Streaks are CONSECUTIVE CALENDAR DAYS. This grouped by `day`, which is the
         # ordinal position inside a routine (1..N), not a date: `day` repeats every
@@ -4581,7 +4667,8 @@ class RoutineTemplateExerciseViewSet(ExerciseMediaMixin, viewsets.ReadOnlyModelV
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['template', 'day']
+    # `?template=&day=` as numbers (S-247, `_id_filters`).
+    filterset_class = _id_filters(RoutineTemplateExercise, ('template', 'day'))
 
     def get_queryset(self):
         user = self.request.user
@@ -4890,6 +4977,9 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                         date=date,
                         defaults={
                             'completed_sets': completed_sets,
+                            # The claim itself, kept apart from the logged sets so the
+                            # next set logged that day cannot erase it (S-175).
+                            'claimed_sets': completed_sets,
                             # The prescription, never a number the caller sent. Taking it
                             # from the request made `completed >= target` true by
                             # construction, so a day could be marked complete by claiming

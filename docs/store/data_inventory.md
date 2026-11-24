@@ -375,7 +375,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Fitness and training activity (`fitness`).
 
-**Fields stored.** `id`, `user`, `exercise`, `date`, `completed_sets`, `target_sets`, `skipped`, `total_weight`, `total_repetitions`, `duration`, `notes`, `created_at`, `updated_at`.
+**Fields stored.** `id`, `user`, `exercise`, `date`, `completed_sets`, `claimed_sets`, `target_sets`, `skipped`, `total_weight`, `total_repetitions`, `duration`, `notes`, `created_at`, `updated_at`.
 
 **In the export.** Every field.
 

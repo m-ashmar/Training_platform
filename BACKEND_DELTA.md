@@ -321,8 +321,8 @@ contract, every user-facing string goes through gettext with an Arabic entry in
   session, and on any later PATCH of the session detail — a client often rates a
   workout the next morning. ONLY the person who trained may set it (400
   `effort_not_yours` on the field, for their trainer and for an admin alike; 400
-  `effort_out_of_range` outside 1-5). Read back on the session, on
-  `WorkoutSessionDetailSerializer`, and on each `recent_activity` row of
+  `effort_out_of_range` outside 1-5). Read back on the session and on each
+  `recent_activity` row of
   `trainer/client-progress/{id}/`.
 - `routine/progression.py` turns it into a suggestion, computed on read, with the
   numbers it used: `{code, effort: {typical, rated_sessions}, adherence_percent,

@@ -59,6 +59,11 @@ LOAD_MODE_CHOICES = [
 #: Inclusive bounds of `load_value` per mode, and of a superset number within a day.
 LOAD_VALUE_BOUNDS = {'percent': (1, 100), 'rpe': (1, 10)}
 SUPERSET_GROUP_MAX = 20
+#: The most days a routine may have (the fix run's G6, 2026-11-24): what `generate`
+#: (`MAX_GENERATED_DAYS`) and a bought program (`products.MAX_PROGRAM_DAYS`) already
+#: allow. Assigning builds one `RoutineProgress` row per day per client in memory, so a
+#: hand-written routine of `days: 2000000000` took the server's memory in one request.
+MAX_ROUTINE_DAYS = 365
 #: The longest day name («دفع · صدر وأكتاف»), after trimming.
 DAY_NAME_MAX_LENGTH = 40
 
@@ -463,7 +468,11 @@ class Routine(RowValidationMixin, models.Model):
     
     # Routine configuration
     is_active = models.BooleanField(default=True, help_text="Whether this routine is active")
-    days = models.PositiveIntegerField(default=3, help_text="Number of days in the routine plan")
+    # 1..MAX_ROUTINE_DAYS on every write (`validate_row`), the console's included; the
+    # API answers `days_out_of_range` (`RoutineSerializer.validate_days`).
+    days = models.PositiveIntegerField(
+        default=3, help_text="Number of days in the routine plan",
+        validators=[MinValueValidator(1), MaxValueValidator(MAX_ROUTINE_DAYS)])
     
     # Scheduling
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -625,32 +634,10 @@ class Routine(RowValidationMixin, models.Model):
             models.Q(is_global=True) | models.Q(created_by=self.created_by)
         ).filter(is_active=True)
 
-    def can_be_accessed_by(self, user):
-        """
-        Check if a user can access this routine.
-        
-        Args:
-            user: CustomUser instance
-            
-        Returns:
-            bool: True if user can access this routine
-        """
-        if not self.is_active:
-            return False
-            
-        # Creator can access their own routines
-        if self.created_by == user:
-            return True
-            
-        # Assigned clients can access their routines
-        if user in self.assigned_to.all():
-            return True
-            
-        # Admins can access all routines
-        if user.is_admin:
-            return True
-            
-        return False
+    # Who may read a routine is `routine.permissions.readable_routines`, its one
+    # definition. A `can_be_accessed_by` stood here with no caller anywhere, refusing an
+    # inactive routine and ignoring an approved trainer, unlike that rule (the fix run's
+    # S-227): deleted, so nobody wires the wrong answer in.
 
     def save(self, *args, **kwargs):
         self.validate_row()
@@ -815,6 +802,14 @@ class UserExerciseProgress(models.Model):
     # Progress data
     date = models.DateField(default=timezone.localdate, help_text="Date the progress is recorded")
     completed_sets = models.PositiveIntegerField(default=0, help_text="Number of sets completed")
+    #: The sets "log a whole day" (`user-exercise-progress/bulk-complete/`) claimed, with
+    #: no set log behind them (the fix run's S-175, 2026-11-24). The recalculation keeps
+    #: `completed_sets` at the larger of the logged sets and this: it read the logs only,
+    #: so one set logged (or deleted) after the day was logged whole replaced the claim
+    #: with the log count, and the day's outcome turned short — out of adherence, the
+    #: streak broken. Written by bulk-complete alone; 0 everywhere else.
+    claimed_sets = models.PositiveIntegerField(
+        default=0, help_text='Sets claimed by "log a whole day", with no set log')
     target_sets = models.PositiveIntegerField(default=0, help_text="Total sets required for the exercise")
     skipped = models.BooleanField(default=False, help_text="Whether the exercise was skipped")
     
@@ -1767,8 +1762,8 @@ def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
     database computes the aggregate at write time, under the row's own lock, so the
     last statement to execute reflects every committed set log.
     """
-    from django.db.models import Count, OuterRef, Q, Subquery, Sum, Value
-    from django.db.models.functions import Coalesce
+    from django.db.models import Count, F, OuterRef, Q, Subquery, Sum, Value
+    from django.db.models.functions import Coalesce, Greatest
 
     logs = ExerciseSetLog.objects.filter(user_exercise_progress=OuterRef('pk'))
 
@@ -1787,9 +1782,12 @@ def _recalc_locked(progress_pk, routine_pk=None, day_scope=None):
         # rows for two sets satisfy a three-set prescription — the day then completed
         # itself on work that was never done. A set with no number (an old row, a free
         # log) has no identity to collapse, so each one counts once.
-        completed_sets=agg(Count('set_number', distinct=True)
-                           + Count('id', filter=Q(set_number__isnull=True)),
-                           models.IntegerField()),
+        # Never below what "log a whole day" claimed (`claimed_sets`, S-175): the claim
+        # has no set log, so the log count alone erased it at the first set logged after.
+        completed_sets=Greatest(agg(Count('set_number', distinct=True)
+                                    + Count('id', filter=Q(set_number__isnull=True)),
+                                    models.IntegerField()),
+                                F('claimed_sets')),
         total_weight=agg(Sum('weight'), models.FloatField()),
         total_repetitions=agg(Sum('reps'), models.IntegerField()),
     )
