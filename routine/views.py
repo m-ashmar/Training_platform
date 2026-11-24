@@ -987,6 +987,8 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         | 400 | `client_id_required` | `client_id` missing or not a whole number |
         | 400 | `not_your_client` | the client is not an approved client of yours |
         | 400 | `already_assigned` | already this client's (nothing is paid twice); carries `routine_id`, `client_id` |
+        | 400 | `routine_empty` | the routine has no exercises yet: add some first. Nothing is assigned and nothing is paid; carries `routine_id` |
+        | 400 | `routine_inactive` | the routine was retired (`is_active=false`). Nothing is assigned and nothing is paid; carries `routine_id` |
         | 404 | `client_not_found` | no client with that id |
         | 404 | `not_found` | no such routine, or not yours |
         | 409 | `routine_belongs_to_another_client` | with `copy_url`: another client is on it, or has trained on it (their history stays with it) — copy it with `routines/{id}/copy/` instead. A trainer's own tries on a draft do not count |
@@ -1053,9 +1055,18 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             # has trained on. Then it settles the hold taken for THIS client, once: this
             # used to move the trainer's CURRENT hourly rate out of the shared escrow
             # wallet on every assignment, with no link to any hold.
-            from .assignment import RoutineTaken, assign_routine
+            from .assignment import RoutineNotDeliverable, RoutineTaken, assign_routine
             try:
                 assign_routine(routine, client, request.user)
+            except RoutineNotDeliverable as exc:
+                # Before the client is added and before month 1 is paid out: an empty
+                # or retired routine is not the programme that pays it (G5).
+                message = (_("This routine has no exercises yet. Add exercises before "
+                             "assigning it.") if exc.code == 'routine_empty'
+                           else _("This routine has been retired."))
+                return Response({"error": message, "code": exc.code,
+                                 "routine_id": routine.id},
+                                status=status.HTTP_400_BAD_REQUEST)
             except RoutineTaken:
                 return Response(
                     {"error": _("This routine already belongs to another client. "
@@ -4424,7 +4435,10 @@ class RoutineTemplateViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             return Response(RoutineSerializer(draft, context=context).data, status=201)
 
         # Rows first, then the client: the m2m receiver counts the rows into each day's
-        # progress. One fresh routine per client, never shared (`assign_routine`).
+        # progress. One fresh routine per client, never shared (`assign_routine`). Each
+        # copy is active and carries every row of a template refused above when it has
+        # none (`template_empty`), so `assign_routine`'s own refusal of an empty or
+        # retired routine (G5: `routine_empty`, `routine_inactive`) cannot arise here.
         from .services import notify_assignment
         routines = []
         for client in clients:

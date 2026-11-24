@@ -2571,6 +2571,11 @@ msgstr "اجعل هذا في حدود %(n)s حرفاً."
 msgid "This routine has been retired."
 msgstr "تم إيقاف هذا البرنامج."
 
+#. `routine_empty` (G5): a routine with no exercises cannot be assigned, and so cannot
+#. pay the trainer the coaching's first month.
+msgid "This routine has no exercises yet. Add exercises before assigning it."
+msgstr "لا يحتوي هذا البرنامج على تمارين بعد. أضف تمارين قبل إسناده."
+
 #: routine/serializers.py
 #, python-format
 msgid "Day %(day)s has no exercises."

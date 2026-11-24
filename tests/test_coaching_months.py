@@ -10,6 +10,7 @@ from unittest import mock
 
 import pytest
 from django.utils import timezone
+from tests.routine_rows import deliverable_routine
 
 pytestmark = pytest.mark.django_db
 
@@ -76,7 +77,9 @@ def _accepted(make_user, api, tag, *, rate="100.00", funds="1000.00"):
 def _deliver_first_program(api, trainer, client):
     from routine.models import Routine
 
-    routine = Routine.objects.create(name="Month one", created_by=trainer, days=3)
+    # G5 (2026-11-24): an empty routine no longer pays month 1, so the first
+    # programme has an exercise, as a real one does (tests/routine_rows.py).
+    routine = deliverable_routine(trainer)
     resp = api(trainer).post(f"/api/routine/routines/{routine.pk}/assign_to_client/",
                              {"client_id": client.pk}, content_type=JSON)
     assert resp.status_code == 200, resp.content

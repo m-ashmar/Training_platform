@@ -47,6 +47,25 @@ class RoutineTaken(Exception):
     `routine_belongs_to_another_client`)."""
 
 
+class RoutineNotDeliverable(Exception):
+    """The routine is not a programme a client can be given, so it cannot be the first
+    programme that pays the trainer month 1 (the backlog's G5). `code` says why."""
+
+    code = 'routine_not_deliverable'
+
+
+class RoutineEmpty(RoutineNotDeliverable):
+    """The routine has no exercises (400 `routine_empty`)."""
+
+    code = 'routine_empty'
+
+
+class RoutineInactive(RoutineNotDeliverable):
+    """The routine was retired, `is_active=false` (400 `routine_inactive`)."""
+
+    code = 'routine_inactive'
+
+
 class BadCustomization(ValueError):
     """A customisation value the columns cannot hold (400 `bad_customization`)."""
 
@@ -82,11 +101,24 @@ def assign_routine(routine, client, actor):
     and the add run under a lock on the routine row, so two assignments racing for
     different clients cannot both pass. The rows must already exist: the m2m receiver
     counts them into each day's `RoutineProgress.total_exercises`.
+
+    Raises `RoutineEmpty` / `RoutineInactive` — before the client is added and before
+    anything is settled — for a routine with no exercises or a retired one (the
+    backlog's G5). Assigning is what pays the trainer the coaching's held month 1, and
+    an empty or retired routine paid it: only `templates/{id}/generate/` refused an
+    empty one (`template_empty`), and `routines/{id}/assign_to_client/` refused
+    neither. Read under the same lock, so a routine retired while this waited is
+    refused too.
     """
-    from .models import Routine
+    from .models import Routine, RoutineExercise
 
     with transaction.atomic():
-        Routine.objects.select_for_update(of=('self',)).only('pk').get(pk=routine.pk)
+        locked = (Routine.objects.select_for_update(of=('self',)).only('pk', 'is_active')
+                  .get(pk=routine.pk))
+        if not locked.is_active:
+            raise RoutineInactive(routine.pk)
+        if not RoutineExercise.objects.filter(routine_id=routine.pk).exists():
+            raise RoutineEmpty(routine.pk)
         if trained_by_someone_else(routine, client):
             raise RoutineTaken(routine.pk)
         routine.assigned_to.add(client)

@@ -29,6 +29,7 @@ from decimal import Decimal
 
 import pytest
 from django.utils import timezone
+from tests.routine_rows import deliverable_routine
 
 pytestmark = pytest.mark.django_db
 
@@ -117,7 +118,9 @@ def _paid_coaching(make_user, api, *, rate="30000.00", funds="50000.00"):
                                  {"request_id": relation.pk, "action": "approve"},
                                  content_type=JSON)
     assert answered.status_code == 200, answered.content
-    routine = Routine.objects.create(name="Month one", created_by=trainer, days=3)
+    # G5 (2026-11-24): an empty routine no longer pays month 1, so the first
+    # programme has an exercise, as a real one does (tests/routine_rows.py).
+    routine = deliverable_routine(trainer)
     delivered = api(trainer).post(f"/api/routine/routines/{routine.pk}/assign_to_client/",
                                   {"client_id": client.pk}, content_type=JSON)
     assert delivered.status_code == 200, delivered.content

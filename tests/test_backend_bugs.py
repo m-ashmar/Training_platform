@@ -659,7 +659,9 @@ def test_b001_a_routine_belongs_to_one_client(make_user, api):
     for c in (first, second):
         TrainerClientRelation.objects.create(trainer=trainer, client=c, status="approved",
                                              initiated_by="client")
-    routine = Routine.objects.create(name="bb1 private", created_by=trainer, days=1)
+    # G5 (2026-11-24): assigning refuses a routine with no exercises (routine_empty).
+    from tests.routine_rows import deliverable_routine
+    routine = deliverable_routine(trainer, "bb1 private", days=1)
     url = f"/api/routine/routines/{routine.pk}/assign_to_client/"
     assert api(trainer).post(url, {"client_id": first.pk}, content_type=JSON).status_code == 200
     again = api(trainer).post(url, {"client_id": second.pk}, content_type=JSON)

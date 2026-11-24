@@ -24,6 +24,7 @@ from decimal import Decimal
 
 import pytest
 from django.utils import timezone
+from tests.routine_rows import deliverable_routine
 
 pytestmark = pytest.mark.django_db
 
@@ -395,7 +396,9 @@ def _pound_client_of(make_user, api, trainer, *, first_name="Sam"):
 def _first_program(api, trainer, client):
     from routine.models import Routine
 
-    routine = Routine.objects.create(name="Month one", created_by=trainer, days=3)
+    # G5 (2026-11-24): an empty routine no longer pays month 1, so the first
+    # programme has an exercise, as a real one does (tests/routine_rows.py).
+    routine = deliverable_routine(trainer)
     answer = api(trainer).post(f"/api/routine/routines/{routine.pk}/assign_to_client/",
                                {"client_id": client.pk}, content_type=JSON)
     assert answer.status_code == 200, answer.content
