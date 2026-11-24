@@ -498,9 +498,11 @@ example a backup bucket with a retention lock), never next to the keys.
    Why: Redis is not part of the backup, and django-cachalot keeps query results there
    for up to 24 hours (`CACHALOT_TIMEOUT`). It drops them on every write made through
    Django, but a restore is a write from outside Django, so without this step the app
-   can go on reading the rows of BEFORE the restore. The one that matters most is the
-   policy table: the old build flags would stay in force for up to a day — what each
-   build may sell, and the Google Play coaching switch (section 13). The command marks
+   can go on reading the rows of BEFORE the restore: plans, the catalogue, the content
+   the app reads. The build flags are not among them: their table is never cached
+   (since 2026-11-24, SIDE_BUGS S-292), so what each build may sell and the Google Play
+   coaching switch (section 13) hold from the first request after the restore. The
+   command marks
    every table's cached results stale and touches nothing else. Do NOT flush the
    cache's Redis database instead: the same database (DB0, the `default` cache) holds
    the console's sessions (SIDE_BUGS S-292).
@@ -740,8 +742,9 @@ containers still serving; the dump is the way back. Then run the update's own co
   stop `web`, `worker` and `beat`, restore, run
   `docker compose run --rm --no-deps web python manage.py invalidate_cachalot`, then
   `docker compose up -d`. A restore is a write from outside Django, which the query
-  cache does not see; without it the old build flags (what each build may sell, the
-  Google Play coaching switch) can stay in force for up to 24 hours (SIDE_BUGS S-292).
+  cache does not see; without it the cached reads of before the restore (plans, the
+  catalogue, the app's content) can be served for up to 24 hours. The build flags are
+  never cached (SIDE_BUGS S-292), so they hold from the first request either way.
 
 ## 13. Coaching off on Google Play (Road to 10 R8)
 The `play` build sells one thing: a month with a personal trainer, paid from the wallet,

@@ -34,7 +34,14 @@ JSON = "application/json"
 #: follow, which is the part that catches an N+1. The only thing that grows with data
 #: at all is the strength headline, one query per exercise it ranks, bounded at six
 #: (`routine/recent.py STRENGTH_LIMIT`).
-QUERY_CEILING = 48
+#:
+#: Re-recorded 48 -> 49 (2026-11-24, the owner's ruling on SIDE_BUGS S-292): the build's
+#: flags are now read fresh on every load (`policy_channelcapabilities` is on
+#: CACHALOT_UNCACHABLE_TABLES), so the one flags read that cachalot used to answer from
+#: its cache after the first request is now always a query. Measured on the test's own
+#: data: the large load is 48 with the flags cached and 49 with them fresh, exactly one
+#: `policy_channelcapabilities` read; nothing else moved.
+QUERY_CEILING = 49
 
 #: The minutes of `_program`'s day (one exercise, 3 sets of 10, the model's 60 s rest):
 #: 3 x 10 x 4 s + 2 x 60 s = 240 s. Deliberate contract change (Road to 10 S0.2,
