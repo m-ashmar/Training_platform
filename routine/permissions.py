@@ -515,8 +515,15 @@ def visible_exercises_for(requester, base_qs=None):
     trainers = (TrainerClientRelation.objects
                 .filter(client=requester, status='approved')
                 .values_list('trainer_id', flat=True))
+    # The assigned routines' exercises as a SUBQUERY of ids, never a join: joining the
+    # to-many `routine_exercises -> routine -> assigned_to` multiplied each exercise by
+    # every row that used it and needed a DISTINCT over the whole width of the select
+    # (the fix run's S-248). The same rows, no duplicates, no DISTINCT.
+    from .models import RoutineExercise
+    assigned = (RoutineExercise.objects.filter(routine__assigned_to=requester)
+                .values('exercise_id'))
     return qs.filter(
         Q(created_by__isnull=True)
         | Q(created_by_id__in=trainers)
-        | Q(routine_exercises__routine__assigned_to=requester)
-    ).distinct()
+        | Q(pk__in=assigned)
+    )

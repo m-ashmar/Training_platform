@@ -1519,10 +1519,15 @@ class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         user = self.request.user
         if getattr(user, 'is_admin', False):
             return self.queryset
+        # The assigned routines as a SUBQUERY of ids, never a join (the fix run's S-248):
+        # OR-ed with authorship, the to-many `routine__assigned_to` became a LEFT JOIN
+        # that repeated each row once per assignee, and the `.distinct()` that undid it
+        # ran over every selected column — two whole user rows among them.
+        assigned = Routine.objects.filter(assigned_to=user).values('id')
         return self.queryset.filter(
-            Q(routine__assigned_to=user)
+            Q(routine_id__in=assigned)
             | Q(routine__created_by=user, routine__purchase__isnull=True)
-        ).distinct()
+        )
 
 
 class RoutineProgressViewSet(viewsets.ModelViewSet):
