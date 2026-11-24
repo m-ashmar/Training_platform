@@ -12,9 +12,10 @@ A second workstream shares this branch: the backend changes the v2 app designs a
 and order live in `BACKEND_DELTA.md`, not here.
 
 **Where things stand (2026-11-24):** Road to 10 is the work now: phase 0, batch A, phase 3,
-S2.7, batch B, S2.13, the review round of every landed batch and Part 4's R4, R5 and R8 are
-on this branch (full gate at `7c5f927` on a fresh database: 3162 passed, 2 failed, 0 skipped; the two failures are outside the round and pass alone or under a quiet load: SIDE_BUGS S-289, a test that fails in the hour after midnight, and S-290, S-245's wall-clock bound under a load average of 173); next are the later Road to 10 phases as the owner orders (the Road
-to 10 section below has the table per batch). The fix run is
+S2.7, batch B, S2.13, the review round of every landed batch, Part 4's R4, R5, R8 and R1,
+round 3 (B-199, the console and password fixes), round 4's fixes and the dev-only walk
+seed are on this branch (full gate at `7d02bcc` on a fresh database: 3333 passed, 0 failed, 0 skipped); next are the later Road to 10 phases as the owner
+orders (the Road to 10 section below has the table per batch). The fix run is
 paused with wave 2 built on unmerged `fx/w2-*` branches (its section says how to resume).
 
 ## Build order
@@ -184,6 +185,22 @@ full gate at `7c5f927` on a fresh database: 3162 passed, 2 failed, 0 skipped; th
 | R5 the store reviewers' accounts stay alive | `3203bae` | LANDED: a later `seed_review_accounts` run moves a programme's end on and keeps a coached month paid through the agent top-up path and `renew`; DEPLOY_CHECKLIST §12 has the owner's step |
 | R8 coaching off on Google Play with one row | `7973ea6` | LANDED: tests only, DEPLOY_CHECKLIST §13 has the console step |
 
+
+**Round 3, round 4 and the walk seed** (2026-11-24, one landing: merged on
+`road10/integration`, LANDED with the full gate at `7d02bcc` on a fresh database: 3333 passed, 0 failed, 0 skipped; round 3's own first gate, at `16e99dc`, failed on ONE test: tests/test_regression_gate.py `test_the_notification_list_does_not_query_per_notification`, 7 queries for a page of 20 against a budget of 6, caused by R1 (the build's capability rows, read once per request); fixed in `169a2c3` and re-gated with this landing, 3209 passed there otherwise):
+
+| Item | Commits | State |
+|---|---|---|
+| R1 store-safe notification texts by build | `d5406b5`, `b3fb58a`, `169a2c3` | LANDED: `notifications/build_gate.py` picks a notice's text from policy's flags for the reading build (inbox, at read time) or the build a device token recorded (push, per device); `checkout_expired` hidden, `subscription_expired` and `coaching_payment_due` have a store text on a build without the flag; apk and web unchanged. Migration users 0049 (`DeviceToken.app_channel`), in DEPLOY_CHECKLIST §12.5 with what breaks without it. RATCHET RE-RECORDED, deliberately: the inbox's query budget 6 -> 7 (`169a2c3`, the reason at the assertion): the seventh query is the build's capability rows, read ONCE per request for the store-safe texts, not per row; not cached in policy (the manager's ruling: a stale flag on the path that decides what a build may sell is the worse risk); a page of 5 and a page of 20 now measured equal, and every inbox route held to one capability read |
+| B-199 wallet money by build | `cef7ec3` | LANDED: docstrings, API_CONTRACT and 22 tests pin that every WALLET_MOVE path reads the moving request's build; no behaviour changed; the first ios build's agent job is the owner's question |
+| Console actions declare their permission (MEDIUM, security) | `e826cbf` | LANDED: `change` or `add` on every action of both sites (67 had none); SIDE_BUGS S-279 |
+| `password_not_set`; the console's reset ends every session | `3b126de`, `054f7b6` | LANDED: NEW code on the password change; `users/utils.py end_every_session` shared; SIDE_BUGS S-275 |
+| S-289 the challenge test after midnight | `5b26d6e`, `9aea161` | LANDED: the test's setup dates its sets as the app does; a set that names its session and sends no date is dated on the session's start day (a sent date kept); S-291 keeps the time-zone case |
+| Coaching money in the console (S-264, S-266, the phase 3 review) | `0054a5a`, `2a74aac`, `a64f924`, `2abfa88` | LANDED: a re-point keeps both ends of a running coaching; the hourly run wakes and ends, with no charge, a frozen coaching the trainer scheduled to end; a trainer change that would end another coaching is a field error with nothing written (was a 500, or a month left in escrow on a rejected row); the stock `/admin/` relation page is read-only and neither site deletes a relation |
+| S-272 the manual achievement check | `bc5314a` | LANDED: 6 an hour per account, then 429 `throttled` |
+| Phase 0 review, round 4 (S0.3, S2.1, S2.12, S-257/S-267) | `1e2d1a2`, `9ac47a8`, `1531e61`, `f480342` | LANDED: a name of invisible characters is no name, one rule (`users/names.py`) for `onboarding_missing` and the directory; the client's own request leads Home's hero; the support WhatsApp is `+` and digits; the test setup puts back the migration-seeded tables after a flush |
+| The walk seed (development only) | `ebc6cab`, `507f733`, `b1e68bb`, `1bccaf3`, `b983516`, `604ea11`, `b5e2dae`, `1734e28`, `a0d2d05`, `4fee0ca`, `590e359`, `92aa64b`, `62aed3f`, `ec6581c`, `367ff18`, `a32b91c`, `fd5237a`, `781c8a5` | LANDED: `manage.py seed_walk_states` puts ordinary accounts `walk.<state>@yalla.test` into each state the app's walk-throughs need, through the platform's real routes and services, and writes `var/walk_states.json` (git-ignored, no password or token); refuses any settings but `settings_local`; and any database not on this machine; a reset retires the old accounts and deletes nothing, and closes their open withdrawals (`payouts.services.fail`) and gives back their held months (`release_hold`) so the operator's queues and escrow stay as they were; three sweeps take an optional scope for it (`expire_lapsed_subscriptions`, `send_renewal_reminders`, `remind_upcoming`; None, the beat's call, is every row as before); nothing at request time imports `users/walk` or reads those addresses (a scan test) |
+
 **S3.7, the routes the app never calls:** CLASSIFIED 2026-11-23, read-only (the table is the
 manager's note `road10-s37-unused-routes.md` in the side-session notes folder). 93 of the 301
 contract routes have no caller in the app: twin 43, dead 20, unbuilt 15, operator 6, machine 5,
@@ -213,7 +230,14 @@ without signing in; an agent may delete the account while holding the platform's
 receivable stays on record; refusing with a code is a business ruling); R8's two limits (a
 trainer can still approve a paid request sent before the flip, and running coachings renew
 until the client sends `renew: false`); the stock `/admin/` (SIDE_BUGS S-274: gate it to
-console operators, or unmount it).
+console operators, or unmount it); B-199: whether the first ios build should
+run the agent's top-ups and the trainer's withdrawals (today its flag refuses them,
+the spec's table); whether `policy_channelcapabilities` belongs on
+`CACHALOT_UNCACHABLE_TABLES` (SIDE_BUGS S-292: cached up to 24 hours, and a write
+from outside Django, a restore included, does not clear it; DEPLOY_CHECKLIST §9 now
+clears it after a restore); and the console's `assigned_trainer` sync, which still
+approves a pending or rejected relation with no consent from the client and no
+charge (older than Road to 10; the money worker's reviewer flagged it).
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
