@@ -16,6 +16,7 @@ from django.db import transaction
 from django.db.models import Count
 from django.utils.translation import gettext as _, gettext_lazy
 from .tasks import generate_rule_based_plan
+from .allergens import allergy_reading
 from .exceptions import ConstraintViolationError, PersistenceError
 from .engine.rule_based_planner import RuleBasedPlanner
 from .services.rule_based_planner import NoServableMealError
@@ -298,7 +299,16 @@ class FoodListView(APIView):
     names; `allergen_verdict` is `violation`, `safe` or
     `unverified` (nothing matched but the food's allergen data is not curated: the plan
     check reports it for review, the write accepts it); `liked` / `disliked` from the
-    client's preferences. With it, `hide_conflicts=true` drops every excluded or
+    client's preferences.
+    `allergen_verdict` is ONE food's verdict for this client (BACKEND_BUGS B-143). A
+    client who declared nothing gets `safe` on every row, an uncurated food included:
+    there is nothing to check it against, so `unverified` is never answered then. The
+    review (`trainer/diet-plans/<plan_id>/review/`) judges the whole PLAN in its own
+    words, `check.allergens.verdict`: `nothing_declared` (the client declared nothing —
+    here, `safe` on every row), `clear` (every food positively cleared: `safe` on each of
+    its rows), `unverified` or `violation`. Two sets for two questions; neither is an
+    alias of the other.
+    With `for_client`, `hide_conflicts=true` drops every excluded or
     disliked row and `liked_only=true` keeps only the client's liked foods; `count` and
     the pages follow. The marks cost the same few queries whatever the page size.
 
@@ -1064,6 +1074,20 @@ class UserPreferencesView(APIView):
     `GET v1/preferences/` — the caller's liked/disliked foods, the five macro-choice
     lists, `allergies` and `local_ratio`.
 
+    Beside `allergies` (the text as the client wrote it, "" when none), the server's
+    reading of it (BACKEND_BUGS B-195, additive): `allergens` — the tags of the 14-tag
+    vocabulary (`diet/allergens.py`) it names, sorted: `peanut`, `tree_nut`, `milk`,
+    `egg`, `fish`, `shellfish`, `mollusc`, `soy`, `gluten`, `sesame`, `mustard`,
+    `celery`, `lupin`, `sulphite` (an everyday word widens: "nuts" is `peanut` and
+    `tree_nut`; «حساسية للوز» is `tree_nut`) — and `allergy_terms` — the words it names
+    that the vocabulary does not know, English ("kiwi") or Arabic («الفراولة»), sorted.
+    Both are empty for blank text and for "none" in either language («لا يوجد»,
+    «ماعندي»). They are what the plan generator, the trainer's meal write and the swap
+    refuse with, and EXACTLY the two fields the client's trainer reads
+    (`trainer/clients/{client_id}/preferences/`, B-128): one function answers both, so
+    tick the Allergies chips from `allergens` instead of parsing the text again. The
+    writes below answer no preferences object, so nothing else changed.
+
     `POST` — either one food (`action`: `like` | `dislike`, `food_id`), or any of the
     bulk fields: `liked_foods`, `disliked_foods`, `protein_choices`, `carb_choices`,
     `fat_choices`, `vegetable_choices`, `fruit_choices` (lists of food ids),
@@ -1122,6 +1146,9 @@ class UserPreferencesView(APIView):
                     for food in preferences.disliked_foods.all()
                 ],
                 'allergies': preferences.allergies,
+                # The server's reading of that text, from the one function the trainer's
+                # read of this client answers it with (BACKEND_BUGS B-195, B-128).
+                **allergy_reading(preferences.allergies),
                 'protein_choices': [
                     {'id': food.id, **food_names(food), 'image_url': food.image_url}
                     for food in preferences.protein_choices.all()
@@ -2333,6 +2360,13 @@ class TrainerMealView(APIView):
       `no_food_items`, `bad_food_items`, `bad_food_item`, `bad_quantity`,
       `duplicate_food`, `unknown_food`, `declared_allergen`, `plan_superseded` — the
       trainer service's refusals, `error` says which.
+    - `plan_superseded` — the plan is no longer followed: a newer plan replaced it. It
+      is 400 HERE, on a meal write (POST, PUT and DELETE alike). The same code is 403 on
+      the trainer's plan reads (`nutrition/plan/<plan_id>/`, `meals/<meal_id>/components/`,
+      `plan/<plan_id>/meals-with-ingredients/`) and on the review
+      (`trainer/diet-plans/<plan_id>/review/`), and 409 on the client's
+      `client/meals/<meal_id>/complete/`. Each of the three statuses is shipped and stays
+      (BACKEND_BUGS B-142): branch on `code`, never on the status.
     - 400 `bad_body` — the body is not a JSON object.
     - 403 `not_a_trainer` — the caller is neither a trainer nor an admin.
     - 403 `not_plan_owner` / `not_assigned_client` — another trainer wrote the plan,
@@ -2684,6 +2718,9 @@ class DietPlanNutritionView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such plan, or not yours (a client, an agent), or a trainer's draft
     not yet sent (a client; BACKEND_BUGS B-132); 500 `server_error`.
     """
@@ -2874,6 +2911,9 @@ class MealComponentsView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such meal, or not yours; 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccessOrFrozenRead]
@@ -3140,6 +3180,9 @@ class MealCompletionView(APIView):
       subscription is refused here: completing is a use, not a read).
     - 404 `not_found` — no such meal or component, or not this client's.
     - 409 `plan_superseded` — the meal is on a plan that has been replaced; refresh.
+      The same code is 403 on the trainer's plan reads and review, and 400 on the
+      trainer's meal writes (`trainer/meals/`): each status is shipped and stays
+      (BACKEND_BUGS B-142), so branch on the code, never on the status.
     - 500 `server_error`.
     """
     permission_classes = [IsAuthenticated, HasDietAccess]
@@ -4099,6 +4142,9 @@ class DietPlanMealsWithIngredientsView(APIView):
     reading a plan another trainer wrote, of a client no longer theirs, or one the client
     no longer follows (it answered the status default `permission_denied` until the
     owner's decision of 2026-09-24); `not_assigned_view` for any other trainer refusal.
+    `plan_superseded` is 403 on this read; the same code is 400 on a trainer's meal
+    write (`trainer/meals/`) and 409 on the client's `client/meals/<meal_id>/complete/`.
+    Each status is shipped and stays (BACKEND_BUGS B-142): branch on the code.
     404 `not_found` — no such plan, or not yours, or (to a client) a trainer's draft not
     yet sent (BACKEND_BUGS B-132); 500 `server_error`.
     """
