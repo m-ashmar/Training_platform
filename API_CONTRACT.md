@@ -2352,7 +2352,14 @@ operator maintains in the console. Four things the app needs:
   from the wallet (Road to 10 S2.13) is `409 plan_payment_leg` with `payment_id`: refund
   the payment instead, which also takes back the cover. So is every row of a plan paid
   through a gateway — the mint into the client's wallet, the trainer's share, the
-  platform's revenue (SIDE_BUGS S-268) — with its own message.
+  platform's revenue (SIDE_BUGS S-268) — with its own message. A coaching month's money
+  moves once (SIDE_BUGS S-250): a leg out of escrow — the trainer's payout, the
+  platform's commission, a held month given back — and the charge of a month already
+  paid out or given back are `409 coaching_month_leg` with `period` `{id, number,
+  status}` (null for a hold from before months existed). The charge of a month still
+  held goes back to the client as before, and now with its month (SIDE_BUGS S-222): the
+  month reads `refunded`, the coaching forgets the hold, and both people get
+  `coaching_fee_refunded`.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).

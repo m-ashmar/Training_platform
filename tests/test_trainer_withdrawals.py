@@ -199,13 +199,21 @@ def test_rows_that_are_not_payouts_carry_no_window(make_user, api):
 
 
 def test_a_reversed_payout_is_not_settling(make_user, api):
+    from wallet.models import move_funds_atomic
+
     trainer, _client = _paid_coaching(make_user, api)
     payout = _payout_row(trainer)
-    reversed_ = api(_operator(make_user)).post(
-        "/api/wallet/admin/reversal/", {"reference_id": payout.reference_id,
-                                        "idempotency_key": uuid.uuid4().hex},
-        content_type=JSON)
-    assert reversed_.status_code == 200, reversed_.content
+    # CONTRACT CHANGE (SIDE_BUGS S-250; Road to 10 PAY-1, 2026-11-24): support can no
+    # longer reverse one leg of a paid coaching month (`409 coaching_month_leg`), which
+    # is how this reversal was made. What this test reads — the trainer's wallet showing
+    # a reversed payout as not settling — still holds for a reversal written before that,
+    # so the row is written the way that endpoint wrote it.
+    operator = _operator(make_user)
+    move_funds_atomic(payout.destination_wallet, payout.source_wallet, payout.amount,
+                      actor_id=operator.pk, tx_type="reversal",
+                      money_type=payout.money_type,
+                      metadata={"original_reference": payout.reference_id, "reason": ""},
+                      reverses=payout)
 
     body = api(trainer).get("/api/wallet/balance/").json()
     assert (body["balance"], body["settling"], body["available"]) == \

@@ -287,7 +287,11 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_o
                 # again pays a second time out of an escrow wallet that holds other
                 # clients' money: measured, one 80.00 hold reversed and then released by
                 # unassign left the client with 180.00 of a 100.00 wallet. The hold is
-                # settled, so the row forgets it.
+                # settled, so the row forgets it. Since SIDE_BUGS S-222 the reversal
+                # records the month itself (`wallet.views._reverse_held_month`); this
+                # catches one written before, or any other way, and now tells both
+                # people, as a release does — it used to mark the month refunded
+                # silently.
                 logger.warning("Hold %s was already reversed; not moving it for %s",
                                locked.hold_reference, purpose)
                 locked.hold_reference = ''
@@ -296,6 +300,8 @@ def _move_hold(relation, actor, destination_owner, owner_type, purpose, *, pay_o
                 if period is not None and period.status == 'held':
                     period.status = 'refunded'
                     period.save(update_fields=['status', 'updated_at'])
+                    from .coaching import notify_fee
+                    notify_fee('refunded', period)
                 return None
 
             if pay_out:

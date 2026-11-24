@@ -1210,6 +1210,126 @@ def _plan_payment_leg(original):
                     status=status.HTTP_409_CONFLICT)
 
 
+#: The purposes of a coaching month's charge, client -> escrow: month 1's hold
+#: (`users/trainer_relations.py` `take_hold`) and a renewal's (`users/coaching.py` `renew`).
+_MONTH_CHARGE_PURPOSES = ("trainer_request_hold", "coaching_renewal_charge")
+
+
+class _MonthNotHeld(Exception):
+    """Under the locks, the month's money had already left escrow (`_reverse_held_month`)."""
+
+    def __init__(self, period):
+        super().__init__(getattr(period, "pk", None))
+        self.period = period
+
+
+def _coaching_month_refusal(period):
+    return Response({"error": _("This belongs to a coaching month whose money has been "
+                                "paid out or given back, and cannot be reversed on its "
+                                "own."),
+                     "code": "coaching_month_leg",
+                     "period": ({"id": period.pk, "number": period.number,
+                                 "status": period.status} if period is not None else None)},
+                    status=status.HTTP_409_CONFLICT)
+
+
+def _month_of_charge(original):
+    """`(period, relation_id)` when `original` is a coaching month's charge (client ->
+    escrow: a month-1 hold or a renewal's charge), else None. The month is the
+    `CoachingPeriod` whose `hold_reference` it is (None for a hold taken before months
+    existed); the relation is the month's, or the one still holding the reference."""
+    from users.models import CoachingPeriod, TrainerClientRelation
+
+    period = CoachingPeriod.objects.filter(hold_reference=original.reference_id).first()
+    relation_id = (period.relation_id if period is not None else
+                   TrainerClientRelation.objects.filter(hold_reference=original.reference_id)
+                   .values_list("pk", flat=True).first())
+    metadata = original.metadata if isinstance(original.metadata, dict) else {}
+    if (period is None and relation_id is None
+            and metadata.get("purpose") not in _MONTH_CHARGE_PURPOSES):
+        return None
+    return period, relation_id
+
+
+def _month_left_escrow(original, period):
+    """True when a month's charge is no longer money held in escrow: the month was paid
+    out or given back, or any ledger row names the charge as the hold it moved."""
+    return ((period is not None and period.status != "held")
+            or Transaction.objects.filter(metadata__hold_reference=original.reference_id)
+            .exists())
+
+
+def _coaching_month_leg(original):
+    """409 `coaching_month_leg` when `original` is a coaching month's money that this
+    endpoint must not move on its own, else None (SIDE_BUGS S-250).
+
+    A month's money is charged into escrow and moved out of it once, by the coaching:
+    to the trainer and the platform when it is paid out (`users/coaching.py` `pay_out`:
+    the trainer's `trainer_assignment_settlement`, `coaching_renewal_payout` or owed
+    `coaching_payout`, the platform's `coaching_commission`), or back to the client
+    (`users/trainer_relations.py` `_move_hold`). Each of those legs names its month
+    (`hold_reference`, and `period_id` when paid out), and reversed on its own put money
+    back into the per-currency escrow that backs every client's hold while the month
+    stayed paid and the client unrefunded — measured: both legs of month 1 reversed
+    left 100.00 in escrow that no hold owns. They are refused, read off what the row
+    says of itself, which never changes. So is the CHARGE of a month whose money has
+    already left escrow: reversed, it paid the client out of other clients' holds. The
+    charge of a month still held is support's recovery for a stuck hold and is
+    reversed (`_reverse_held_month`), its month re-checked under the locks."""
+    metadata = original.metadata if isinstance(original.metadata, dict) else {}
+    hold, period_id = metadata.get("hold_reference"), metadata.get("period_id")
+    if hold or period_id:
+        from users.models import CoachingPeriod
+
+        period = None
+        if str(period_id or "").isdigit():
+            period = CoachingPeriod.objects.filter(pk=int(period_id)).first()
+        if period is None and hold:
+            period = CoachingPeriod.objects.filter(hold_reference=hold).first()
+        return _coaching_month_refusal(period)
+    month = _month_of_charge(original)
+    if month is not None and _month_left_escrow(original, month[0]):
+        return _coaching_month_refusal(month[0])
+    return None
+
+
+def _reverse_held_month(original, *, actor_id, reason):
+    """Give a held coaching month's charge back to the client — support's recovery for
+    a hold that got stuck — and record it where the coaching reads it (SIDE_BUGS S-222):
+    the month is `refunded`, the relation forgets the hold, and both people are told
+    (`coaching_fee_refunded`, on commit), as `release_hold` does. The month used to read
+    `held` until the hold was next touched, and nobody heard of it.
+
+    Inside the caller's transaction, under `_move_hold`'s locks in its order — the
+    relation row (`of=('self',)`), the month, then the wallets in `move_funds_atomic` —
+    so a settlement or a release racing it either moves the money first, and this
+    raises `_MonthNotHeld` with nothing moved, or waits and finds no hold."""
+    from users.coaching import notify_fee
+    from users.models import CoachingPeriod, TrainerClientRelation
+
+    period, relation_id = _month_of_charge(original)
+    relation = (TrainerClientRelation.objects.select_for_update(of=("self",))
+                .filter(pk=relation_id).first() if relation_id else None)
+    if period is not None:
+        period = CoachingPeriod.objects.select_for_update().get(pk=period.pk)
+    if _month_left_escrow(original, period):
+        raise _MonthNotHeld(period)
+    tx = move_funds_atomic(original.destination_wallet, original.source_wallet,
+                           original.amount, actor_id=actor_id, tx_type="reversal",
+                           money_type=original.money_type,
+                           metadata={"original_reference": original.reference_id,
+                                     "reason": reason},
+                           reverses=original)
+    if relation is not None and relation.hold_reference == original.reference_id:
+        relation.hold_reference = ""
+        relation.save(update_fields=["hold_reference", "updated_at"])
+    if period is not None:
+        period.status = "refunded"
+        period.save(update_fields=["status", "updated_at"])
+        notify_fee("refunded", period)
+    return tx
+
+
 class AdminReversalView(APIView):
     """`POST /api/wallet/admin/reversal/` — support puts one ledger row back.
 
@@ -1228,6 +1348,7 @@ class AdminReversalView(APIView):
     | 409 | `routine_product_leg` | it is one leg of a routine product's sale or of its refund (see below); `purchase` `{id, status, paid_with}` names it, or is null if no purchase has that id any more |
     | 409 | `coaching_transfer_leg` | it is the trainer's or the platform's leg of a client's payment to a trainer (see below); `transfer_reference` is the payment's own reference, which reverses it whole |
     | 409 | `plan_payment_leg` | it is a ledger row of a plan payment — the one row of a plan paid from the wallet (Road to 10 S2.13), or a gateway payment's mint, trainer's share or platform revenue (SIDE_BUGS S-268): refund the payment (`payment_id`) instead, which also takes back the cover |
+    | 409 | `coaching_month_leg` | it is a coaching month's money this endpoint does not move alone (SIDE_BUGS S-250, see below): a leg out of escrow — the trainer's payout, the platform's commission, a held month given back — or the charge of a month already paid out or given back; `period` `{id, number, status}` names the month, or is null for a hold from before months existed |
     | 400 | `insufficient_balance` | the wallet that received the money no longer holds it, so it cannot be taken back |
     | 400 | `currency_mismatch` | a wallet on either side changed currency since the row was written |
     | 400 | `reversal_refused` | the ledger refused the reversal for any other reason; nothing moved |
@@ -1280,6 +1401,19 @@ class AdminReversalView(APIView):
     alone is `409 coaching_transfer_leg`: either alone would leave escrow paying for the
     other. A transfer made before (one WALLET_MOVE row, client -> trainer) is reversed
     as it always was.
+
+    A COACHING MONTH'S MONEY MOVES ONCE (SIDE_BUGS S-250, S-222). A month is charged
+    into the per-currency escrow (month 1's hold, a renewal's charge) and moved out of it
+    once: to the trainer and the platform when it is paid out, or back to the client.
+    Reversing a payout or a commission leg put money back into escrow that no hold owns
+    while the month stayed paid; reversing the charge of a month already paid out or
+    given back paid the client out of other clients' holds. Both are `409
+    coaching_month_leg` (`_coaching_month_leg`). The charge of a month still HELD is
+    support's recovery for a stuck hold and goes back to the client as before — now
+    with its month: marked `refunded`, the relation's hold forgotten and both people
+    told (`coaching_fee_refunded`), under the relation's and the month's locks, so a
+    settlement racing it either pays out first (and this answers 409) or finds no hold
+    (`_reverse_held_month`). It used to leave the month `held` and tell nobody.
 
     A reversed AGENT top-up also comes off the agent's receivable (the cash they hold
     for the platform; plan step 9), in the same transaction: the agent hands the cash
@@ -1338,6 +1472,13 @@ class AdminReversalView(APIView):
         plan_leg = _plan_payment_leg(original)
         if plan_leg is not None:
             return plan_leg
+        # And a coaching month's money (S-250): its legs out of escrow, and the charge of
+        # a month no longer held. A held month's charge is reversed with its month
+        # (S-222), re-checked under the locks.
+        month_leg = _coaching_month_leg(original)
+        if month_leg is not None:
+            return month_leg
+        held_month = _month_of_charge(original) is not None
 
         idem_key = serializer.validated_data["idempotency_key"]
         try:
@@ -1363,7 +1504,12 @@ class AdminReversalView(APIView):
             with transaction.atomic():
                 if agent_profile is not None:
                     agent_profile = agents.lock_profile(agent_profile)
-                if (original.metadata or {}).get("coaching_transfer") == "charge":
+                if held_month:
+                    # A held coaching month back to the client, with its month (S-222).
+                    tx = _reverse_held_month(
+                        original, actor_id=request.user.id,
+                        reason=serializer.validated_data.get("reason", ""))
+                elif (original.metadata or {}).get("coaching_transfer") == "charge":
                     # A client's payment to a trainer (B-163): every leg goes back.
                     tx = _reverse_coaching_transfer(
                         original, actor_id=request.user.id,
@@ -1385,6 +1531,10 @@ class AdminReversalView(APIView):
             audit("wallet.reversal.already", request, {"original": original.reference_id})
             return Response({"error": _("Transaction has already been reversed"),
                              "code": "already_reversed"}, status=status.HTTP_409_CONFLICT)
+        except _MonthNotHeld as exc:
+            # The month was paid out or given back while this waited. No money moved.
+            idempotency.release(idem)
+            return _coaching_month_refusal(exc.period)
         except ValueError as e:
             # `InsufficientBalance` and `CurrencyMismatch` are ValueErrors: the same 400
             # as ever, each with the code that says which (the owner, 2026-09-24).
