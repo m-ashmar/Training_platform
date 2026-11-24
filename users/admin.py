@@ -93,11 +93,54 @@ def deactivate_users(modeladmin, request, queryset):
     count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
     messages.success(request, f"Deactivated {count} users.")
 
+def coaching_in_the_way(client, new_trainer_id):
+    """The approved coaching an operator's change of `assigned_trainer` would end, or
+    None.
+
+    The console syncs the relation to the pointer, and it used to do so by rejecting the
+    client's other approved coaching with a bare UPDATE: no `release_hold`, no
+    `end_coaching`, so a month held in escrow stayed there on a rejected row. Pointing a
+    client at a second trainer raised `IntegrityError` first (one approved coaching per
+    client), a 500; clearing the pointer did reject the coaching, around the money. A
+    coaching ends through the paths that settle its money: the trainer's
+    `trainer/unassign-client/`, the client's `client/unassign-trainer/`, or the renewal
+    run (the phase-3 review's finding, 2026-11-24). `new_trainer_id` None is clearing
+    the pointer, which every approved coaching is in the way of.
+    """
+    from .models import TrainerClientRelation
+
+    return (TrainerClientRelation.objects.filter(client=client, status='approved')
+            .exclude(trainer_id=new_trainer_id).select_related('trainer').first())
+
+
+def coaching_in_the_way_message(relation):
+    from django.utils.translation import gettext
+
+    trainer = relation.trainer
+    return gettext(
+        "This client has a running coaching with %(name)s. To change trainer, end it "
+        "first: the trainer or the client ends it in the app, which returns any money "
+        "held for it. To put the trainer field back in step, choose %(name)s.") % {
+            'name': trainer.full_name or trainer.username}
+
+
 class CustomUserChangeForm(UserChangeForm):
     """Custom form for changing user data in admin"""
     class Meta(UserChangeForm.Meta):
         model = CustomUser
         fields = '__all__'
+
+    def clean(self):
+        """A change of `assigned_trainer` that would end another approved coaching is a
+        field error on `assigned_trainer`, so the operator is told and nothing is
+        written (`coaching_in_the_way`). `save_model` checks again under the lock."""
+        cleaned = super().clean()
+        if self.instance.pk and 'assigned_trainer' in self.changed_data:
+            new = cleaned.get('assigned_trainer')
+            other = coaching_in_the_way(self.instance, new.pk if new else None)
+            if other is not None:
+                self.add_error('assigned_trainer', coaching_in_the_way_message(other))
+        return cleaned
 
 class CustomUserCreationForm(UserCreationForm):
     """Custom form for creating users in admin"""
@@ -218,37 +261,63 @@ class CustomUserAdmin(UserAdmin):
         app requires BOTH the pointer and an approved `TrainerClientRelation`. Setting
         the pointer alone produced a client whose app showed a trainer who could not
         actually do anything, and clearing it left an approved relation behind.
+
+        A change that would END another approved coaching (a second trainer, or the
+        pointer cleared) is refused and nothing is written: the console cannot settle
+        that coaching's money (`coaching_in_the_way`). Setting the trainer of a coaching
+        already running only puts the pointer back in step.
         """
+        from django.core.exceptions import ValidationError
+        from django.db import transaction
+
         from .models import TrainerClientRelation
 
         if change and 'password' in form.changed_data:
             if obj.password and not obj.password.startswith('pbkdf2'):
                 obj.password = make_password(obj.password)
-        super().save_model(request, obj, form, change)
         if 'assigned_trainer' not in getattr(form, 'changed_data', []):
+            super().save_model(request, obj, form, change)
             return
-        if obj.assigned_trainer_id:
+        with transaction.atomic():
+            # The client's relations FIRST, then the user row (the lock order of
+            # users/trainer_relations.py: relation, then the user rows): every row of
+            # the client's is locked before anything is read or written, so two saves
+            # at once cannot both read "no coaching yet" and keep a stale end, and a
+            # renewal holding the relation is waited for rather than deadlocked.
+            # In id order, the order `release_holds_before_erasure` takes them.
+            rows = {row.trainer_id: row for row in
+                    TrainerClientRelation.objects.select_for_update()
+                    .filter(client_id=obj.pk).order_by('pk')}
+            in_the_way = next((row for row in rows.values() if row.status == 'approved'
+                               and row.trainer_id != obj.assigned_trainer_id), None)
+            if in_the_way is not None:
+                # The form refused it already (`CustomUserChangeForm.clean`); this is
+                # the same answer for a coaching approved since the form was checked.
+                raise ValidationError(coaching_in_the_way_message(
+                    TrainerClientRelation.objects.select_related('trainer')
+                    .get(pk=in_the_way.pk)))
+            super().save_model(request, obj, form, change)
+            if not obj.assigned_trainer_id:
+                # Cleared, with no approved coaching: nothing to end.
+                return
             # An operator's assignment carries nobody's note: `client_note` is read as
             # the words of whoever `initiated_by` names, so rewriting the author and
             # keeping the text served the client's own note back to them as the
             # trainer's (the review of B-093).
             defaults = {'status': 'approved', 'initiated_by': 'trainer',
-                        'client_note': '', 'ends_at_period_end': False}
-            # The client's «do not renew» (S2.7) belongs to a coaching, not to the row:
-            # cleared when this makes a NEW coaching, kept on one already running, or an
-            # operator re-pointing a stale pointer would charge a month the client
-            # stopped.
-            if not TrainerClientRelation.objects.filter(
-                    trainer_id=obj.assigned_trainer_id, client=obj,
-                    status='approved').exists():
+                        'client_note': ''}
+            # Both ends of a coaching belong to the coaching, not to the row: the
+            # client's «do not renew» (S2.7) and the trainer's «end when this month
+            # ends». Cleared when this makes a NEW coaching, kept on one already
+            # running: an operator re-pointing a stale pointer reset the trainer's
+            # scheduled end, the coaching renewed and the client was charged a month
+            # neither side wanted (SIDE_BUGS S-264). Read from the locked row.
+            current = rows.get(obj.assigned_trainer_id)
+            if current is None or current.status != 'approved':
                 defaults['client_stops_renewal'] = False
+                defaults['ends_at_period_end'] = False
             TrainerClientRelation.objects.update_or_create(
                 trainer_id=obj.assigned_trainer_id, client=obj, defaults=defaults)
-            TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
-                trainer_id=obj.assigned_trainer_id).update(status='rejected')
-        else:
-            TrainerClientRelation.objects.filter(client=obj, status='approved').update(
-                status='rejected')
 
     def get_queryset(self, request):
         """Optimize queryset with select_related"""
@@ -299,10 +368,38 @@ try:
     
     @admin.register(TrainerClientRelation)
     class TrainerClientRelationAdmin(admin.ModelAdmin):
-        list_display = ('trainer', 'client', 'status', 'created_at')
+        """Read-only, as the operator console's is (admin_dashboard/admin.py).
+
+        This row carries consent, the agreed price, the escrow reference and both ends
+        of the coaching. With every field editable here, any staff account could set
+        `status='approved'` with no client consent and no money held, point
+        `hold_reference` at nothing, change `agreed_rate`, or set an end flag (the only
+        source of SIDE_BUGS S-266's state); deleting a row left its held month in escrow
+        with nothing to return it from (`CoachingPeriod.relation` is SET_NULL). A
+        relation's money moves only through users/trainer_relations.py and
+        users/coaching.py: the request, the answers, the first programme, the monthly
+        run and the two leaving routes. The one console path left that writes a
+        relation is the user form's `assigned_trainer` (`CustomUserAdmin.save_model`):
+        it puts a stale pointer back in step, and refuses anything that would end
+        another coaching (the phase-3 review, round 4, 2026-11-24).
+        """
+        list_display = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                        'hold_reference', 'created_at')
         list_filter = ('status', 'created_at')
         search_fields = ('trainer__email', 'client__email')
-        readonly_fields = ('created_at', 'updated_at')
+        readonly_fields = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                           'agreed_currency', 'hold_reference', 'requested_at',
+                           'ends_at_period_end', 'client_stops_renewal', 'client_note',
+                           'responded_at', 'created_at', 'updated_at')
+
+        def has_add_permission(self, request):
+            return False
+
+        def has_change_permission(self, request, obj=None):
+            return False
+
+        def has_delete_permission(self, request, obj=None):
+            return False
         
     @admin.register(DeviceToken)
     class DeviceTokenAdmin(admin.ModelAdmin):

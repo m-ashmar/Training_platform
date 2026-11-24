@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
     max_retries=3,
 )
 @no_retry_on_timeout
-def expire_lapsed_subscriptions():
+def expire_lapsed_subscriptions(subscription_ids=None):
     """Move subscriptions whose cover has ended out of 'active'/'trial'.
 
     One set-based UPDATE, not a row-by-row loop. That matters for correctness as much
@@ -47,6 +47,10 @@ def expire_lapsed_subscriptions():
 
     Idempotent by construction: a second run matches nothing, so an at-least-once
     delivery costs nothing.
+
+    `subscription_ids` limits it to those rows; None (the beat task's call) is every
+    subscription, as before. For a caller that must touch only its own rows
+    (a development tool that resets its own accounts on a shared database).
     """
     from django.db.models import Q
     from django.utils import timezone
@@ -64,7 +68,10 @@ def expire_lapsed_subscriptions():
 
     # updated_at is auto_now, which .update() does not trigger; set it explicitly so
     # the row still records when it changed.
-    expired = Subscription.objects.filter(lapsed).update(status='expired', updated_at=now)
+    rows = Subscription.objects.filter(lapsed)
+    if subscription_ids is not None:
+        rows = rows.filter(pk__in=list(subscription_ids))
+    expired = rows.update(status='expired', updated_at=now)
 
     if expired:
         logger.info("Expired %s lapsed subscription(s)", expired)
@@ -146,7 +153,7 @@ def settle_owed_payouts(batch_size=200):
     max_retries=3,
 )
 @no_retry_on_timeout
-def send_renewal_reminders(now=None, phase="expiring", after=None):
+def send_renewal_reminders(now=None, phase="expiring", after=None, subscription_ids=None):
     """Remind before the plan ends, and keep asking after it ended (the owner,
     2026-09-19: "we show a renewal reminder 3 days before ... after it ends ... keep
     asking to re-subscribe").
@@ -172,6 +179,11 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
     production-readiness audit (2026-09-25) found cut off part-way under the 300 s soft
     limit. A notice is found by its key before it is written, so a redelivered page
     sends nothing twice.
+
+    `subscription_ids` limits both passes to those rows (and is handed on with the
+    rest); None (the beat task's call) is every subscriber, as before. For a caller that
+    must touch only its own rows (a development tool that resets its own accounts on a
+    shared database).
     """
     from math import ceil
 
@@ -201,6 +213,10 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
             .filter(Q(end_date__gt=now, end_date__lte=now + window)
                     | Q(trial_end_date__gt=now, trial_end_date__lte=now + window))
             .select_related('user'))
+    scope = ({} if subscription_ids is None
+             else {'subscription_ids': [str(pk) for pk in subscription_ids]})
+    if scope:
+        soon = soon.filter(pk__in=scope['subscription_ids'])
     for sub in (batch.page(soon, after) if phase == "expiring" else ()):
         if batch.spent():
             break
@@ -237,7 +253,7 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
             counts['expiring'] += 1
 
     if phase == "expiring":
-        if batch.hand_on(send_renewal_reminders, now=carry(now), phase="expiring"):
+        if batch.hand_on(send_renewal_reminders, now=carry(now), phase="expiring", **scope):
             logger.info("Subscription reminders: %s", counts)
             return counts
         phase, after = "lapsed", None
@@ -248,6 +264,8 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
                   .filter(Q(end_date__lte=now, end_date__gt=oldest)
                           | Q(trial_end_date__lte=now, trial_end_date__gt=oldest))
                   .select_related('user'))
+        if scope:
+            lapsed = lapsed.filter(pk__in=scope['subscription_ids'])
         for sub in batch.page(lapsed, after):
             if batch.spent():
                 break
@@ -268,7 +286,7 @@ def send_renewal_reminders(now=None, phase="expiring", after=None):
                                        'subscription_id': str(sub.pk),
                                        'ended_at': end.isoformat()}}) is not None:
                 counts['expired'] += 1
-        batch.hand_on(send_renewal_reminders, now=carry(now), phase="lapsed")
+        batch.hand_on(send_renewal_reminders, now=carry(now), phase="lapsed", **scope)
 
     logger.info("Subscription reminders: %s", counts)
     return counts

@@ -839,9 +839,17 @@ def fail(withdrawal_id, operator, reason) -> Withdrawal:
 
 # ------------------------------------------------------------------ the pushes
 def _notify_on_commit(what: str, withdrawal) -> None:
-    """Spec section 7: "Withdrawal requested, paid, failed" — push and in-app inbox.
-    The EMAIL the same row lists is not sent: the codebase has no email notification
-    channel (`notifications.services._dispatch_channels`, "Email (Future)")."""
+    """Spec section 7: "Withdrawal requested, paid, failed": push, in-app inbox AND
+    email, after the commit. The event's listener writes the inbox notice
+    (`notifications/listeners/payout_listeners.py`, `related_object_id` = the
+    withdrawal), and `NotificationService._dispatch_channels` sends the push and queues
+    the email of the same kind (`notifications/channels/email.py`: `withdrawal_requested`,
+    `withdrawal_paid` on `confirmed`, `withdrawal_failed` with the operator's reason),
+    once per withdrawal and step, rendered and sent by the worker
+    (`notifications.send_email`). The email goes to an active trainer with a verified
+    address whose preferences let email through for that kind, and states the fact
+    only: the request number and the amount, no link. `approved` and `sent` notify
+    nobody."""
     from notifications.domain.dispatcher import emit_event
     from notifications.domain.payout_events import (WithdrawalFailedEvent,
                                                     WithdrawalPaidEvent,

@@ -121,6 +121,10 @@ def bootstrap_gaps() -> list[str]:
         ("quota features", SubscriptionFeature.objects.exists()),
         ("a subscription plan on sale",
          SubscriptionPlan.objects.filter(is_active=True, price__gt=0).exists()),
+        # The money states buy a plan whose diet a coach then writes (`coaching.py`).
+        ("a subscription plan on sale with the diet",
+         SubscriptionPlan.objects.filter(is_active=True, price__gt=0,
+                                         has_diet_access=True).exists()),
         ("diet plan templates", DietPlanTemplate.objects.exists()),
         ("achievements", Achievement.objects.exists()),
         ("starter exercises",

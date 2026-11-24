@@ -6230,6 +6230,17 @@ msgstr "قبِل %(name)s طلب التدريب."
 msgid "%(name)s declined the coaching request."
 msgstr "رفض %(name)s طلب التدريب."
 
+#: users/admin.py
+#, python-format
+msgid ""
+"This client has a running coaching with %(name)s. To change trainer, end it "
+"first: the trainer or the client ends it in the app, which returns any money "
+"held for it. To put the trainer field back in step, choose %(name)s."
+msgstr ""
+"لدى هذا العميل تدريب جارٍ مع %(name)s. لتغيير المدرب أنهِه أولاً: ينهيه المدرب "
+"أو العميل من التطبيق، فيُعاد أي مبلغ محجوز له. ولإعادة حقل المدرب إلى ما "
+"يطابقه، اختر %(name)s."
+
 #. `subscription_expired` on a build that may not sell the plan (Road to 10 R1).
 #: notifications/domain/subscription_events.py
 msgid "Your diet plan and routine are saved and you can still see them."
