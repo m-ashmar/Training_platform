@@ -549,6 +549,12 @@ is locked (spec §8); the numbers above are the defaults.
 - **`privacy/registry.py` `audit_coverage()` has its own `local` app set.** An app that
   is not in it is silently exempt and the coverage gate passes with the models
   unregistered. A new app goes in that set in the same commit as its first model.
+- **A dev-only tool tested only on a freshly bootstrapped database.** `seed_walk_states`
+  passed every check on test databases holding bootstrap's plans, and failed on the
+  developers' first real run: their database also had a cheaper 'Pro (USD)' plan and no
+  exchange rate, and the states picked a plan by raw price across currencies (SIDE_BUGS
+  S-295, Road to 10 round 5). Test such a tool against a database shaped like the
+  developers' own: tests/walk_fixtures.py `walk_platform` now builds that shape.
 
 ## One step per session — what to paste
 
