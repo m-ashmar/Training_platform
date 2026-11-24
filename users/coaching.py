@@ -346,8 +346,10 @@ def due_relation_ids(now=None) -> list[int]:
     """Approved relations whose latest month is paid out and over, on-time ones first.
 
     A frozen one is included only when there is something to do: the client's wallet
-    now covers the month, a reminder step has come round, or the client asked not to
-    renew (S2.7: it is ended at once, nothing charged). Frozen coachings never end
+    now covers the month, a reminder step has come round, the client asked not to
+    renew (S2.7), or the trainer scheduled its end (SIDE_BUGS S-266): either of the last
+    two is ended at once by `renew`, before any money is read, so nothing is charged
+    and nothing held, a top-up that landed meanwhile included. Frozen coachings never end
     by themselves, and locking every one of them every hour grew without bound until the
     run's time limit starved the on-time renewals behind them. Decided on one unlocked
     read; `renew` re-checks everything under its locks.
@@ -374,8 +376,8 @@ def _due(now=None) -> tuple[list[int], list[int]]:
                 .filter(last_status='settled', last_end__lte=now)
                 .order_by('pk')
                 .values_list('pk', 'client_id', 'last_frozen', 'last_notices', 'last_price',
-                             'client_stops_renewal'))
-    on_time = [pk for pk, _client, frozen, _n, _p, _stop in rows if frozen is None]
+                             'client_stops_renewal', 'ends_at_period_end'))
+    on_time = [pk for pk, _client, frozen, _n, _p, _stop, _end in rows if frozen is None]
     frozen = [row for row in rows if row[2] is not None]
     if not frozen:
         return on_time, []
@@ -383,9 +385,11 @@ def _due(now=None) -> tuple[list[int], list[int]]:
                     .values_list('owner_id', 'balance'))
     steps = frozen_reminder_days()
     waking = []
-    for pk, client_id, frozen_at, notices, price, stops in frozen:
+    for pk, client_id, frozen_at, notices, price, stops, trainer_ends in frozen:
         reached = sum(1 for d in steps if d <= (now - frozen_at).days)
-        if (stops or balances.get(client_id, Decimal('0')) >= price
+        # Either side's end wakes it (the trainer's since S-266: it stayed frozen for
+        # days, ending only on a reminder step or a top-up).
+        if (stops or trainer_ends or balances.get(client_id, Decimal('0')) >= price
                 or reached > (notices or 0)):
             waking.append(pk)
     return on_time, waking
