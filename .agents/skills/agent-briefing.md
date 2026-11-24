@@ -19,6 +19,11 @@ that has nothing to do with your change. This has cost more than one full gate r
 you want a number.
 
 After adding a migration, the run needs `--create-db` or it dies with `DuplicateColumn`.
+And the other way round (2026-11-24): once a test database has YOUR new NOT NULL column,
+a run of an OLDER commit on that same `DB_NAME` with `--reuse-db` fails every insert into
+that table (the old code does not know the column; Django drops its default after
+`AddField`). Several snapshots queued in one ticket on one database: put the one with the
+migration LAST, give it `--create-db`, and `--create-db` again before any older run.
 
 ## Gate tests that will fail work that is otherwise correct
 
