@@ -228,7 +228,8 @@ class UpdateUserDetailsView(APIView):
     documents are at `GET /api/v1/trainer/verification/`).
 
     A TRAINER's name and photo (Road to 10 S2.2): `onboarding_missing` names
-    `first_name` / `last_name` while either is empty or only spaces — ask for them before
+    `first_name` / `last_name` while either is empty or only spaces or invisible marks (a
+    zero-width space, an RLM, a lone tatweel: `users/names.py`) — ask for them before
     the shell, because a trainer with no first name is not listed or matched
     (`users/trainer_directory.py listed_trainers`). Write the names here (or on
     `trainer/profile/`); upload the trainer's OWN photo with

@@ -1532,7 +1532,10 @@ directory's does (a username search would confirm the names it no longer shows).
 `trainer_hourly_rate` / `coaching_currency` are unchanged: null together on a build that
 may not show a coaching fee. The signed-in client's list, `GET
 /api/auth/client/available-trainers/`, follows the same listing rule (blocks still left
-out) and the same `client_count` rule; its `username` and search are unchanged.
+out) and the same `client_count` rule; its `username` and search are unchanged. A first
+name of only spaces or invisible marks (a zero-width space, an RLM, a lone tatweel) is
+no first name, for every list and for `onboarding_missing` alike (`users/names.py`,
+2026-11-24).
 
 ### Coaching (monthly)
 
