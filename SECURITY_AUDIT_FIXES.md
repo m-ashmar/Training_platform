@@ -188,7 +188,7 @@ integration. Gateway switched to **ShamCash**; the three bank placeholders remov
 - **Gateway interface (11):** `subscription/gateways/base.py` `PaymentGateway` ABC (`initiate_payment`/`fetch_payment_status`/`verify_webhook`/`refund`); `ShamCashGateway` implements it; views/service depend only on the interface.
 
 ## ShamCash gateway
-`subscription/gateways/shamcash.py` — Bearer auth, base `https://api.shamcash-api.com/v1`.
+`subscription/gateways/shamcash.py` — Bearer auth; the base URL is `SHAMCASH_API_URL`, with no default (since 2026-11-24 it waits for ShamCash's official access, and names no third party).
 Two modes, config-selected, no code change:
 - **reconcile** (default): user pays the merchant account with the payment reference in the note; we verify via `GET /transactions` matching amount+currency+reference within a lookback window.
 - **hosted** (once ShamCash gives an initiation endpoint): set `SHAMCASH_INITIATE_PATH` and it POSTs + returns a hosted `payment_url`.
