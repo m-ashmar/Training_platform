@@ -2350,7 +2350,9 @@ operator maintains in the console. Four things the app needs:
   share; nothing moves); the trainer's leg or the commission alone is `409
   coaching_transfer_leg` with `transfer_reference`. The one ledger row of a plan paid
   from the wallet (Road to 10 S2.13) is `409 plan_payment_leg` with `payment_id`: refund
-  the payment instead, which also takes back the cover.
+  the payment instead, which also takes back the cover. So is every row of a plan paid
+  through a gateway — the mint into the client's wallet, the trainer's share, the
+  platform's revenue (SIDE_BUGS S-268) — with its own message.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
