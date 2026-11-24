@@ -7,9 +7,11 @@ trainer's language at delivery; the failure carries the operator's reason, becau
 is what the trainer needs to know. A withdrawal is money moving to a person, not a
 digital good, so these reach every build.
 
-The spec's table also lists EMAIL for all three. There is no email notification channel
-in this codebase (`notifications.services._dispatch_channels`: "Email (Future)"), so
-none is sent.
+The spec's table also lists EMAIL for all three, and each is emailed: the inbox notice
+these events write queues the email of the same kind (`notifications/channels/email.py`
+`withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed`; the request number and
+the amount, no link), once per withdrawal and step, to a trainer with a verified address
+whose preferences allow it.
 """
 from dataclasses import dataclass
 
