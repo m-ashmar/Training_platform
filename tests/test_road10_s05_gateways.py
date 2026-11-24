@@ -47,7 +47,10 @@ def test_no_way_to_pay_is_said_before_any_checkout(make_user, api, shamcash_conf
 
 
 def test_a_gateway_the_server_reads_is_automatic(make_user, api, shamcash_config):
-    shamcash_config.update(api_key="tok", merchant_id="ACC-1")
+    # The token AND the API's base URL, which has no default since 2026-11-24 (no third
+    # party): a token alone reads nothing (tests/test_shamcash_waits_for_official_access.py).
+    shamcash_config.update(api_key="tok", api_url="https://shamcash.test/v1",
+                           merchant_id="ACC-1")
     body = _answer(api, make_user("s05_auto"))
     [shamcash] = body["gateways"]
     assert (body["can_pay"], body["reason"]) == (True, None)

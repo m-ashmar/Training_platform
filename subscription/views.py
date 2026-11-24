@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 
 from .models import (
     OPEN_PAYMENT_STATUSES, SubscriptionPlan, Subscription, Payment,
-    SubscriptionFeature, SubscriptionUsage, paid_by, plan_snapshot
+    SubscriptionFeature, SubscriptionUsage, paid_by
 )
 from .serializers import (
     SubscriptionPlanSerializer, SubscriptionSerializer,
@@ -506,6 +506,11 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         `immediate: true` ends it now (`status: "cancelled"`); otherwise it only turns
         `auto_renew` off and the cover runs to its end. 200 `{"message", "status"}`.
 
+        A cancellation writes NO payment (SIDE_BUGS S-184, S-252): it used to add a
+        zero-amount `cancelled` row to `GET v1/payments/`, which the app had learned to
+        hide. The fact is in the operator's audit log (`subscription.cancelled`);
+        `reason` is still accepted and validated, and not kept.
+
         Codes it can answer (branch on `code`, never on the text):
 
         | Status | `code` | Meaning |
@@ -571,20 +576,19 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                     'status', 'cancelled_at', 'auto_renew', 'updated_at'])
 
                 if state_changed:
-                    # Audit row. Currency follows the plan like every other Payment;
-                    # 'USD' here was a third independent guess at a currency the
-                    # platform does not charge in.
-                    Payment.objects.create(
-                        subscription=subscription,
-                        amount=0,
-                        currency=subscription.plan.currency,
-                        status='cancelled',
-                        description=f"Subscription cancelled: {reason}",
-                        # The plan that was cancelled, so the history row keeps naming
-                        # it after the row moves to another plan (`Payment.plan_bought`).
-                        metadata={'reason': reason, 'immediate': immediate,
-                                  'plan': plan_snapshot(subscription.plan)}
-                    )
+                    # The fact goes to the audit log, in this transaction. It used to be
+                    # a zero-amount 'cancelled' Payment written here, outside
+                    # PaymentService, with no PaymentEvent, in the plan's currency
+                    # rather than the buyer's, listed in the person's payment history
+                    # (SIDE_BUGS S-184, S-252): a cancellation is not a payment. The
+                    # free-text `reason` is not kept — the audit log outlives an
+                    # erasure (`privacy/sources.py`, on_erase "keep"), and nothing
+                    # read it — only whether one was given.
+                    from wallet.views import audit
+                    audit('subscription.cancelled', request, {
+                        'subscription_id': str(subscription.pk),
+                        'plan_id': subscription.plan_id, 'immediate': immediate,
+                        'reason_given': bool(reason)})
 
             logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
 
@@ -1910,13 +1914,14 @@ class PaymentGatewayView(APIView):
 
             {"success": true,
              "can_pay": true,                     a gateway below is `available`
-             "reason": null | "no_gateway" | "not_available_on_channel",
+             "reason": null | "no_gateway" | "currency_not_chargeable"
+                       | "not_available_on_channel",
              "gateways": [{"name": "shamcash", "display_name": "ShamCash",
-                           "available": true,     it can take a payment now
+                           "available": true,     it can take the caller's payment now
                            "kind": "automatic" | "reviewed" | null,
                            "review_hours": 24 | null,
                            "enabled": true,       = available (kept for old builds)
-                           "supported_currencies": ["SYP", "USD"],
+                           "supported_currencies": ["SYP"],
                            "settlement_currency": "SYP",
                            "amount_limits": {"SYP": {"min": 100, "max": 5000000}},
                            "min_amount": 100, "max_amount": 5000000}]}
@@ -1927,6 +1932,16 @@ class PaymentGatewayView(APIView):
         (`PAYMENT_REVIEW_HOURS`); null when the gateway is not set up. Sell a plan only
         when `can_pay` or `can_pay_from_wallet` is true, and word the promise from
         `kind` (a gateway) or from the wallet.
+
+        THE CALLER'S CURRENCY (SIDE_BUGS S-185). `supported_currencies` lists the
+        currencies the gateway can charge — those with configured bounds in
+        `amount_limits` (USD has none until the owner sets SHAMCASH_USD_MIN_AMOUNT and
+        SHAMCASH_USD_MAX_AMOUNT) — and `available` (with `enabled`) is true only when the
+        gateway is set up AND can charge in the caller's own currency, since every
+        checkout of theirs is priced in it. A gateway set up but not in their currency
+        leaves `can_pay` false with `reason: "currency_not_chargeable"` (new, additive);
+        its `kind` still says how it is set up. Before, a USD buyer was offered a Pay
+        whose checkout answered 503 `currency_not_chargeable`.
 
         THE WALLET (additive, Road to 10 S2.13, the owner's D19), beside the gateways:
         `"can_pay_from_wallet": true` and `"wallet": {"name": "wallet", "display_name",
@@ -1959,14 +1974,21 @@ class PaymentGatewayView(APIView):
 
             described = PaymentGatewayManager.describe_gateways(GATEWAY_REGISTRY)
             review_hours = int(getattr(django_settings, 'PAYMENT_REVIEW_HOURS', 24))
+            # The caller's one currency, which every checkout of theirs is priced in
+            # (SIDE_BUGS S-185): a gateway set up but unable to charge in it is not a way
+            # for THEM to pay — its checkout answers 503 `currency_not_chargeable`.
+            currency = wallet_currency_for(request.user)
 
             gateway_list = []
+            set_up_elsewhere = False
             for gateway_name, gateway_info in described.items():
                 kind = gateway_kind(gateway_name)
+                chargeable = currency in gateway_info['supported_currencies']
+                set_up_elsewhere = set_up_elsewhere or (kind is not None and not chargeable)
                 gateway_list.append({
                     'name': gateway_name,
                     'display_name': gateway_info['name'],
-                    'available': kind is not None,
+                    'available': kind is not None and chargeable,
                     'kind': kind,
                     'review_hours': review_hours if kind == 'reviewed' else None,
                     'supported_currencies': gateway_info['supported_currencies'],
@@ -1976,13 +1998,14 @@ class PaymentGatewayView(APIView):
                     'amount_limits': gateway_info['amount_limits'],
                     'min_amount': gateway_info.get('min_amount'),
                     'max_amount': gateway_info.get('max_amount'),
-                    'enabled': kind is not None,
+                    'enabled': kind is not None and chargeable,
                 })
             can_pay = any(entry['available'] for entry in gateway_list)
             return Response({
                 'success': True,
                 'can_pay': can_pay,
-                'reason': None if can_pay else 'no_gateway',
+                'reason': (None if can_pay else
+                           'currency_not_chargeable' if set_up_elsewhere else 'no_gateway'),
                 'gateways': gateway_list,
                 # The caller's own wallet (Road to 10 S2.13, the owner's D19): a way to pay
                 # on every build that may sell a plan — the first line turned the others
@@ -2395,11 +2418,19 @@ class PaymentReconcileView(APIView):
     Refusals, each with its `code` (BACKEND_BUGS B-048):
       404 `not_found`               no such payment, or not the caller's
       400 `no_gateway_reference`    the checkout never reached the gateway
-      502 `gateway_unreachable`     the provider could not be asked; nothing changed,
+      502 `gateway_unreachable`     the gateway's adapter raised — a configuration or
+                                    programming fault, not an outage; nothing changed,
                                     the money is safe, ask again later
       400 `reconcile_rejected`      the provider answered but the match failed
                                     verification (amount, currency, or an illegal
                                     transition); nothing changed
+
+    AN OUTAGE IS NOT A 502 (SIDE_BUGS S-230). ShamCash's adapter turns a lookup it could
+    not make — the provider down, a timeout, no base URL — into the status `unknown`,
+    which closes nothing and raises nothing: the answer is the 200 above, the payment's
+    `status` unchanged and `gateway_state: degraded`, as the spec says (section 6:
+    nothing is refused because of it). `gateway_unreachable` was listed as "the provider
+    could not be asked", which ShamCash never answers.
     """
     permission_classes = [permissions.IsAuthenticated]
     # Every call makes an outbound gateway lookup, so an authenticated caller could

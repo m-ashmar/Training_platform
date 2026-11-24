@@ -6226,6 +6226,22 @@ msgstr ""
 "هذه خطة مدفوعة من المحفظة ولا يمكن عكسها وحدها. استرد قيمة الدفعة بدلاً من "
 "ذلك."
 
+#. `plan_payment_leg` for a plan paid through a gateway (SIDE_BUGS S-268): its mint,
+#. the trainer's share or the platform's revenue.
+msgid ""
+"This is one leg of a plan payment and cannot be reversed on its own. Refund the "
+"payment instead."
+msgstr ""
+"هذا جزء من دفعة خطة ولا يمكن عكسه وحده. استرد قيمة الدفعة بدلاً من ذلك."
+
+#. `coaching_month_leg` (SIDE_BUGS S-250): a payout, a commission or a release of a
+#. coaching month, or the charge of a month already paid out or given back.
+msgid ""
+"This belongs to a coaching month whose money has been paid out or given back, "
+"and cannot be reversed on its own."
+msgstr ""
+"هذا جزء من شهر تدريب دُفعت أمواله أو أُعيدت، ولا يمكن عكسه وحده."
+
 #. `follow_not_editable` (the routes review, 2026-11-23): PUT/PATCH of a follow.
 #: social/views.py
 msgid "A follow cannot be changed. Unfollow, then follow the other person."

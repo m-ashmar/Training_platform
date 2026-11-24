@@ -248,7 +248,7 @@ def test_a_payment_can_never_move_money_into_a_wallet_holding_the_other_currency
     """
     from subscription.models import Payment
     from subscription.services.payment_service import PaymentService
-    from wallet.models import Transaction
+    from wallet.models import Transaction, Wallet
 
     buyer = _person(make_user, "mismatch", "SYP")
     _fund(buyer, "1.00", "SYP")          # touched, so the currency is now a fact
@@ -266,10 +266,20 @@ def test_a_payment_can_never_move_money_into_a_wallet_holding_the_other_currency
             "amount": "10.00", "currency": "USD", "status": "completed",
             "transaction_id": "tx-mismatch"})
 
+    # CONTRACT CHANGE (SIDE_BUGS S-179; Road to 10 PAY-3, ruled 2026-11-24: "a plan
+    # payment always reaches the platform's revenue wallet", "no path marks a payout
+    # settled without the platform's leg"). This payment used to write no leg at all, so
+    # money that entered the system was recorded nowhere. Still nothing touches the
+    # buyer's wallet — the point of this test — and the payment now lands, in its own
+    # currency, in the platform's revenue wallet for that currency.
+    from django.db.models import Q
+
+    buyer_wallet = Wallet.objects.get(owner=buyer)
     assert not Transaction.objects.filter(
+        Q(source_wallet=buyer_wallet) | Q(destination_wallet=buyer_wallet),
         metadata__original_payment_id=str(foreign.id)).exists(), \
-        "a leg was written for a payment in a currency the wallet does not hold"
-    assert (_platform("USD"), _platform("SYP")) == (usd_before, syp_before)
+        "a leg moved money into a wallet holding the other currency"
+    assert (_platform("USD"), _platform("SYP")) == (usd_before + D("10.00"), syp_before)
     assert _balance(buyer) == D("1.00")
     foreign.refresh_from_db()
     assert foreign.payout_settled_at is not None, "the sweep will ask about this for ever"

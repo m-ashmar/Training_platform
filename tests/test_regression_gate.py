@@ -7320,9 +7320,11 @@ def test_a_gateway_with_no_credentials_at_all_cannot_take_payments():
         config["merchant_id"] = "ACCOUNT-1"
         assert gateway_config.can_initiate_payments("shamcash") is True
 
-        # And a hosted deployment has the token.
+        # And a hosted deployment has the token — with the API's base URL, which has no
+        # default since 2026-11-24 (no third party): a token alone calls nothing.
         config["merchant_id"] = ""
         config["api_key"] = "token"
+        config["api_url"] = "https://shamcash.test/v1"
         assert gateway_config.can_initiate_payments("shamcash") is True
     finally:
         config.update(before)

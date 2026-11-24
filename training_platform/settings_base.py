@@ -381,6 +381,15 @@ AGENT_DEFAULT_PER_TRANSACTION_LIMIT = _Decimal(
 #: agent means its monthly cap in that currency (`wallet.agents.Usage.ceiling`).
 AGENT_DEFAULT_RECEIVABLE_CEILING = _Decimal(
     get_env("AGENT_DEFAULT_RECEIVABLE_CEILING", "600000"))
+# What ONE cash top-up must reach for the operator's suspicious-activity alert to call it
+# large, per currency (`wallet.views.large_topup_thresholds`; SIDE_BUGS S-162): 1,000,000
+# SYP and 100 USD, the numbers ruled for Road to 10 on 2026-11-24. One threshold of 1,000
+# for both currencies flagged ordinary pound top-ups and let dollar ones worth millions of
+# pounds through. A currency with no entry keeps that old 1,000.
+WALLET_LARGE_TOPUP_THRESHOLDS = {
+    "SYP": _Decimal(get_env("WALLET_LARGE_TOPUP_THRESHOLD_SYP", "1000000")),
+    "USD": _Decimal(get_env("WALLET_LARGE_TOPUP_THRESHOLD_USD", "100")),
+}
 # The DOLLAR defaults are still nobody's: AGENT_DEFAULT_DAILY_LIMIT_USD /
 # AGENT_DEFAULT_MONTHLY_LIMIT_USD are unset, so a new agent tops up no dollars until an
 # operator sets its dollar caps (SIDE_BUGS S-059), and its dollar per-top-up cap and
@@ -407,6 +416,11 @@ COACHING_COMMISSION_RATE = _Decimal("0.20")
 # deleted from the code, it is priced at nothing. Until then every plan payment lands in
 # the platform's revenue wallet and no trainer is paid for it. See
 # `wallet/signals.py:handle_payment_completed`.
+# BEFORE RAISING IT ABOVE 0 the owner decides the cross-currency case: a trainer whose
+# wallet is in the other currency than the client's payment. Until then (Road to 10,
+# ruled 2026-11-24; SIDE_BUGS S-179) nothing is converted: the platform keeps that
+# trainer's share and an audit entry is written for a person
+# (`subscription_trainer_share_unpaid`, with the amount and the payment).
 SUBSCRIPTION_TRAINER_SHARE = _Decimal("0")
 COACHING_PERIOD_DAYS = 30
 COACHING_RENEWAL_REMINDER_DAYS = 3

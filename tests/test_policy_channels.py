@@ -69,6 +69,9 @@ def shamcash():
     before = dict(config)
     config["merchant_id"] = "POLICY-ACCOUNT-1"
     config["api_key"] = "policy-api-token"          # what lists the gateway as enabled
+    # With the API's base URL, which has no default since 2026-11-24 (no third party):
+    # a token alone calls nothing and enables nothing.
+    config["api_url"] = "https://shamcash.test/v1"
     config["webhook_secret"] = "policy-webhook-secret-0123456789abcdef"
     config["initiate_path"] = ""
     try:

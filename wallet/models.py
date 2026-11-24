@@ -938,6 +938,29 @@ def currency_for(user) -> str:
     return row or _platform_currency()
 
 
+def checkout_currency_for(user) -> str:
+    """`currency_for`, read for a gateway checkout about to be priced in it (SIDE_BUGS
+    S-180).
+
+    A gateway checkout moves nothing through the wallet, so nothing it does makes the
+    wallet's currency a fact, and `set_currency_for` refuses a change while a checkout is
+    open (`money_on_its_way`) — but only one that has COMMITTED. A change landing between
+    a checkout's unlocked read and its commit left a payment priced in the old currency
+    against a wallet in the new one, which its completion's mint then refuses. While the
+    currency can still change (the wallet untouched) the row is read FOR UPDATE, as
+    `set_currency_for` reads it: a change either waits for the checkout and is then
+    refused, or lands first and the checkout is priced in it. A touched wallet's
+    currency is a fact, read without a lock. Inside the caller's transaction, as its
+    last lock (subscription -> payment -> wallets). A person with no wallet row yet has
+    nothing to lock; every account is given one when it is made.
+    """
+    wallet = Wallet.objects.filter(owner=user).first()
+    if wallet is not None and not wallet_is_untouched(wallet):
+        return wallet.currency
+    locked = Wallet.objects.select_for_update().filter(owner=user).first()
+    return locked.currency if locked is not None else _platform_currency()
+
+
 def set_currency_for(user, currency: str, owner_type: str | None = None) -> "Wallet":
     """Set the currency this person trades in, while that is still theirs to choose.
 

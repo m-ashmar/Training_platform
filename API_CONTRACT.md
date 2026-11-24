@@ -1928,7 +1928,12 @@ person confirms it in the console), null when unavailable — and `review_hours`
 `reviewed`: within how many hours it is confirmed, `PAYMENT_REVIEW_HOURS`; null
 otherwise); `enabled` equals `available`. The answer's `can_pay` is true when one is
 available, else `reason: "no_gateway"`. Sell only on `can_pay`, and word the promise
-from `kind`.
+from `kind`. A gateway's `supported_currencies` are the currencies it can charge (those
+with bounds in `amount_limits`: SYP only until the owner sets the USD bounds), and
+`available` needs the caller's own currency among them (SIDE_BUGS S-185): a gateway set
+up only for another currency leaves `can_pay` false with `reason:
+"currency_not_chargeable"` (additive), where a USD buyer used to be offered a Pay whose
+checkout answered 503 `currency_not_chargeable`.
 
 **A plan paid from the wallet** (Road to 10 S2.13, the owner's D19 of 2026-11-22). On a
 build that may sell a plan (`apk`, `web`) `GET v1/gateways/` also answers
@@ -2311,7 +2316,9 @@ show plan status, expiry and history, and history without receipts is not histor
   `404 receipt_not_available` (the payment is not `completed`). The payer and a
   superuser, nobody else.
 - `GET /api/subscription/v1/payments/` rows gain `item` (what was bought, in pieces),
-  `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
+  `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list. A
+  cancellation (`POST subscriptions/{id}/cancel/`) no longer adds a zero-amount
+  `cancelled` row to it (SIDE_BUGS S-184, S-252): the list holds payments only.
 - `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
   resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
   (the same counter and the same allowance the WebSocket enforces: 10 a day by default
@@ -2452,7 +2459,16 @@ operator maintains in the console. Four things the app needs:
   share; nothing moves); the trainer's leg or the commission alone is `409
   coaching_transfer_leg` with `transfer_reference`. The one ledger row of a plan paid
   from the wallet (Road to 10 S2.13) is `409 plan_payment_leg` with `payment_id`: refund
-  the payment instead, which also takes back the cover.
+  the payment instead, which also takes back the cover. So is every row of a plan paid
+  through a gateway — the mint into the client's wallet, the trainer's share, the
+  platform's revenue (SIDE_BUGS S-268) — with its own message. A coaching month's money
+  moves once (SIDE_BUGS S-250): a leg out of escrow — the trainer's payout, the
+  platform's commission, a held month given back — and the charge of a month already
+  paid out or given back are `409 coaching_month_leg` with `period` `{id, number,
+  status}` (null for a hold from before months existed). The charge of a month still
+  held goes back to the client as before, and now with its month (SIDE_BUGS S-222): the
+  month reads `refunded`, the coaching forgets the hold, and both people get
+  `coaching_fee_refunded`.
   `GET wallet/admin/alerts/suspicious/` judges `large_topups` per currency
   (`WALLET_LARGE_TOPUP_THRESHOLDS`), each entry gaining `currency`, and counts cash
   top-ups only — never the mint leg of a plan payment (SIDE_BUGS S-162).
@@ -2579,7 +2595,10 @@ field and code; in short:
 - `payments/{id}/reconcile/` on a payment already completed answers `payment_id` too.
 - `payments/{id}/status/` and `payments/{id}/reconcile/` answer a `code` on every
   refusal: `404 not_found`, `400 no_gateway_reference`,
-  `502 gateway_unreachable`, `400 reconcile_rejected` (B-048).
+  `502 gateway_unreachable`, `400 reconcile_rejected` (B-048). The 502 is a gateway
+  adapter that raised (a configuration or programming fault). ShamCash not answering
+  is not one: reconcile answers 200 with the payment's `status` unchanged and
+  `gateway_state: "degraded"` (SIDE_BUGS S-230).
 - `payments/{id}/receipt/?format=pdf` answers its 404s (`not_found`,
   `receipt_not_available`) as JSON with `Content-Type: application/json`, not as bytes
   labelled PDF (B-049).

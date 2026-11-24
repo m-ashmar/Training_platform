@@ -105,6 +105,10 @@ def test_a_double_tap_inside_a_hosted_gateway_round_trip_opens_one_session(
     from subscription.gateways.shamcash import ShamCashGateway
 
     shamcash["initiate_path"] = "/c9/initiate"
+    # Hosted mode needs the API's base URL too, which has no default since the third
+    # party's host left the gateway (the owner, 2026-11-24); this test is about the
+    # round trip, not about which host it goes to.
+    shamcash["api_url"] = "https://shamcash.test/v1"
     sessions = []
 
     def slow_gateway(self, path, body):

@@ -253,10 +253,11 @@ the privacy policy (`docs/store/privacy_labels.md`).
 ### 3.8 Payments and money
 | Variable | | Default | Secret | What |
 |---|---|---|---|---|
-| `SHAMCASH_API_TOKEN` | | | yes | Unset before ShamCash approval: boot proceeds, and checkout uses the manual-transfer step |
+| `SHAMCASH_API_TOKEN` | | | yes | Unset until ShamCash's official access: boot proceeds, and checkout uses the manual-transfer step a person confirms. Does nothing without `SHAMCASH_API_URL` |
 | `SHAMCASH_ACCOUNT_ID` | R* | | | Required when the token is set |
 | `SHAMCASH_WEBHOOK_SECRET` | | | yes | At least 16 characters when set |
-| `SHAMCASH_API_URL`, `SHAMCASH_INITIATE_PATH`, `SHAMCASH_SIGNATURE_HEADER`, `SHAMCASH_TIMESTAMP_HEADER` | | | | From ShamCash after approval (hosted mode) |
+| `SHAMCASH_API_URL` | | none | | The base URL of ShamCash's official API, from ShamCash. **No default** (the owner, 2026-11-24: no third party): unset, the server calls no payment API whatever token is set, and the gateway is off — manual transfers a person confirms when `SHAMCASH_ACCOUNT_ID` is set, refused (`gateway_unavailable`) otherwise |
+| `SHAMCASH_INITIATE_PATH`, `SHAMCASH_SIGNATURE_HEADER`, `SHAMCASH_TIMESTAMP_HEADER` | | | | From ShamCash with its official access (hosted mode, webhooks) |
 | `GATEWAY_MODE` | | `production` | | Must be `production` when the token is set. `sandbox` only on staging (section 10) |
 | `SHAMCASH_SANDBOX_*` | | | yes | Staging only |
 | `PAYMENT_DEBUG` | | `False` | | Boot refuses `True` |
@@ -265,6 +266,7 @@ the privacy policy (`docs/store/privacy_labels.md`).
 | `EXCHANGE_RATE_MAX_AGE_DAYS` | | `7` | | |
 | `PAYOUT_HOLD_DAYS` | | `3` | | Owner number |
 | `AGENT_DEFAULT_DAILY_LIMIT`, `..._MONTHLY_LIMIT`, `..._PER_TRANSACTION_LIMIT`, `..._RECEIVABLE_CEILING` | | 250000, 5000000, 50000, 600000 | | Owner numbers (SYP) |
+| `WALLET_LARGE_TOPUP_THRESHOLD_SYP`, `WALLET_LARGE_TOPUP_THRESHOLD_USD` | | `1000000`, `100` | | The operator's "large top-up" alert, per currency (SIDE_BUGS S-162) |
 | `PLATFORM_ESCROW_*`, `PLATFORM_REVENUE_*`, `PLATFORM_PAYOUT_CLEARING_*` (`_EMAIL`, `_USERNAME`) | | `platform_*@local` | | The platform's system wallets. Set once, before the first money moves; never change after |
 | `WALLET_DEV_MODE` | | `False` | | Boot refuses `True` |
 

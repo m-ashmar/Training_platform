@@ -2,27 +2,32 @@
 ShamCash Payment Gateway
 ========================
 
-ShamCash (https://shamcash-api.com) — Syrian online payment provider.
-Base API: Bearer-token auth, JSON envelope ``{status, code, message, data}``.
+ShamCash — the Syrian wallet our members pay from. THIS GATEWAY WAITS FOR SHAMCASH'S
+OFFICIAL ACCESS (the owner, 2026-11-24): nothing here is taken from any third party, and
+the API's base URL has no default. Until `SHAMCASH_API_URL` is set (with a token), the
+gateway calls no payment API at all — a status read answers 'unknown' (which closes
+nothing), a listing answers nothing, incompletely, hosted mode is off — and checkouts
+take the manual transfer a person confirms (`gateway_kind` 'reviewed').
 
 Integration model
 ------------------
-ShamCash's public API documents account/balance/**transaction** retrieval
-(``GET /transactions``). Payment *initiation* and *webhook* specifics are only
-provided after merchant approval, so this gateway is built to work in two modes,
-selected by config, without changing any calling code:
+Built to work in two modes, selected by config, without changing any calling code:
 
 * **reconcile mode** (default): we create a pending payment carrying a unique
   reference; the user pays the merchant ShamCash account including that
-  reference; we then VERIFY by querying ``GET /transactions`` and matching
-  amount + currency + reference within a recent window.
-* **hosted mode** (when ``initiate_path`` is configured post-approval): we POST
-  to ShamCash's initiation endpoint and return its hosted ``payment_url``.
+  reference; we then VERIFY by reading the account's incoming transactions and
+  matching amount + currency + reference within a recent window.
+* **hosted mode** (when ``initiate_path`` is configured): we POST to the
+  initiation endpoint and return its hosted ``payment_url``.
+
+The request and response shapes below are the ones this adapter was first written
+against (a JSON envelope ``{status, code, message, data}``, Bearer-token auth, a
+``GET /transactions`` read). They are re-checked against ShamCash's own documentation
+when its official access arrives; every such field is marked CONFIRM.
 
 Webhooks are only honored when ``webhook_secret`` is configured; otherwise
 ``verify_webhook`` returns invalid (fail-closed) and completion happens via the
-verified reconcile path. Confirm the exact header/field names with ShamCash at
-onboarding — they are all config-driven below (marked CONFIRM).
+verified reconcile path. The header and field names are config-driven below.
 """
 from __future__ import annotations
 
@@ -42,16 +47,21 @@ from .base import PaymentGateway
 logger = logging.getLogger(__name__)
 
 
+class GatewayNotConfigured(RuntimeError):
+    """The API's base URL is not set, so no request is made (`_require_base_url`)."""
+
+
 class ShamCashGateway(PaymentGateway):
     """ShamCash gateway implementing the common PaymentGateway contract."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.base_url = str(config.get('api_url', 'https://api.shamcash-api.com/v1')).rstrip('/')
+        # No default host: unset, `_get` / `_post` refuse before any request is made.
+        self.base_url = str(config.get('api_url') or '').rstrip('/')
         self.api_token = config.get('api_key') or config.get('api_token', '')
         self.account_id = config.get('merchant_id', '')
         self.webhook_secret = config.get('webhook_secret', '')
-        self.initiate_path = config.get('initiate_path', '')  # set post-approval for hosted mode
+        self.initiate_path = config.get('initiate_path', '')  # hosted mode, with the base URL
         self.timeout = int(config.get('timeout', 30))
         # CONFIRM these header names with ShamCash at onboarding:
         self.sig_header = config.get('webhook_signature_header', 'X-ShamCash-Signature')
@@ -73,6 +83,7 @@ class ShamCashGateway(PaymentGateway):
 
     def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         import requests
+        self._require_base_url()
         url = f"{self.base_url}{path}"
         resp = requests.get(url, headers=self._headers(), params=params, timeout=self.timeout)
         resp.raise_for_status()
@@ -80,10 +91,17 @@ class ShamCashGateway(PaymentGateway):
 
     def _post(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         import requests
+        self._require_base_url()
         url = f"{self.base_url}{path}"
         resp = requests.post(url, headers=self._headers(), json=data, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def _require_base_url(self) -> None:
+        """No request without the API's base URL, which has no default: the gateway waits
+        for ShamCash's official access (the module docstring)."""
+        if not self.base_url:
+            raise GatewayNotConfigured("the ShamCash API base URL is not set")
 
     # ------------------------------------------------------------------ #
     def initiate_payment(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -91,8 +109,8 @@ class ShamCashGateway(PaymentGateway):
         amount = payment_data['amount']
         currency = payment_data['currency']
 
-        # Hosted mode — only when ShamCash gives us an initiation endpoint.
-        if self.initiate_path:
+        # Hosted mode — only with an initiation endpoint AND the API's base URL.
+        if self.initiate_path and self.base_url:
             try:
                 body = {
                     'account_id': self.account_id,
@@ -124,7 +142,9 @@ class ShamCashGateway(PaymentGateway):
             'payment_url': None,
             'instructions': {
                 'account_id': self.account_id,
-                'amount': str(amount),
+                # Two decimals, as the checkout's own `amount` reads ("13000.00"); this
+                # was "13000.0" from a float (SIDE_BUGS S-228).
+                'amount': str(Decimal(str(amount)).quantize(Decimal('0.01'))),
                 'currency': currency,
                 'note': reference,  # user must include this reference in the transfer note
             },
@@ -249,6 +269,10 @@ class ShamCashGateway(PaymentGateway):
             }
             try:
                 envelope = self._get('/transactions', params)
+            except GatewayNotConfigured as e:
+                # Not a lookup that failed: no request was made, so nothing is said about
+                # ShamCash's health. The answer is still 'unknown', which closes nothing.
+                return None, seen, truncated, str(e)
             except SoftTimeLimitExceeded:
                 # The Celery task asking ran out of time WHILE ShamCash was answering —
                 # the likeliest place for a poller's soft limit to land. It is not a

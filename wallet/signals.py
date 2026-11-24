@@ -65,7 +65,10 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
     out of it — to the platform's revenue wallet, less the trainer's share when there is
     one. Crediting the client and stopping would hand them the plan's price as spendable
     balance; writing nothing at all, which is what a client with no trainer used to get,
-    leaves the platform's largest revenue line invisible in its own ledger.
+    leaves the platform's largest revenue line invisible in its own ledger. No wallet in
+    another currency stops the platform's leg (SIDE_BUGS S-179): a trainer's means the
+    platform keeps the share and an audit entry says so; a client's (which the checkout
+    rules out) means one leg straight into the revenue wallet, and an audit entry.
 
     Listens to `payment_completed`, the signal `PaymentService` was written to emit and
     which had no receivers at all. It used to be a `post_save` with NO sender, so it ran
@@ -138,27 +141,74 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
         # (SIDE_BUGS S-001). There is nothing left to refuse here: the wallet is
         # resolved BY the currency, so it always matches.
         platform_wallet = get_platform_revenue_wallet(payment.currency)
-        trainer_wallet = wallet_for(trainer, "trainer", payment.currency) if trainer else None
-        # The client's and the trainer's wallets are a PERSON's, one currency each and
-        # not addressable per currency, so those two can still disagree with the
-        # payment and are checked. The client's should not: the checkout charged them
-        # in their own currency. A mismatch here means their wallet changed under the
-        # payment, and minting the wrong unit into it is exactly the bug this guard
-        # exists for.
-        checked = [(client_wallet, "client")]
-        if trainer_wallet is not None:
-            checked.append((trainer_wallet, "trainer"))
-        for w, who in checked:
-            if w.currency != payment.currency:
-                # A wallet that already holds money in another currency. There is no FX
-                # here, so this is refused loudly rather than converted at 1:1 — and
-                # recorded as resolved, because retrying cannot change the answer; the
-                # error log is what puts it in front of a person.
-                logger.error(
-                    "payout skipped for payment %s: the %s's wallet holds %s and the "
-                    "payment is %s", payment.pk, who, w.currency, payment.currency)
-                _mark_payout_settled(payment)
-                return
+        # The TRAINER's wallet WITHOUT a currency, as coaching's `pay_out` reads it
+        # (SIDE_BUGS S-058, S-179): handed the payment's, an untouched trainer wallet took
+        # the client's currency, re-pricing the trainer's rates in the wrong unit.
+        trainer_wallet = wallet_for(trainer, "trainer") if trainer else None
+
+        from users.coaching import split
+
+        common = {
+            "original_payment_id": str(payment.id),
+            "subscription_id": str(subscription.id),
+            "plan_id": subscription.plan_id,
+        }
+        for_platform, for_trainer = split(payment.amount, Decimal("1") - share_rate)
+
+        # A PLAN PAYMENT ALWAYS REACHES THE PLATFORM'S REVENUE WALLET (SIDE_BUGS S-179).
+        # A person's wallet is one currency, not addressable per currency, so it can
+        # disagree with the payment; when one did, this skipped EVERY leg — the
+        # platform's revenue too — and marked the payout settled: money that entered the
+        # system recorded nowhere.
+        if client_wallet.currency != payment.currency:
+            # The client's should not disagree: the checkout priced them in their own
+            # currency, under their wallet's lock (S-180). If it does, nothing is minted
+            # into it in the wrong unit; the money goes straight to the platform's revenue
+            # in the payment's own currency, and a person is told.
+            logger.error(
+                "payment %s: the client's wallet holds %s and the payment is %s; minted "
+                "straight to the platform's revenue", payment.pk, client_wallet.currency,
+                payment.currency)
+            list(Wallet.objects.select_for_update().filter(pk=platform_wallet.pk))
+            if not Transaction.objects.filter(
+                    tx_type="topup", metadata__original_payment_id=str(payment.id)).exists():
+                move_funds_atomic(
+                    None, platform_wallet, payment.amount, actor_id=client.id,
+                    tx_type="topup", money_type=payment.money_type,
+                    currency=payment.currency,
+                    metadata={"purpose": "subscription_revenue", **common,
+                              "client_wallet_currency": client_wallet.currency})
+                WalletAuditLog.objects.create(
+                    event_type="plan_payment_client_wallet_mismatch", actor=None,
+                    path="wallet.signals.handle_payment_completed",
+                    payload={"payment_id": str(payment.id), "amount": str(payment.amount),
+                             "currency": payment.currency,
+                             "client_wallet_currency": client_wallet.currency,
+                             "reason": "minted to the platform's revenue, not the "
+                                       "client's wallet"})
+            _mark_payout_settled(payment)
+            return
+        if trainer_wallet is not None and trainer_wallet.currency != payment.currency:
+            # THE OWNER'S RULE FOR NOW (Road to 10, ruled 2026-11-24): no conversion — the
+            # platform keeps the trainer's share and a person is told, with the amount
+            # and the payment ("trainer share not paid"). The cross-currency share is the
+            # owner's to decide before `SUBSCRIPTION_TRAINER_SHARE` is raised above 0
+            # (see that setting); at 0, as today, no trainer is part of this at all.
+            logger.error(
+                "payment %s: the trainer's wallet holds %s and the payment is %s; the "
+                "platform keeps the trainer's share of %s", payment.pk,
+                trainer_wallet.currency, payment.currency, for_trainer)
+            if for_trainer > 0:
+                WalletAuditLog.objects.create(
+                    event_type="subscription_trainer_share_unpaid", actor=None,
+                    path="wallet.signals.handle_payment_completed",
+                    payload={"payment_id": str(payment.id), "trainer_id": trainer.pk,
+                             "amount": str(for_trainer), "currency": payment.currency,
+                             "trainer_wallet_currency": trainer_wallet.currency,
+                             "reason": "trainer share not paid: the trainer's wallet is "
+                                       "in another currency; the platform keeps it"})
+            trainer_wallet = None
+            for_platform, for_trainer = payment.amount, Decimal("0.00")
 
         # BOTH wallets, in id order, before either leg moves. The top-up leg locked the
         # client's wallet alone and the transfer leg then asked for both sorted by id —
@@ -198,16 +248,8 @@ def handle_payment_completed(sender, payment, subscription=None, **kwargs):
             )
 
         # Out of the client's wallet again: the trainer's priced share, then everything
-        # left to the platform. `split` is the same arithmetic the coaching commission
-        # uses, so the two never disagree about a rounded half-unit.
-        from users.coaching import split
-
-        common = {
-            "original_payment_id": str(payment.id),
-            "subscription_id": str(subscription.id),
-            "plan_id": subscription.plan_id,
-        }
-        for_platform, for_trainer = split(payment.amount, Decimal("1") - share_rate)
+        # left to the platform. `split` (above) is the same arithmetic the coaching
+        # commission uses, so the two never disagree about a rounded half-unit.
         if trainer_wallet is not None and for_trainer > 0:
             move_funds_atomic(
                 client_wallet, trainer_wallet, for_trainer,

@@ -5,6 +5,13 @@ Payment Gateway Configuration
 Single active gateway: ShamCash. Secrets are loaded from the environment with
 NO usable hardcoded fallbacks; production readiness is enforced at startup by
 `enforce_production_safety()` in settings_production.py.
+
+The API's base URL has no fallback either (the owner, 2026-11-24). The gateway waits for
+ShamCash's own official access: until `SHAMCASH_API_URL` is set, nothing reads a
+merchant account and no payment API is ever called (`api_reads_configured`), whatever
+token is set. Checkouts then take the manual transfer a person reviews, when the
+merchant account is set (`gateway_kind` 'reviewed'), or are refused
+(`gateway_unavailable`).
 """
 
 import logging
@@ -34,7 +41,7 @@ GATEWAY_RETRY_DELAY = 2  # seconds
 SHAMCASH_CONFIG = {
     'sandbox': {
         'api_key': os.getenv('SHAMCASH_SANDBOX_API_TOKEN', ''),
-        'api_url': os.getenv('SHAMCASH_SANDBOX_API_URL', 'https://api.shamcash-api.com/v1'),
+        'api_url': os.getenv('SHAMCASH_SANDBOX_API_URL', ''),     # no default: see above
         'webhook_secret': os.getenv('SHAMCASH_SANDBOX_WEBHOOK_SECRET', ''),
         'merchant_id': os.getenv('SHAMCASH_SANDBOX_ACCOUNT_ID', ''),
         'initiate_path': os.getenv('SHAMCASH_SANDBOX_INITIATE_PATH', ''),  # set post-approval for hosted mode
@@ -44,7 +51,7 @@ SHAMCASH_CONFIG = {
     },
     'production': {
         'api_key': os.getenv('SHAMCASH_API_TOKEN', ''),
-        'api_url': os.getenv('SHAMCASH_API_URL', 'https://api.shamcash-api.com/v1'),
+        'api_url': os.getenv('SHAMCASH_API_URL', ''),     # no default: see above
         'webhook_secret': os.getenv('SHAMCASH_WEBHOOK_SECRET', ''),
         'merchant_id': os.getenv('SHAMCASH_ACCOUNT_ID', ''),
         'initiate_path': os.getenv('SHAMCASH_INITIATE_PATH', ''),
@@ -142,11 +149,18 @@ def get_amount_limits(gateway_name: str, currency: str) -> Dict[str, Decimal]:
     return (info.get('amount_limits') or {}).get(str(currency).upper())
 
 
+def api_reads_configured(config: Dict[str, Any]) -> bool:
+    """Whether the server may call this gateway's API: a token AND the base URL. The
+    URL has no default (the module docstring), so a token alone calls nothing."""
+    return bool(config.get('api_key') and config.get('api_url'))
+
+
 def is_gateway_enabled(gateway_name: str) -> bool:
-    """A gateway is enabled only if its API token is configured."""
+    """A gateway is enabled only if its API can be called: its token and its base URL
+    are both configured (`api_reads_configured`)."""
     try:
         config = GATEWAY_REGISTRY[gateway_name]['config'].get(GATEWAY_MODE) or {}
-        return bool(config.get('api_key'))
+        return api_reads_configured(config)
     except (ValueError, KeyError):
         return False
 
@@ -162,23 +176,25 @@ def can_initiate_payments(gateway_name: str) -> bool:
 
     What must never happen is what a deploy missing every ShamCash variable did: answer
     200 and tell every customer to transfer 5,000 SYP to account `""`. Either credential
-    makes the gateway usable; neither makes it unusable.
+    makes the gateway usable; neither makes it unusable. The API counts only with its base
+    URL as well (`api_reads_configured`): a token with no URL reads nothing.
     """
     try:
         config = GATEWAY_REGISTRY[gateway_name]['config'].get(GATEWAY_MODE) or {}
     except (ValueError, KeyError):
         return False
-    return bool(config.get('api_key') or config.get('merchant_id'))
+    return bool(api_reads_configured(config) or config.get('merchant_id'))
 
 
 def gateway_kind(gateway_name: str) -> Optional[str]:
     """How this gateway's payments are confirmed, or None when it can take none.
 
-    `automatic` — an API token is set, so the server reads the merchant account itself
-    (a hosted checkout, or the reconcile poller matching the transfer's note) and
-    confirms the payment with no one involved. `reviewed` — only the merchant account
-    id: the customer transfers to it and nothing can read the account, so a person
-    confirms the transfer in the console (`PAYMENT_REVIEW_HOURS`). The same two
+    `automatic` — the API token and its base URL are set (`api_reads_configured`), so the
+    server reads the merchant account itself (a hosted checkout, or the reconcile poller
+    matching the transfer's note) and confirms the payment with no one involved.
+    `reviewed` — the merchant account id, and no API the server may call: the customer
+    transfers to it and nothing can read the account, so a person confirms the transfer
+    in the console (`PAYMENT_REVIEW_HOURS`). The same two
     credentials `can_initiate_payments` accepts, so a gateway has a kind exactly when it
     can take a payment.
     """
@@ -186,7 +202,7 @@ def gateway_kind(gateway_name: str) -> Optional[str]:
         config = GATEWAY_REGISTRY[gateway_name]['config'].get(GATEWAY_MODE) or {}
     except (ValueError, KeyError):
         return None
-    if config.get('api_key'):
+    if api_reads_configured(config):
         return 'automatic'
     if config.get('merchant_id'):
         return 'reviewed'
@@ -210,7 +226,7 @@ WEBHOOK_CONFIG = {
 }
 
 # ========================
-# Security Configuration (CONFIRM header names with ShamCash at onboarding)
+# Security Configuration (CONFIRM header names against ShamCash's official access)
 # ========================
 SECURITY_CONFIG = {
     'webhook_signature_header': os.getenv('SHAMCASH_SIGNATURE_HEADER', 'X-ShamCash-Signature'),
