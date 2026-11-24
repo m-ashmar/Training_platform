@@ -2156,6 +2156,7 @@ def test_the_notification_list_does_not_query_per_notification(make_user, api):
     21 queries — one identical user select per row, for the user the queryset already
     filters on."""
     import uuid
+    from cachalot.api import cachalot_disabled
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
     from notifications.models import Notification
@@ -2174,10 +2175,32 @@ def test_the_notification_list_does_not_query_per_notification(make_user, api):
     # 5 -> 6, deliberately, when blocking arrived: `NotificationViewSet.get_queryset`
     # now calls `moderation.services.blocked_ids`, which is ONE query for the whole
     # page — a blocked person's like, comment or follow must not keep arriving as a
-    # notification. The claim this test makes is unchanged: the cost does not grow
-    # with the number of rows, and 20 rows still must not cost 20 queries.
-    assert len(ctx.captured_queries) <= 6, \
+    # notification.
+    # 6 -> 7, deliberately, with the store-safe notification texts (Road to 10 R1,
+    # 2026-11-24): the seventh query is the reading build's capability rows
+    # (`policy.services.flags_for`, read ONCE per request by `_build_flags`, and only
+    # when the request declares a channel), which choose the text a build may show.
+    # It is per request, not per notification. Not cached in policy on purpose (the
+    # manager's ruling): that read decides what a build may sell, and a stale flag
+    # there is a worse risk than one indexed query per inbox read. The claim this test
+    # makes is unchanged: the cost does not grow with the number of rows, and 20 rows
+    # still must not cost 20 queries.
+    assert len(ctx.captured_queries) <= 7, \
         f"{len(ctx.captured_queries)} queries for a page of 20"
+
+    # ...and the claim itself, measured: a page of 5 and a page of 20 cost the same.
+    # Both without cachalot, so neither is cheaper because the first request above
+    # warmed the cache (it serves the capability rows to the next request): what is
+    # compared is what each page costs the database.
+    def page_cost(size):
+        with cachalot_disabled(), CaptureQueriesContext(connection) as page:
+            answered = api(user).get(f"/api/social/notifications/?page_size={size}")
+        assert answered.status_code == 200
+        assert len(answered.json()["results"]) == size
+        return len(page.captured_queries)
+
+    small, large = page_cost(5), page_cost(20)
+    assert large == small, f"{small} queries for a page of 5, {large} for a page of 20"
 
 
 def test_the_query_log_survives_a_request(make_user, api):

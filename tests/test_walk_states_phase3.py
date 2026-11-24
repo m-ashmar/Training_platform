@@ -76,10 +76,31 @@ def _inbox(api, user, build):
 
 
 def test_inbox_every_kind(walk_run, api):
+    from unittest import mock
+
+    from notifications.models import EmailDelivery
+    from payouts.models import Withdrawal
     from users.walk.inbox import kinds_for
 
-    entry = walk_run("inbox_every_kind")
+    with mock.patch("users.utils.report_account_email_failure") as reported:
+        entry = walk_run("inbox_every_kind")
     me, coach = _user(entry), _user(entry, "coach")
+    ids = entry["ids"]
+
+    # Every e-mail a notice of the state owes composes and is sent: none failed, none
+    # reported. The three withdrawal notices name real withdrawals (made through the
+    # payout steps), neither left open; the client's notices owe no e-mail.
+    assert not reported.called, reported.call_args_list
+    deliveries = EmailDelivery.objects.filter(recipient__in=[me, coach])
+    assert not deliveries.filter(status=EmailDelivery.FAILED).exists()
+    assert sorted(deliveries.filter(recipient=coach, status=EmailDelivery.SENT)
+                  .values_list("kind", flat=True)) == \
+        ["withdrawal_failed", "withdrawal_paid", "withdrawal_requested",
+         "withdrawal_requested"]
+    assert not deliveries.filter(recipient=me).exists()
+    states = dict(Withdrawal.objects.filter(trainer=coach).values_list("pk", "state"))
+    assert states == {ids["withdrawal_paid"]: "confirmed",
+                      ids["withdrawal_failed"]: "failed"}
 
     mine = _inbox(api, me, "apk")
     assert set(mine) == set(kinds_for("client"))
@@ -96,6 +117,9 @@ def test_inbox_every_kind(walk_run, api):
 
     theirs = _inbox(api, coach, "apk")
     assert set(theirs) == set(kinds_for("trainer"))
+    assert theirs["withdrawal_paid"]["data"]["withdrawal_id"] == str(ids["withdrawal_paid"])
+    assert theirs["withdrawal_failed"]["data"]["withdrawal_id"] == \
+        str(ids["withdrawal_failed"])
     assert not [k for k, row in theirs.items() if row["message"] == FALLBACK]
     assert set(entry["ids"]["trainer_kinds"]) == set(kinds_for("trainer"))
 
