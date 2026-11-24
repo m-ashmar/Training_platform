@@ -686,7 +686,19 @@ containers still serving; the dump is the way back. Then run the update's own co
   | Server on | Migrations |
   |---|---|
   | `f77b3e1` (also) | routine 0033, 0034, 0035 · social 0013, 0014 · subscription 0019, 0020 · users 0047 · wallet 0022 |
-  | `f77b3e1` or `f9f4cf1` | analytics 0006 (body measurements) · routine 0036 (platform templates, the free first workout), 0037 (a template's place) · subscription 0021 (a plan paid from the wallet) · users 0048 (the client's «do not renew») |
+  | `f77b3e1` or `f9f4cf1` | analytics 0006 (body measurements) · routine 0036 (platform templates, the free first workout), 0037 (a template's place) · subscription 0021 (a plan paid from the wallet) · users 0048 (the client's «do not renew»), 0049 (the build a device registered from) |
+
+  users 0049 adds `DeviceToken.app_channel` (Road to 10 R1). This update's code on a
+  database WITHOUT it:
+  - registering a device (`POST /api/auth/device-token/`) answers 500;
+  - every push fails, while the inbox row is still written;
+  - deleting an account (`GET` and `DELETE /api/privacy/erase/`, and the console's
+    "erase, then close") answers 500;
+  - the data export's `devices` section reads "could not be exported";
+  - the console's device-token pages answer 500.
+
+  On the server there is no such window: the migrate service runs before `web`, `worker`
+  and `beat` start, and they start only if it exits 0 (above).
 
 - After `docker compose up -d`:
   ```bash
