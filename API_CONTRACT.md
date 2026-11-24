@@ -89,6 +89,8 @@ POST /api/auth/password/change/  {current_password, new_password}  (signed in; S
                                         -> 200 {message, access, refresh}: every other
                                            session ends, store the new pair
                                         | 400 current_password_wrong | password_unchanged
+                                          | password_not_set (no password yet: use
+                                            forgot-password; never a guess)
                                           | field_errors.new_password (as at sign-up)
                                         | 429 throttled (5 wrong in 15 min)
 POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200

@@ -117,6 +117,7 @@ class PasswordChangeView(APIView):
     | `400` | `validation_error` | a field missing, or `new_password` refused by the sign-up rules: its own code in `field_errors.new_password[0].code` (`password_too_short`, `password_too_common`, `password_entirely_numeric`, `password_too_similar`) |
     | `400` | `current_password_wrong` | `current_password` is not the account's password, with `field`; nothing changes |
     | `400` | `password_unchanged` | `new_password` is the current one, with `field` |
+    | `400` | `password_not_set` | the account has no password to change (an operator reset it, or an account made without one): set one through the forgot-password flow (`POST /api/auth/forgot-password/`). Answered before anything else and never counted against the limit below (Road to 10 round 4) |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
     | `429` | `throttled` | five wrong current passwords within 15 minutes — counted as each attempt arrives, so requests sent at once past the fifth are refused before their password is checked; `retry_after_seconds` and `Retry-After` say when to try again |
 
@@ -127,6 +128,16 @@ class PasswordChangeView(APIView):
 
     def post(self, request):
         user = request.user
+        # No password to check (an operator's reset, an account made without one): the
+        # plain answer, before the limit and the body (Road to 10 round 4). Every
+        # current password used to be "wrong", and the fifth was a 429 for a guess
+        # that could never have been right.
+        if not user.has_usable_password():
+            return Response(
+                {'error': _('Your account has no password yet. Set one with "Forgot '
+                            'password": we will email you a code.'),
+                 'code': 'password_not_set'},
+                status=status.HTTP_400_BAD_REQUEST)
         if _wrong_count(user.pk) >= MAX_WRONG_CURRENT:
             return _throttled()
 
