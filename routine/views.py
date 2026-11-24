@@ -1458,6 +1458,23 @@ class RoutineExerciseFilter(django_filters.FilterSet):
         fields = ['routine', 'day']
 
 
+def _id_filters(model_, numbers, plain=()):
+    """A FilterSet over `model_` whose `numbers` (a foreign key or a number column) are
+    WHOLE NUMBERS compared with the column, never a lookup of the row they name, and
+    whose `plain` fields are django-filter's own (a choice, a date).
+
+    `filterset_fields` builds a model-choice filter for a foreign key, which validates
+    the id against EVERY row of the table, whoever's: an id that does not exist answered
+    400 and someone else's real one an empty 200 — an existence oracle (the S-119 fix for
+    `routine-exercises/`, the fix run's S-247 for the four viewsets that still had it).
+    Now both are the same empty 200; a value that is not a whole number is still 400."""
+    attrs = {name: _WholeNumberFilter(field_name=(
+        f'{name}_id' if model_._meta.get_field(name).is_relation else name))
+        for name in numbers}
+    attrs['Meta'] = type('Meta', (), {'model': model_, 'fields': [*numbers, *plain]})
+    return type(f'{model_.__name__}IdFilter', (django_filters.FilterSet,), attrs)
+
+
 class RoutineExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
     """
     API endpoint for managing RoutineExercise objects.
@@ -1529,7 +1546,8 @@ class RoutineProgressViewSet(viewsets.ModelViewSet):
     permission_classes = [IsTrainerOrAdmin | IsClientOrAssignedTrainer]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['routine', 'user', 'day', 'status']
+    # `?routine=&user=&day=` as numbers, `?status=` a choice (S-247, `_id_filters`).
+    filterset_class = _id_filters(RoutineProgress, ('routine', 'user', 'day'), ('status',))
 
     def perform_create(self, serializer):
         """Stamp the owner and refuse progress against someone else's routine.
@@ -2243,7 +2261,8 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     permission_classes = [IsSetLogCreatorOrTrainerOrAdmin]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['workout_session', 'date']
+    # `?workout_session=` as a number, `?date=` a date (S-247, `_id_filters`).
+    filterset_class = _id_filters(ExerciseSetLog, ('workout_session',), ('date',))
 
     def get_queryset(self):
         """
@@ -3102,7 +3121,8 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
     # parameter, so a client could not write one handler for a paging error (S-032).
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['user', 'routine', 'status']
+    # `?user=&routine=` as numbers, `?status=` a choice (S-247, `_id_filters`).
+    filterset_class = _id_filters(WorkoutSession, ('user', 'routine'), ('status',))
     
     def get_permissions(self):
         from .permissions import IsSessionOwnerOrTrainerOrAdmin, IsRoutineOwnerOrAssigned
@@ -4619,7 +4639,8 @@ class RoutineTemplateExerciseViewSet(ExerciseMediaMixin, viewsets.ReadOnlyModelV
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['template', 'day']
+    # `?template=&day=` as numbers (S-247, `_id_filters`).
+    filterset_class = _id_filters(RoutineTemplateExercise, ('template', 'day'))
 
     def get_queryset(self):
         user = self.request.user
