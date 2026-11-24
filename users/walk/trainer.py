@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from . import state
 from .framework import on_retire
-from .training import THREE_A_WEEK, template, the_operator
+from .training import PRODUCT_PRICE, THREE_A_WEEK, template, the_operator
 
 #: What the operator writes when the verification is returned: the trainer reads it.
 RETURNED_REASON = "صورة الهوية غير واضحة: أعد تصويرها في ضوء جيد ومن دون انعكاس."
@@ -79,17 +79,18 @@ def verified(walk, trainer):
     return trainer
 
 
-def draft_product(walk, trainer, *, name, goal="strength", weeks=4, price="15000.00"):
+def draft_product(walk, trainer, *, name, goal="strength", weeks=4, price=PRODUCT_PRICE):
     """A template of three sessions a week and a product drafted from it, through the
-    trainer's own routes (`POST templates/`, `POST /api/v1/trainer/products/`). Answers
-    the product's id."""
+    trainer's own routes (`POST templates/`, `POST /api/v1/trainer/products/`), priced
+    `PRODUCT_PRICE` (what `training.bought_programme_missed_day` declares it pays).
+    Answers the product's id."""
     source = template(walk, trainer, name=name, goal=goal, days=3, weeks=weeks,
                       week=THREE_A_WEEK)
     _status, body = walk.api(trainer, "post", "/api/v1/trainer/products/", {
         "source_template_id": source, "title_ar": name, "title_en": name,
         "description_ar": "برنامج مكتوب بعناية لثلاثة أيام في الأسبوع.",
         "description_en": "A careful three-day-a-week programme.",
-        "price": price, "preview_days": 1, "place": "gym"})
+        "price": f"{price:.2f}", "preview_days": 1, "place": "gym"})
     return body["id"]
 
 
