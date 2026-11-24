@@ -190,11 +190,42 @@ class WalletShort(PaymentError):
         self.required, self.balance, self.currency = required, balance, currency
 
 
+class PlanNotOnSale(PaymentError):
+    """The plan asked for is no longer on sale (`is_active` off)."""
+
+
+class IdempotencyKeyReused(PaymentError):
+    """The key already paid for something else on this subscription (another plan, or a
+    first payment or renewal rather than this upgrade). Answering that payment as this
+    one's result would tell the app an upgrade it never got; `payment` is the one the key
+    belongs to. Nothing moved."""
+
+    def __init__(self, message, payment):
+        super().__init__(message)
+        self.payment = payment
+
+
 #: How long after a wallet payment another one for the same subscription, under a
 #: different key, is refused as a repeat (`AlreadyPaid`). The money is taken at once, so
 #: the gateway's guard — one checkout in flight — has nothing to hold on to; an app that
 #: mints a key per tap would otherwise charge twice and stack two periods.
 WALLET_REPEAT_WINDOW = timedelta(minutes=10)
+
+
+def lock_subscription(pk) -> Subscription:
+    """The subscription row under `SELECT ... FOR UPDATE`, ALONE — no join. Every lock of
+    a subscription takes it this way; its plan and user are read after the lock, as they
+    are then.
+
+    Not `select_for_update(of=('self',)).select_related('plan')`: PostgreSQL re-checks a
+    row it WAITED for against the joined plan row it read before waiting, and when the
+    transaction it waited for switched the plan (an upgrade's completion, a wallet
+    upgrade, `change-plan`), the join no longer holds and the row is dropped —
+    `DoesNotExist` for a subscription that exists: a 500 for the person tapping, a failed
+    webhook or poll for the server. The concurrent pair of the wallet upgrade found it
+    (tests/test_zz_road10_wallet_upgrade.py). With no join, nothing reaches the plan row
+    either, which is what `of=('self',)` was for."""
+    return Subscription.objects.select_for_update().get(pk=pk)
 
 
 def _gateway_facts(data: dict | None) -> dict:
@@ -1080,8 +1111,7 @@ class PaymentService:
         # handed the customer a reference that matched no payment, and a payment quoting
         # it was answered 400 by the webhook for ever.
         with transaction.atomic():
-            locked = (Subscription.objects.select_for_update(of=('self',))
-                      .select_related('plan').get(pk=subscription.pk))
+            locked = lock_subscription(subscription.pk)
             if locked.status not in ('active', 'expired'):
                 raise PaymentError("Subscription is not in a renewable state")
 
@@ -1110,8 +1140,7 @@ class PaymentService:
         for a price nobody quoted.
         """
         with transaction.atomic():
-            locked = (Subscription.objects.select_for_update(of=('self',))
-                      .select_related('plan').get(pk=subscription.pk))
+            locked = lock_subscription(subscription.pk)
             if locked.is_active:
                 raise SubscriptionAlreadyActive(
                     f"Subscription {locked.id} is already active; renew extends it")
@@ -1142,7 +1171,8 @@ class PaymentService:
         * `idempotency_key` already paid for this subscription: that payment comes back
           as it is (`replayed`), whatever has happened since, and nothing moves. Two
           requests with one key queue on the subscription lock; the second finds the
-          first. The unique `(subscription, idempotency_key)` is the backstop.
+          first. The unique `(subscription, idempotency_key)` is the backstop. A key an
+          UPGRADE paid with (`pay_upgrade_from_wallet`) is `IdempotencyKeyReused`.
         * A running trial: `SubscriptionAlreadyActive`, as the Pay button answers it.
           Cover running on a paid plan, or lapsed (`active` / `expired`): a RENEWAL — the
           new period follows the cover held, as a gateway renewal's does. Anything else
@@ -1152,6 +1182,8 @@ class PaymentService:
         * A wallet payment of this subscription completed within `WALLET_REPEAT_WINDOW`
           under another key: `AlreadyPaid` — a second tap with a fresh key would take the
           price twice. (The same key is a replay, above, and is answered, not refused.)
+          A wallet UPGRADE counts too: a renewal paid from the wallet within ten minutes
+          of one is refused, pointing at the upgrade; the other way round is not.
         * A free plan: `NothingToPay`.
         * The price: the plan's price of record in the PAYER's currency (`subscription.
           pricing.charge_for`, through `wallet.exchange` and nothing else), the rate row
@@ -1173,21 +1205,23 @@ class PaymentService:
         NOT sent; the customer's `payment_confirmed` notice and the receipt email are, on
         commit, as for any plan payment.
         """
-        from users.coaching import lock_wallets
-        from wallet.models import move_funds_atomic, wallet_for
-        from wallet.utils import get_platform_revenue_wallet
-
         from policy.money import MoneyType
         from wallet import currency_for as _currency_for
 
         from ..pricing import charge_for
 
         with transaction.atomic():
-            locked = (Subscription.objects.select_for_update(of=('self',))
-                      .select_related('plan', 'user').get(pk=subscription.pk))
+            locked = lock_subscription(subscription.pk)
             replay = Payment.objects.filter(subscription=locked,
                                             idempotency_key=idempotency_key).first()
             if replay is not None:
+                if (replay.metadata or {}).get('kind') == 'upgrade':
+                    # An upgrade paid from the wallet holds keys too: answered as this
+                    # call's replay, it would claim a first payment or renewal that
+                    # never happened (the review of the wallet upgrade).
+                    raise IdempotencyKeyReused(
+                        f"Key already paid upgrade {replay.id} on subscription "
+                        f"{locked.id}", replay)
                 replay.replayed = True
                 return replay
             if locked.is_active and locked.status != 'active':
@@ -1224,14 +1258,7 @@ class PaymentService:
                     raise QuoteMismatch("the quoted price is not what this would charge",
                                         priced.amount, priced.currency)
 
-            owner_type = 'trainer' if getattr(payer, 'is_trainer', False) else 'client'
-            payer_wallet = wallet_for(payer, owner_type, priced.currency)
-            platform = get_platform_revenue_wallet(priced.currency)
-            held = lock_wallets(payer.pk, [payer_wallet, platform])[payer_wallet.pk]
-            if held.balance < priced.amount:
-                raise WalletShort(priced.amount, held.balance, priced.currency)
-            # A wallet whose unit is not the charge's cannot pay it: `move_funds_atomic`
-            # refuses that below (`CurrencyMismatch`, a ValueError), never at 1:1.
+            held, platform = cls._locked_wallet_holding(payer, priced.amount, priced.currency)
 
             metadata = {'plan': plan_snapshot(plan), 'paid_with': 'wallet'}
             if kind == 'renewal':
@@ -1248,42 +1275,217 @@ class PaymentService:
                              else f"Payment for {plan.name}"))
             payment.save()
             cls._opened(payment, by=by, actor=actor, evidence=evidence)
-
-            charge = move_funds_atomic(
-                held, platform, priced.amount, actor_id=payer.pk, currency=priced.currency,
-                tx_type='transfer', money_type=MoneyType.PLATFORM_SUB,
-                metadata={'purpose': 'subscription_revenue', 'paid_with': 'wallet',
-                          'original_payment_id': str(payment.id),
-                          'subscription_id': str(locked.id), 'plan_id': plan.id})
-
-            cls._move(payment, 'completed', by=by, actor=actor,
-                      evidence={'paid_with': 'wallet', 'amount': str(priced.amount),
-                                'currency': priced.currency,
-                                'ledger_reference': charge.reference_id,
-                                **(evidence or {})})
-            payment.metadata = {**payment.metadata, 'wallet_reference': charge.reference_id}
-            payment.invoice_number = cls._generate_invoice_number()
-            payment.completed_at = timezone.now()
+            cls._charge_wallet(payment, held, platform, locked, plan, payer,
+                               by=by, actor=actor, evidence=evidence)
             bought = cls._plan_bought(payment, locked)
             days = payment.plan_bought()['duration_days'] or bought.duration_days
             locked.plan = (cls._dearest_running_plan(locked, clearing=payment)
                            if locked.is_active else bought)
             payment.covers_from, payment.covers_until = cls._activate_subscription(
                 locked, source_of_payment_method('wallet'), days)
-            # Nothing is owed: the money moved above, in this transaction. Without this
-            # the payout sweep would send `payment_completed`, and its receiver mints.
-            payment.payout_settled_at = timezone.now()
-            payment.save()
+            cls._settle_wallet_payment(payment, payer.pk)
             logger.info("Payment %s paid from the wallet (invoice %s): subscription %s %s "
                         "until %s", payment.id, payment.invoice_number, locked.id, kind,
                         locked.end_date)
-
-            recipient_id = payer.pk
-            transaction.on_commit(lambda: cls._notify_confirmed(recipient_id, payment.id),
-                                  robust=True)
-            transaction.on_commit(lambda: cls._queue_receipt_email(payment), robust=True)
         payment.replayed = False
         return payment
+
+    @classmethod
+    def pay_upgrade_from_wallet(cls, subscription: Subscription, to_plan: SubscriptionPlan,
+                                *, idempotency_key: str, quote: tuple,
+                                expected_from_plan_id, by: str = By.CUSTOMER, actor=None,
+                                evidence: dict | None = None) -> Payment:
+        """Pay an UPGRADE's difference from the payer's own wallet, at once (the owner,
+        2026-11-24: apk and web only). Returns the payment, `replayed` set, and `quote`
+        (the `UpgradeQuote` it was struck at) when it is a new payment.
+
+        THE CALLER HAS ALREADY ASKED `require_purchase_allowed(request, PLATFORM_SUB)`:
+        a store build never reaches this. Nothing here reads a build.
+
+        THE SAME RULES AS A GATEWAY UPGRADE, NOT A SECOND SET. The price is decided by
+        `subscription.upgrade.quote_upgrade` under the subscription lock, exactly as
+        `start_upgrade` decides it for a checkout: the new plan's price in the payer's
+        currency minus the credit for the whole days left (refusals `NoRunningCover`,
+        `NotAnUpgrade`, `UpgradeNotPayable`; `ExchangeRateUnavailable`). The only
+        difference is the floor: a wallet has no gateway minimum, so anything above
+        nothing is payable. The plan switches through `_apply_upgrade`, the code a
+        gateway upgrade's completion runs, so the period, the credited payments
+        (`credited_into`) and every refund's share (`_upgrade_share`) are the same.
+
+        THE SAME MONEY RULES AS `pay_from_wallet` (S2.13). One transaction, the locks in
+        the platform's order: the subscription row, the payments the credit comes from
+        (which the switch marks), then the payer's user row and the payer's and the
+        platform's revenue wallets in ascending id (`_locked_wallet_holding`); the
+        payment row is created under them. Then:
+
+        * `idempotency_key` already used on this subscription: the payment it paid comes
+          back as it is (`replayed`), nothing moves — when it is this upgrade (an
+          upgrade to `to_plan`). A key that paid something else is `IdempotencyKeyReused`:
+          answering another payment as this one's would claim an upgrade that never
+          happened. The unique `(subscription, idempotency_key)` is the backstop.
+        * `to_plan` no longer on sale: `PlanNotOnSale` (after the replay, so a retry of a
+          paid upgrade is still answered).
+        * `expected_from_plan_id` — the plan the caller quoted from, read without the lock
+          — is not the row's plan now: `PlanChanged`. This is also what stops a second tap
+          with a FRESH key: the first switched the plan, so the second finds it moved (or,
+          quoted again, `NotAnUpgrade`). No repeat window is needed, and none is applied:
+          a renewal paid from the wallet a minute ago must not block an upgrade.
+        * A gateway checkout with a reference is open (any kind, a held one included):
+          `CheckoutOpen`. The customer may be transferring against it right now.
+        * `quote` — `(amount, currency)` the Review screen showed, REQUIRED: the money is
+          taken at once, so the figure must be the one the person saw — is not what the
+          quote under the lock charges: `UpgradePriceMoved` with that quote.
+        * The balance, read on the LOCKED wallet: `WalletShort`, and the transaction
+          rolls back — no payment row is left.
+
+        Then the money moves: ONE ledger row for the whole difference, payer's wallet ->
+        the platform's revenue wallet in that currency (a plan stays 100% with the
+        platform), `money_type` PLATFORM_SUB, tagged with `original_payment_id`, so a
+        refund (`refund_payment`) puts exactly that amount back. The payment carries the
+        upgrade's price of record (the NEW plan's, with the rate snapshotted when it was
+        converted) and the quote it was struck at (`metadata['upgrade']`, as
+        `start_upgrade` writes it); it opens and completes in this transaction, is
+        invoiced, and its payout is settled at once (no `payment_completed`: there is no
+        money to mint). `payment_confirmed` and the receipt email follow on commit.
+        """
+        from policy.money import MoneyType
+        from wallet import currency_for as _currency_for
+
+        from ..upgrade import quote_upgrade
+
+        with transaction.atomic():
+            locked = lock_subscription(subscription.pk)
+            replay = Payment.objects.filter(subscription=locked,
+                                            idempotency_key=idempotency_key).first()
+            if replay is not None:
+                if ((replay.metadata or {}).get('kind') == 'upgrade'
+                        and replay.plan_bought()['plan_id'] == to_plan.pk):
+                    replay.replayed = True
+                    return replay
+                raise IdempotencyKeyReused(
+                    f"Key already paid {replay.id} on subscription {locked.id}", replay)
+            if not to_plan.is_active:
+                # After the replay: a retry of an upgrade already paid is answered with
+                # its payment even if the plan has since been taken off sale.
+                raise PlanNotOnSale(f"Plan {to_plan.pk} is not on sale")
+            if expected_from_plan_id is not None and locked.plan_id != expected_from_plan_id:
+                raise PlanChanged(f"Subscription {locked.id} moved from plan "
+                                  f"{expected_from_plan_id} to {locked.plan_id}")
+            checkout = (Payment.objects
+                        .filter(subscription=locked, status__in=OPEN_PAYMENT_STATUSES)
+                        .exclude(gateway_transaction_reference__isnull=True)
+                        .exclude(gateway_transaction_reference='')
+                        .order_by('created_at', 'id').first())
+            if checkout is not None:
+                raise CheckoutOpen(f"Subscription {locked.id} has checkout {checkout.id} "
+                                   f"open", checkout)
+
+            payer = locked.user
+            upgrade = quote_upgrade(locked, to_plan, buyer_currency=_currency_for(payer))
+            quoted_amount, quoted_currency = quote
+            if (Decimal(quoted_amount).quantize(Decimal('0.01')) != upgrade.to_pay
+                    or str(quoted_currency).upper() != upgrade.currency):
+                raise UpgradePriceMoved(f"Upgrade of {locked.id} now costs "
+                                        f"{upgrade.to_pay} {upgrade.currency}", upgrade)
+
+            # The payments the credit was struck on, locked BEFORE the wallets: the
+            # switch below marks them `credited_into`, and the platform's order is
+            # subscription -> payment -> user row -> wallets (a payout being re-sent for
+            # one of them locks it, then the wallets: the other way round here was a
+            # deadlock — the review of the wallet upgrade).
+            list(Payment.objects.select_for_update()
+                 .filter(pk__in=[part.payment_id for part in upgrade.parts])
+                 .order_by('pk').values_list('pk', flat=True))
+            held, platform = cls._locked_wallet_holding(payer, upgrade.to_pay,
+                                                        upgrade.currency)
+            payment = Payment(
+                subscription=locked, status='pending', payment_method='wallet',
+                money_type=MoneyType.PLATFORM_SUB,
+                amount=upgrade.to_pay, currency=upgrade.currency,
+                # The price of record is the NEW plan's, as `start_upgrade` writes it:
+                # what the dearest-plan rule and the receipt compare. The charge is that
+                # price minus the credit.
+                price_amount=upgrade.priced.price_amount,
+                price_currency=upgrade.priced.price_currency,
+                exchange_rate=upgrade.priced.rate,
+                exchange_rate_value=getattr(upgrade.priced.rate, 'rate', None),
+                idempotency_key=idempotency_key,
+                metadata={'kind': 'upgrade', 'plan': plan_snapshot(to_plan),
+                          'upgrade': upgrade.as_record(), 'paid_with': 'wallet'},
+                description=f"Upgrade to {to_plan.name}")
+            payment.save()
+            cls._opened(payment, by=by, actor=actor, evidence=evidence)
+            cls._charge_wallet(payment, held, platform, locked, to_plan, payer,
+                               by=by, actor=actor, evidence=evidence)
+            payment.covers_from, payment.covers_until = cls._apply_upgrade(
+                payment, locked, cls._plan_bought(payment, locked),
+                source_of_payment_method('wallet'))
+            cls._settle_wallet_payment(payment, payer.pk)
+            logger.info("Payment %s paid an upgrade from the wallet (invoice %s): "
+                        "subscription %s on plan %s until %s", payment.id,
+                        payment.invoice_number, locked.id, locked.plan_id, locked.end_date)
+        payment.replayed = False
+        payment.quote = upgrade
+        return payment
+
+    @staticmethod
+    def _locked_wallet_holding(payer, amount, currency):
+        """`(payer's wallet, platform's revenue wallet)` in `currency`, both locked, the
+        payer's holding at least `amount`; `WalletShort` otherwise. The caller holds the
+        subscription lock; `users.coaching.lock_wallets` takes the payer's user row (FOR
+        KEY SHARE) and then both wallets in ascending id — the platform's order."""
+        from users.coaching import lock_wallets
+        from wallet.models import wallet_for
+        from wallet.utils import get_platform_revenue_wallet
+
+        owner_type = 'trainer' if getattr(payer, 'is_trainer', False) else 'client'
+        payer_wallet = wallet_for(payer, owner_type, currency)
+        platform = get_platform_revenue_wallet(currency)
+        held = lock_wallets(payer.pk, [payer_wallet, platform])[payer_wallet.pk]
+        if held.balance < amount:
+            raise WalletShort(amount, held.balance, currency)
+        # A wallet whose unit is not the charge's cannot pay it: `move_funds_atomic`
+        # refuses that (`CurrencyMismatch`, a ValueError), never at 1:1.
+        return held, platform
+
+    @classmethod
+    def _charge_wallet(cls, payment, held, platform, subscription, plan, payer, *, by,
+                       actor, evidence):
+        """Take the payment's whole amount from the payer's locked wallet for the
+        platform — ONE ledger row, `money_type` PLATFORM_SUB, tagged with the payment so a
+        refund (`wallet.signals.unwind_payment`) puts exactly it back — and complete the
+        payment: its event, the ledger reference, the invoice number, the receipt date.
+        The caller grants the cover, then `_settle_wallet_payment`."""
+        from policy.money import MoneyType
+        from wallet.models import move_funds_atomic
+
+        charge = move_funds_atomic(
+            held, platform, payment.amount, actor_id=payer.pk, currency=payment.currency,
+            tx_type='transfer', money_type=MoneyType.PLATFORM_SUB,
+            metadata={'purpose': 'subscription_revenue', 'paid_with': 'wallet',
+                      'original_payment_id': str(payment.id),
+                      'subscription_id': str(subscription.id), 'plan_id': plan.id})
+        cls._move(payment, 'completed', by=by, actor=actor,
+                  evidence={'paid_with': 'wallet', 'amount': str(payment.amount),
+                            'currency': payment.currency,
+                            'ledger_reference': charge.reference_id,
+                            **(evidence or {})})
+        payment.metadata = {**payment.metadata, 'wallet_reference': charge.reference_id}
+        payment.invoice_number = cls._generate_invoice_number()
+        payment.completed_at = timezone.now()
+        return charge
+
+    @classmethod
+    def _settle_wallet_payment(cls, payment, recipient_id) -> None:
+        """A wallet payment owes nothing once it is written: the money moved in this
+        transaction. Marked settled — without it the payout sweep would send
+        `payment_completed`, and its receiver mints — saved, and the customer's
+        `payment_confirmed` and receipt email queued on commit."""
+        payment.payout_settled_at = timezone.now()
+        payment.save()
+        transaction.on_commit(lambda: cls._notify_confirmed(recipient_id, payment.id),
+                              robust=True)
+        transaction.on_commit(lambda: cls._queue_receipt_email(payment), robust=True)
 
     @classmethod
     def start_upgrade(cls, subscription: Subscription, to_plan: SubscriptionPlan, initiate,
@@ -1314,8 +1516,7 @@ class PaymentService:
         from ..upgrade import quote_upgrade
 
         with transaction.atomic():
-            locked = (Subscription.objects.select_for_update(of=('self',))
-                      .select_related('plan', 'user').get(pk=subscription.pk))
+            locked = lock_subscription(subscription.pk)
             if expected_from_plan_id is not None and locked.plan_id != expected_from_plan_id:
                 raise PlanChanged(f"Subscription {locked.id} moved from plan "
                                   f"{expected_from_plan_id} to {locked.plan_id}")
@@ -1574,10 +1775,11 @@ class PaymentService:
         taking them the other way round here was a deadlock waiting for a webhook to land
         during a tap.
 
-        `of=('self',)`: `select_for_update()` with `select_related('subscription__plan')`
-        also locked the PLAN row, so every completion for any subscriber on a plan queued
-        behind every other one, and so did creating a subscription on it (the foreign key
-        check needs a share lock the update lock excludes).
+        The subscription row ALONE (`lock_subscription`): `select_for_update()` with
+        `select_related('subscription__plan')` also locked the PLAN row, so every
+        completion for any subscriber on a plan queued behind every other one; and with
+        the plan joined (even under `of=('self',)`), a lock that waited on an upgrade
+        lost its row when the plan switched.
 
         A routine product's checkout has no subscription: `(None, payment)`, the payment
         row locked alone. Its own order continues payment -> product -> purchase -> the
@@ -1588,8 +1790,7 @@ class PaymentService:
             raise Payment.DoesNotExist(f"Payment {payment_id} does not exist")
         if row['subscription_id'] is None:
             return None, Payment.objects.select_for_update().get(pk=payment_id)
-        subscription = (Subscription.objects.select_for_update(of=('self',))
-                        .select_related('plan').get(pk=row['subscription_id']))
+        subscription = lock_subscription(row['subscription_id'])
         payment = Payment.objects.select_for_update().get(pk=payment_id)
         payment.subscription = subscription
         return subscription, payment
