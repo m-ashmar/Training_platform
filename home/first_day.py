@@ -34,18 +34,25 @@ def open_request(person):
     (`initiated_by` `client`, or `unknown` for a row from before the field), else the
     newest invitation a trainer sent (`trainer`). A pair where either has blocked the
     other is not an open request. One query, read once by the view for the hero and the
-    checklist."""
+    checklist.
+
+    The own request is chosen FIRST, in the query, then the newest of the rest: it read
+    the ten newest rows and looked for the own request among them, so a client with
+    ten or more newer invitations saw `invited` over the request they were waiting on
+    (the phase 0 review, round 4, 2026-11-24)."""
+    from django.db.models import Case, IntegerField, Value, When
+
     from moderation.services import blocked_ids
     from users.models import TrainerClientRelation
     from users.visibility import public_people
 
-    rows = list(TrainerClientRelation.objects.select_related('trainer')
-                .filter(client=person, status='pending',
-                        trainer__in=public_people())
-                .exclude(trainer_id__in=blocked_ids(person))
-                .order_by('-requested_at', '-id')[:10])
-    own = [row for row in rows if row.initiated_by != 'trainer']
-    return (own or rows or [None])[0]
+    return (TrainerClientRelation.objects.select_related('trainer')
+            .filter(client=person, status='pending', trainer__in=public_people())
+            .exclude(trainer_id__in=blocked_ids(person))
+            .annotate(_theirs=Case(When(initiated_by='trainer', then=Value(1)),
+                                   default=Value(0), output_field=IntegerField()))
+            .order_by('_theirs', '-requested_at', '-id')
+            .first())
 
 
 def find_trainer_hero(person, *, pending=None) -> dict | None:
