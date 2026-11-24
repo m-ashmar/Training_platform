@@ -3343,6 +3343,7 @@ English). Prefix `/api/routine/`.
 | `DELETE exercises/{id}/` | 409 `exercise_has_history`; 409 `exercise_in_use` with `routines`, `templates` (a routine or template still uses it: remove it there, or retire it with `is_active=false`; the fix run's G2, 2026-11-24, additive) |
 | `POST exercises/create-with-image/` | 400 `missing_fields` (+ `fields`, `field`; minted as `field_required` and unified before it shipped, B-092) |
 | `DELETE routines/{id}/` | 409 `routine_has_history` |
+| `POST routines/`, `PATCH`/`PUT routines/{id}/` | 400 `validation_error` with `field_errors.days[0].code` `days_out_of_range`: `days` outside 1-365, the bound `templates/{id}/generate/` and a bought program already had (the fix run's G6, 2026-11-24, additive) |
 | `POST routines/{id}/assign_to_client/` | 400 `client_id_required`, `not_your_client`, `already_assigned`; 404 `client_not_found`; 500 `routine_assign_failed` |
 | `POST routines/{id}/unassign_from_client/` | 400 `client_id_required`, `not_your_client`, `not_assigned`; 404 `client_not_found`; 500 `routine_unassign_failed` |
 | `POST routines/{id}/update_progress/` | 400 `day_and_status_required`, `bad_day`, `day_out_of_range`, `day_has_no_exercises`; 403 `routine_not_yours` |

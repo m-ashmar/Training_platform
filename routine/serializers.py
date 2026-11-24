@@ -10,8 +10,8 @@ from .models import (
     UserExerciseProgress, RoutineProgress, ExerciseSetLog, WorkoutSession,
     RoutineTemplate, RoutineTemplateExercise, DayOutcome
 )
-from .models import (DAY_NAME_MAX_LENGTH, SUPERSET_GROUP_MAX, load_value_problem,
-                     merge_day_names)
+from .models import (DAY_NAME_MAX_LENGTH, MAX_ROUTINE_DAYS, SUPERSET_GROUP_MAX,
+                     load_value_problem, merge_day_names)
 from .sessions import SESSION_MAX_SECONDS
 import logging
 from django.db.models import Sum, F
@@ -607,11 +607,19 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
     on `day_names`: 400 `day_names_invalid` (not an object of day number to text),
     `day_out_of_range` (a day outside 1..`days`), `too_long`. Shortening `days` drops
     the names of the days the routine no longer has.
+
+    `days` (the fix run's G6): 1..365, the bound `templates/{id}/generate/` and a bought
+    program already had. Outside it: 400 `validation_error` with
+    `field_errors.days[0].code` `days_out_of_range` (the code `generate` answers for the
+    same bound). A stored routine is not re-checked until a write sends `days`.
     """
     routine_exercises = RoutineExerciseSerializer(many=True, read_only=True)
     created_by = serializers.StringRelatedField(read_only=True)
     created_by_id = serializers.IntegerField(read_only=True)
     day_names = serializers.JSONField(required=False)
+    # Declared, so the refusal carries this API's code: the model's validators would
+    # answer DRF's `max_value` / `min_value`. Left out of a create, the model's default.
+    days = serializers.IntegerField(required=False)
     estimated_duration_minutes = serializers.SerializerMethodField()
     target_muscles = serializers.SerializerMethodField()
     product = serializers.SerializerMethodField()
@@ -649,6 +657,14 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
         return {'id': product.pk, 'title': product.title_in(get_language() or 'ar'),
                 'trainer': {'id': trainer.pk,
                             'name': trainer.full_name or trainer.username}}
+
+    def validate_days(self, value):
+        """1..MAX_ROUTINE_DAYS. Assigning builds a progress row per day per client."""
+        if not 1 <= value <= MAX_ROUTINE_DAYS:
+            raise serializers.ValidationError(
+                _('days must be between 1 and %(max)d.') % {'max': MAX_ROUTINE_DAYS},
+                code='days_out_of_range')
+        return value
 
     def validate_day_names(self, value):
         """The names as `{"<day>": name or None}`, None meaning "remove". Whether each

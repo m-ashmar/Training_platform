@@ -59,6 +59,11 @@ LOAD_MODE_CHOICES = [
 #: Inclusive bounds of `load_value` per mode, and of a superset number within a day.
 LOAD_VALUE_BOUNDS = {'percent': (1, 100), 'rpe': (1, 10)}
 SUPERSET_GROUP_MAX = 20
+#: The most days a routine may have (the fix run's G6, 2026-11-24): what `generate`
+#: (`MAX_GENERATED_DAYS`) and a bought program (`products.MAX_PROGRAM_DAYS`) already
+#: allow. Assigning builds one `RoutineProgress` row per day per client in memory, so a
+#: hand-written routine of `days: 2000000000` took the server's memory in one request.
+MAX_ROUTINE_DAYS = 365
 #: The longest day name («دفع · صدر وأكتاف»), after trimming.
 DAY_NAME_MAX_LENGTH = 40
 
@@ -463,7 +468,11 @@ class Routine(RowValidationMixin, models.Model):
     
     # Routine configuration
     is_active = models.BooleanField(default=True, help_text="Whether this routine is active")
-    days = models.PositiveIntegerField(default=3, help_text="Number of days in the routine plan")
+    # 1..MAX_ROUTINE_DAYS on every write (`validate_row`), the console's included; the
+    # API answers `days_out_of_range` (`RoutineSerializer.validate_days`).
+    days = models.PositiveIntegerField(
+        default=3, help_text="Number of days in the routine plan",
+        validators=[MinValueValidator(1), MaxValueValidator(MAX_ROUTINE_DAYS)])
     
     # Scheduling
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
