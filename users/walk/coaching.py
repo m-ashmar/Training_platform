@@ -15,17 +15,21 @@ accounts (the framework owner's review, 2026-11-24). Never a hand-written ledger
 payment state or hold.
 
 **No state needs an exchange rate.** A plan is chosen in the client's OWN currency
-(`cheapest_plan(money_of(client))`) and bought in it, so nothing is converted; prices in
-two currencies are never compared (a dollar plan at 12.00 is not "cheaper" than a pound
-plan at 1,000). Where no paid plan is on sale in the client's currency the state refuses
-and says so: it never makes or prices a plan, never makes the wallet follow the plan's
-currency, and never sets a rate (the operator's value; a development database may have
-none). The coaching price is in the trainer's currency, which is the client's (both are
-fresh accounts: `users/walk/wallet.py`).
+(`shared.plan_for(client)`: the cheapest on sale in that currency, the one rule every
+walk area uses) and bought in it, so nothing is converted; prices in two currencies are
+never compared (a dollar plan at 12.00 is not "cheaper" than a pound plan at 1,000).
+Where no paid plan is on sale in the client's currency the state refuses and says so: it
+never makes or prices a plan, never makes the wallet follow the plan's currency, and
+never sets a rate (the operator's value; a development database may have none). The
+coaching price is in the trainer's currency, which is the client's (both are fresh
+accounts: `users/walk/wallet.py`).
 
-The states that read platform data (a plan on sale, the diet templates
-and the food catalogue, the starter exercises) need a bootstrapped database: the
-command refuses once, before any state, when one is not (`framework.bootstrap_gaps`).
+The states that read platform data (a plan on sale in the currency a new wallet takes,
+the diet templates and the food catalogue, the starter exercises) and the settings they
+move money under (a new agent's caps, the payout minimum and daily cap) are checked once,
+before any state writes anything, and every gap is named in one refusal
+(`framework.refuse_unless_ready`: `bootstrap_gaps`, and the `@needs` the framework
+declares for these states).
 
 Not reachable here, by design of the platform rather than of this command:
 - **a plan payment pending review** needs a checkout opened on the ShamCash gateway and
@@ -48,8 +52,8 @@ from django.utils import timezone
 
 from . import state
 from .framework import WalkRefused, on_retire
-from .shared import coach_client, starter_exercise
-from .wallet import COACH_RATE, agent, call, coach, funded_client, key, money_of, top_up
+from .shared import coach_client, plan_for, starter_exercise, top_up
+from .wallet import COACH_RATE, agent, call, coach, funded_client, key, money_of
 
 
 # ------------------------------------------------------------------ on a reset
@@ -143,28 +147,9 @@ def plan_reminders_now(subscription):
 
 
 # ------------------------------------------------------------------ plan steps
-def cheapest_plan(currency, *, diet=False):
-    """The cheapest paid plan on sale in `currency` (the client's own), with the diet
-    when asked. Prices are compared within that one currency only. Refuses, naming what
-    is missing, when there is none: a state never makes, prices or converts a plan."""
-    from subscription.models import SubscriptionPlan
-
-    plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0, currency=currency)
-    if diet:
-        plans = plans.filter(has_diet_access=True)
-    plan = plans.order_by("price", "id").first()
-    if plan is None:
-        raise WalkRefused(
-            f"no paid subscription plan on sale in {currency}"
-            f"{' with the diet' if diet else ''}: the walk client trades in {currency} and "
-            f"a plan in another currency would need the operator's exchange rate. Put "
-            f"one on sale in the console; this command never makes or prices a plan.")
-    return plan
-
-
 def plan_price(plan, client):
     """The plan's price as the plan list quotes it to the client: the price of record,
-    the plan being in the client's own currency (`cheapest_plan`), so no rate is read.
+    the plan being in the client's own currency (`shared.plan_for`), so no rate is read.
     A plan in another currency is refused, never converted."""
     from subscription.pricing import charge_for
 
@@ -201,10 +186,11 @@ def plan_ends_at(subscription, when):
 
 
 def subscribed_client(walk, *, diet=False, extra=Decimal("0")):
-    """A client (main account) who bought the cheapest plan in their currency from a
-    wallet an agent topped up with its price (and `extra` more)."""
+    """A client (main account) who bought the cheapest plan on sale in their own
+    currency (`shared.plan_for`) from a wallet an agent topped up with its price (and
+    `extra` more)."""
     client = walk.account(role="client")
-    plan = cheapest_plan(money_of(client), diet=diet)
+    plan = plan_for(client, diet=diet)
     top_up(walk, agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
     return client, buy_plan(walk, client, plan)
 
@@ -233,7 +219,7 @@ def coach_diet_plan(trainer, client):
 def coaching_frozen(walk):
     trainer = coach(walk)
     client = walk.account(role="client")
-    plan = cheapest_plan(money_of(client), diet=True)
+    plan = plan_for(client, diet=True)
     # The plan's price and one month of coaching, and a little: not a second month.
     top_up(walk, agent(walk), client, plan_price(plan, client).amount + COACH_RATE + 5000)
     subscription = buy_plan(walk, client, plan)
@@ -344,6 +330,6 @@ def client_invited_by_coach(walk):
                "currency exactly.")
 def client_wallet_covers_plan(walk):
     client = walk.account(role="client")
-    plan = cheapest_plan(money_of(client))
+    plan = plan_for(client)
     top_up(walk, agent(walk), client, plan_price(plan, client).amount)
     walk.ids(plan=plan.pk)

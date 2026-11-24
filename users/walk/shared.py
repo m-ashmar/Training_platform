@@ -137,15 +137,25 @@ def top_up(walk, agent, client, amount: str, currency: str | None = None):
     """Cash taken by `agent`, credited to `client`'s wallet through the agent's own route
     (`POST wallet/agent/topup/proxy/`, money type `wallet_move`, the receivable booked),
     in the client's own currency unless `currency` says otherwise (`currency_for`: a new
-    wallet's is the platform's base currency). Answers the route's body."""
+    wallet's is the platform's base currency). An amount above the agent's per-top-up cap
+    in that currency (`per_transaction_limit_for`) is handed over as several top-ups, as
+    an agent would. Answers the route's body (the last top-up's)."""
     import uuid
+    from decimal import Decimal
 
     from wallet import currency_for
+    from wallet.models import ensure_agent_profile
 
     currency = currency or currency_for(client)
-    _status, body = walk.api(agent, "post", "/api/wallet/agent/topup/proxy/", {
-        "client_identifier": str(client.pk), "amount": amount, "currency": currency,
-        "idempotency_key": f"walk-{uuid.uuid4().hex}"})
+    left = Decimal(amount)
+    cap = Decimal(ensure_agent_profile(agent).per_transaction_limit_for(currency) or left)
+    body = None
+    while left > 0:
+        part = min(left, cap)
+        _status, body = walk.api(agent, "post", "/api/wallet/agent/topup/proxy/", {
+            "client_identifier": str(client.pk), "amount": f"{part:.2f}",
+            "currency": currency, "idempotency_key": f"walk-{uuid.uuid4().hex}"})
+        left -= part
     return body
 
 

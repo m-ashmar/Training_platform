@@ -14,14 +14,16 @@ profile, set the way the console sets them.
 **One currency per state, never a rate.** Each state trades in its client's own
 currency (`money_of`: the wallet's, or for an account no money has reached yet the
 platform's base currency, so a new Syrian client's wallet is in pounds). A top-up is in
-that currency and the agent's caps, ceiling and settlement are read in it; a trainer is
+that currency (`shared.top_up`, split on the agent's per-top-up cap in it) and the
+agent's ceiling and settlement are read in it; a trainer is
 a fresh account too, so the coaching price (`COACH_RATE`, in the trainer's currency) and
 the client's money are the same currency and a transfer never crosses. Nothing here
 converts, and nothing creates or sets an exchange rate: that is the operator's value,
 and a development database may have none (the app builders' does, on purpose).
 
-The helpers (`call`, `operator`, `agent`, `top_up`, `funded_client`, `coach`,
-`money_of`) are shared with `users/walk/coaching.py`, the other money module.
+The helpers (`call`, `operator`, `agent`, `funded_client`, `coach`, `money_of`) are
+shared with `users/walk/coaching.py`, the other money module; the top-up is the walk's
+one (`shared.top_up`).
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from decimal import ROUND_UP, Decimal
 
 from . import state
 from .framework import on_retire
+from .shared import top_up
 
 #: A trainer's monthly fee in the walk states, in the trainer's currency (a fresh
 #: account's: the platform's base currency, pounds).
@@ -74,28 +77,9 @@ def agent(walk, part="agent", **console):
     return user
 
 
-def top_up(walk, agent_user, client, amount, currency=None):
-    """Cash handed to `agent_user`, credited to `client` by the agent's app
-    (`POST wallet/agent/topup/proxy/`, WALLET_MOVE), in the client's own currency
-    (`money_of`) unless one is named. An amount above the agent's per-top-up cap in
-    that currency is handed over in several top-ups, as an agent would."""
-    from wallet.models import ensure_agent_profile
-
-    currency = currency or money_of(client)
-    amount = Decimal(amount)
-    cap = ensure_agent_profile(agent_user).per_transaction_limit_for(currency) or amount
-    receipts = []
-    while amount > 0:
-        part = min(amount, Decimal(cap))
-        receipts.append(call(walk, agent_user, "post", "/api/wallet/agent/topup/proxy/", {
-            "client_identifier": str(client.pk), "amount": f"{part:.2f}",
-            "currency": currency, "idempotency_key": key()}))
-        amount -= part
-    return receipts
-
-
 def funded_client(walk, part=None, *, amount, via=None, **fields):
-    """A client whose wallet an agent topped up with `amount` pounds."""
+    """A client whose wallet an agent topped up with `amount`, in the client's own
+    currency (a new wallet's: pounds)."""
     client = walk.account(part, role="client", **fields)
     if Decimal(amount) > 0:
         top_up(walk, via or agent(walk, f"{part}_agent" if part else "agent"), client,
