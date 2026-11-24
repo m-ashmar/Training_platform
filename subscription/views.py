@@ -2418,11 +2418,19 @@ class PaymentReconcileView(APIView):
     Refusals, each with its `code` (BACKEND_BUGS B-048):
       404 `not_found`               no such payment, or not the caller's
       400 `no_gateway_reference`    the checkout never reached the gateway
-      502 `gateway_unreachable`     the provider could not be asked; nothing changed,
+      502 `gateway_unreachable`     the gateway's adapter raised — a configuration or
+                                    programming fault, not an outage; nothing changed,
                                     the money is safe, ask again later
       400 `reconcile_rejected`      the provider answered but the match failed
                                     verification (amount, currency, or an illegal
                                     transition); nothing changed
+
+    AN OUTAGE IS NOT A 502 (SIDE_BUGS S-230). ShamCash's adapter turns a lookup it could
+    not make — the provider down, a timeout, no base URL — into the status `unknown`,
+    which closes nothing and raises nothing: the answer is the 200 above, the payment's
+    `status` unchanged and `gateway_state: degraded`, as the spec says (section 6:
+    nothing is refused because of it). `gateway_unreachable` was listed as "the provider
+    could not be asked", which ShamCash never answers.
     """
     permission_classes = [permissions.IsAuthenticated]
     # Every call makes an outbound gateway lookup, so an authenticated caller could

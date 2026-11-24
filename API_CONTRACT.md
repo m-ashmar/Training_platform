@@ -2493,7 +2493,10 @@ field and code; in short:
 - `payments/{id}/reconcile/` on a payment already completed answers `payment_id` too.
 - `payments/{id}/status/` and `payments/{id}/reconcile/` answer a `code` on every
   refusal: `404 not_found`, `400 no_gateway_reference`,
-  `502 gateway_unreachable`, `400 reconcile_rejected` (B-048).
+  `502 gateway_unreachable`, `400 reconcile_rejected` (B-048). The 502 is a gateway
+  adapter that raised (a configuration or programming fault). ShamCash not answering
+  is not one: reconcile answers 200 with the payment's `status` unchanged and
+  `gateway_state: "degraded"` (SIDE_BUGS S-230).
 - `payments/{id}/receipt/?format=pdf` answers its 404s (`not_found`,
   `receipt_not_available`) as JSON with `Content-Type: application/json`, not as bytes
   labelled PDF (B-049).
