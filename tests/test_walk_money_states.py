@@ -10,6 +10,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 
 from tests.walk_fixtures import walk_platform, walk_run  # noqa: F401
 
@@ -216,3 +217,54 @@ def test_client_wallet_untouched(api, walk_run):
     assert Decimal(str(wallet["balance"])) == 0 and wallet["currency_locked"] is False
     assert wallet["currency_options"]
     assert not Wallet.objects.filter(owner=me, currency_chosen_at__isnull=False).exists()
+
+
+# ------------------------------------------------------------------ nobody else touched
+MONEY_STATES = (
+    "coaching_frozen", "coaching_renews_soon", "coaching_stops_soon", "plan_lapsed",
+    "plan_not_renewing", "plan_renewal_due", "trainer_withdrawal_requested",
+    "trainer_withdrawal_sent", "trainer_withdrawal_refused", "agent_busy_day",
+    "agent_key_paired_elsewhere", "client_request_waiting", "client_awaiting_first_program",
+    "client_invited_by_coach", "client_wallet_covers_plan", "client_wallet_short_of_coach",
+    "client_wallet_untouched")
+
+
+def test_no_account_but_the_walk_accounts_is_renewed_lapsed_or_reminded(
+        make_user, api, walk_run):
+    """A builder's own accounts on the same development database, each one run of the
+    scheduled work away from a change: a plan whose cover has ended, a coaching month
+    that has ended and is paid for, and a month ending in three days. Every money state
+    runs; none of them is touched (the framework owner's review, M1)."""
+    from notifications.models import Notification
+    from subscription.models import Subscription, SubscriptionPlan
+    from tests.test_coaching_months import _accepted, _deliver_first_program
+
+    plan = SubscriptionPlan.objects.filter(is_active=True, price__gt=0).first()
+    lapsing = make_user("m1_builder_plan")
+    sub = Subscription.objects.create(user=lapsing, plan=plan, status="active",
+                                      source="shamcash")
+    Subscription.objects.filter(pk=sub.pk).update(
+        status="active", end_date=timezone.now() - timedelta(hours=3),
+        start_date=timezone.now() - timedelta(days=31))
+    trainer, due_client, due = _accepted(make_user, api, "m1_due", funds="1000.00")
+    _deliver_first_program(api, trainer, due_client)
+    _soon_trainer, soon_client, soon = _accepted(make_user, api, "m1_soon", funds="1000.00")
+    _deliver_first_program(api, _soon_trainer, soon_client)
+    for relation, when in ((due, timezone.now() - timedelta(hours=1)),
+                           (soon, timezone.now() + timedelta(days=2, hours=20))):
+        period = relation.periods.order_by("-number").first()
+        shift = period.ends_at - when
+        type(period).objects.filter(pk=period.pk).update(
+            starts_at=period.starts_at - shift, ends_at=period.ends_at - shift)
+    people = [lapsing, due_client, soon_client]
+    notices = Notification.objects.filter(recipient__in=people).count()
+
+    walk_run(*MONEY_STATES)
+
+    assert Subscription.objects.get(pk=sub.pk).status == "active"           # not lapsed
+    due_month = due.periods.order_by("-number").first()
+    assert (due.periods.count(), due_month.frozen_at) == (1, None)     # not renewed/frozen
+    soon_month = soon.periods.order_by("-number").first()
+    assert soon_month.renewal_reminder_sent_at is None                       # not reminded
+    assert Notification.objects.filter(recipient__in=people).count() == notices
+

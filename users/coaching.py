@@ -515,7 +515,7 @@ def renew(relation_id, now=None) -> str:
         return 'renewed'
 
 
-def remind_upcoming(now=None, *, batch=None, after=None) -> int:
+def remind_upcoming(now=None, *, batch=None, after=None, relation_ids=None) -> int:
     """Tell every client whose paid month ends within COACHING_RENEWAL_REMINDER_DAYS what
     happens then (the owner, 2026-09-19: every client, whether or not the wallet covers
     it): that it renews (`coaching_renewal_soon`), or — when the client asked not to
@@ -529,6 +529,10 @@ def remind_upcoming(now=None, *, batch=None, after=None) -> int:
 
     With a `batch` (`training_platform.batching.Batch`, the beat task's), only one page
     of relations with an id after `after`; `batch.cut` then says more remain.
+
+    `relation_ids` limits it to those relations; None (the beat task's call) is every
+    relation, as before. For a caller that must touch only its own rows
+    (a development tool that resets its own accounts on a shared database).
     """
     from notifications.domain.dispatcher import emit_event
     from notifications.domain.trainer_client_events import (CoachingEndingSoonEvent,
@@ -545,6 +549,8 @@ def remind_upcoming(now=None, *, batch=None, after=None) -> int:
            .filter(last_id__in=CoachingPeriod.objects.filter(
                status='settled', renewal_reminder_sent_at__isnull=True,
                ends_at__gt=now, ends_at__lte=now + lead).values('pk')))
+    if relation_ids is not None:
+        due = due.filter(pk__in=list(relation_ids))
     if batch is None:
         ids = list(due.order_by('pk').values_list('pk', flat=True))
     else:

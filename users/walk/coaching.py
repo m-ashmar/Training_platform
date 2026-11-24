@@ -5,11 +5,14 @@ routes the app calls (`walk.api`, through `users/walk/wallet.py call`: the reque
 the answers, `users/walk/shared.py coach_client`, the first programme, a plan paid from
 the wallet, the renewal switch, a cancel), and the scheduled task's own function for
 what time does. A state that time makes moves the DATES (a coaching month's or a plan's
-start and end, nothing else) and then calls that task:
-`users.tasks.renew_coaching_periods` (reminders, renewals, freezes),
-`subscription.tasks.expire_lapsed_subscriptions`,
-`subscription.tasks.send_renewal_reminders`. Never a hand-written ledger row, payment
-state or hold. The states that read platform data (a plan on sale, the diet templates
+start and end, nothing else) and then calls the scheduled work FOR ITS OWN ROWS ONLY:
+`users.coaching.renew(relation_id)` (the hourly run's renewal or freeze of one
+relation), `users.coaching.remind_upcoming(relation_ids=...)`,
+`subscription.tasks.expire_lapsed_subscriptions(subscription_ids=...)` and
+`send_renewal_reminders(subscription_ids=...)`. Never the whole sweep: on a shared
+development database that renewed, froze, lapsed and reminded every builder's own
+accounts (the framework owner's review, 2026-11-24). Never a hand-written ledger row,
+payment state or hold. The states that read platform data (a plan on sale, the diet templates
 and the food catalogue, the starter exercises) need a bootstrapped database: the
 command refuses once, before any state, when one is not (`framework.bootstrap_gaps`).
 
@@ -33,6 +36,7 @@ from decimal import Decimal
 from django.utils import timezone
 
 from . import state
+from .framework import WalkRefused
 from .shared import coach_client, starter_exercise
 from .wallet import COACH_RATE, agent, call, coach, funded_client, key, top_up
 
@@ -79,11 +83,34 @@ def month_ends_at(relation, when):
     return period
 
 
-def run_the_coaching_hour():
-    """The hourly beat entry: reminders, then renewals and freezes."""
-    from users.tasks import renew_coaching_periods
+def renew_now(relation):
+    """What the hourly run does for THIS relation at its month's end: renew it, or
+    freeze it when the wallet cannot cover the month (`users.coaching.renew`)."""
+    from users.coaching import renew
 
-    renew_coaching_periods()
+    return renew(relation.pk)
+
+
+def remind_now(relation):
+    """The hourly run's 3-day reminder, for THIS relation only."""
+    from users.coaching import remind_upcoming
+
+    return remind_upcoming(relation_ids=[relation.pk])
+
+
+def lapse_now(subscription):
+    """The daily run's lapse of an ended plan, for THIS subscription only."""
+    from subscription.tasks import expire_lapsed_subscriptions
+
+    return expire_lapsed_subscriptions(subscription_ids=[subscription.pk])
+
+
+def plan_reminders_now(subscription):
+    """The daily run's plan reminders (ending soon, then lapsed), for THIS
+    subscription only."""
+    from subscription.tasks import send_renewal_reminders
+
+    return send_renewal_reminders(subscription_ids=[subscription.pk])
 
 
 # ------------------------------------------------------------------ plan steps
@@ -162,8 +189,6 @@ def coach_diet_plan(trainer, client):
        summary="A coaching whose month ended unpaid, and a plan that lapsed: the coach's "
                "routine and diet plan are readable and cannot be used.")
 def coaching_frozen(walk):
-    from subscription.tasks import expire_lapsed_subscriptions
-
     plan = cheapest_plan(diet=True)
     trainer = coach(walk)
     client = walk.account(role="client")
@@ -176,9 +201,12 @@ def coaching_frozen(walk):
     # A month later: the coaching month ends unpaid (the wallet holds 5,000 of 40,000)
     # and the hourly run freezes it; the plan's cover ends and the daily run lapses it.
     month_ends_at(relation, timezone.now() - timedelta(hours=2))
-    run_the_coaching_hour()
+    outcome = renew_now(relation)
+    if outcome != "frozen":
+        raise WalkRefused(f"coaching_frozen: the month's end answered {outcome!r}, "
+                          f"not 'frozen'")
     plan_ends_at(subscription, timezone.now() - timedelta(hours=2))
-    expire_lapsed_subscriptions()
+    lapse_now(subscription)
     walk.ids(trainer=trainer.pk, relation=relation.pk, routine=routine.pk,
              diet_plan=diet_plan.pk, subscription=str(subscription.pk), plan=plan.pk)
 
@@ -190,7 +218,7 @@ def coaching_frozen(walk):
 def coaching_renews_soon(walk):
     trainer, client, relation, routine = coached(walk, funds=COACH_RATE * 2 + 5000)
     month_ends_at(relation, timezone.now() + timedelta(days=2, hours=20))
-    run_the_coaching_hour()
+    remind_now(relation)
     walk.ids(trainer=trainer.pk, relation=relation.pk, routine=routine.pk)
 
 
@@ -201,7 +229,7 @@ def coaching_stops_soon(walk):
     trainer, client, relation, routine = coached(walk, funds=COACH_RATE * 2 + 5000)
     call(walk, client, "post", "/api/v1/coaching/renewal/", {"renew": False})
     month_ends_at(relation, timezone.now() + timedelta(days=2, hours=20))
-    run_the_coaching_hour()
+    remind_now(relation)
     walk.ids(trainer=trainer.pk, relation=relation.pk, routine=routine.pk)
 
 
@@ -210,12 +238,10 @@ def coaching_stops_soon(walk):
        summary="A plan paid from the wallet whose cover ended: frozen (the diet plans "
                "readable, nothing usable) and asked to re-subscribe.")
 def plan_lapsed(walk):
-    from subscription.tasks import expire_lapsed_subscriptions, send_renewal_reminders
-
     client, subscription = subscribed_client(walk, diet=True)
     plan_ends_at(subscription, timezone.now() - timedelta(days=1, hours=2))
-    expire_lapsed_subscriptions()
-    send_renewal_reminders()
+    lapse_now(subscription)
+    plan_reminders_now(subscription)
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
 
 
@@ -231,11 +257,9 @@ def plan_not_renewing(walk):
 @state("plan_renewal_due", area="coaching", role="client",
        summary="An active plan ending within 3 days: renewal_due, and the reminder sent.")
 def plan_renewal_due(walk):
-    from subscription.tasks import send_renewal_reminders
-
     client, subscription = subscribed_client(walk)
     plan_ends_at(subscription, timezone.now() + timedelta(days=2, hours=12))
-    send_renewal_reminders()
+    plan_reminders_now(subscription)
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
 
 
