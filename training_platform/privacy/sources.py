@@ -602,8 +602,21 @@ register(PersonalDataSource(label="exercises_created", model="routine.Exercise",
 # was written for. On `created_by` alone a client's own program — the routine their
 # coach wrote them and its exercises below — was in the trainer's export and missing
 # from theirs. Kept on erasure either way: nothing changes for the rows.
+#
+# The fields are DECLARED, `assigned_to` left out (SIDE_BUGS S-253, the fix run's
+# ACC-2): with none declared the export attached every many-to-many as a list of ids,
+# and a legacy routine shared by several clients put the OTHER clients' ids in each
+# client's export. Nothing can make a shared routine any more (a routine is one
+# client's private copy, `routine/assignment.py`), so only old rows did it. A new column
+# on `Routine` is exported only once it is named here.
 register(PersonalDataSource(label="routines_created", model="routine.Routine",
                             user_field=("created_by", "assigned_to"), on_erase="keep",
+                            fields=["id", "name", "description", "translations",
+                                    "created_by", "is_active", "days", "created_at",
+                                    "updated_at", "source_template", "purchase", "trial",
+                                    "start_date", "end_date", "day_names",
+                                    "difficulty_level", "estimated_duration",
+                                    "exercises"],
                             purpose=("Routines a trainer wrote, each one a client's own "
                                      "copy, and the routines written for the person. Kept, "
                                      "because the client's program is built on it."),
