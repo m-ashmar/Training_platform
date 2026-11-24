@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q
@@ -79,6 +80,11 @@ def record_success(gateway: str, now=None) -> None:
             | Q(last_success_at__lt=now - timedelta(seconds=_SUCCESS_WRITE_SECONDS))
         ).update(last_success_at=now, consecutive_failures=0, failing_since=None,
                  updated_at=now)
+    except SoftTimeLimitExceeded:
+        # The task's own deadline, which Celery raises INSIDE whatever runs when it
+        # overruns — a subclass of Exception, so the line below swallowed it and the
+        # overrunning poller went on (SIDE_BUGS S-260). It is the task's to handle.
+        raise
     except Exception:                    # noqa: BLE001 — a record never stops a read
         logger.exception("Could not record a successful read of %s", gateway)
 
@@ -99,6 +105,8 @@ def record_failure(gateway: str, error: str = '', now=None) -> None:
         GatewayHealth.objects.filter(gateway=gateway).update(
             consecutive_failures=F('consecutive_failures') + 1, last_failure_at=now,
             last_error=str(error or '')[:500], updated_at=now)
+    except SoftTimeLimitExceeded:
+        raise                            # the task's deadline, as in `record_success`
     except Exception:                    # noqa: BLE001
         logger.exception("Could not record a failed read of %s", gateway)
 
