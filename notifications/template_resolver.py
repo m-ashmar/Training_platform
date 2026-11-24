@@ -72,6 +72,14 @@ class NotificationTemplateResolver:
         lang = translation.get_language()
         safe_fallback_body = str(_("You have a new notification."))
 
+        # The person a coaching notice named was erased: the notice and its date stay,
+        # and the name reads "Deleted account" in the language this renders in
+        # (SIDE_BUGS S-207; `training_platform/privacy/sources.py`).
+        if context and context.get("name_erased"):
+            context = {**context, "name": str(_("Deleted account"))}
+            if "message" in context and not context["message"]:
+                context["message"] = str(_("Deleted account"))
+
         if not template:
             logger.error(
                 "notification.template.missing",

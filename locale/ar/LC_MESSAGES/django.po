@@ -6318,3 +6318,7 @@ msgstr "برمز أُرسل إلى هذا العنوان"
 msgid "In the app, while signed in"
 msgstr "من التطبيق، أثناء تسجيل الدخول"
 
+#: notifications/template_resolver.py
+msgid "Deleted account"
+msgstr "حساب محذوف"
+

@@ -367,21 +367,92 @@ register(PersonalDataSource(
     data_types=("messages", "photos_videos", "audio")))
 
 # --- notifications ------------------------------------------------------------
-# The chat notices this person SENT go with them too. Each one sits in the other side's
-# inbox holding the sender's name and the first 120 characters of what they wrote
-# (`chat/events.py`), and the conversation it points at is deleted above — so without
-# this the thread vanished and the other side's inbox kept rendering the erased
-# person's name and words for the 90 days of retention. Not exported: they are the
-# recipient's inbox, not the sender's data to download.
-def _chat_notices_sent(user):
+# Notices in OTHER people's inboxes that go with this person (`actor`), never exported:
+# they are the recipient's inbox, not the sender's data to download, and not counted.
+#
+# * `chat_message` — the chat notices they sent. Each holds the sender's name and the
+#   first 120 characters of what they wrote (`chat/events.py`), and the conversation it
+#   points at is deleted above, so the other side's inbox kept rendering the erased
+#   person's name and words for the 90 days of retention (SIDE_BUGS S-146).
+# * `custom` — a trainer's own words to a client (`notifications/trainer_message.py`),
+#   deleted as their chat notices are (S-208; the manager's ruling A, 2026-11-24).
+# * `post_liked`, `comment_created`, `user_followed` — each stores the person's username
+#   (`context.actor`) about a like, a comment or a follow erasure deletes, so the notice
+#   was an orphan that still named them (S-206, the fix run's ACC-2).
+NOTICES_ERASED_WITH_THEIR_ACTOR = ("chat_message", "custom", "post_liked",
+                                   "comment_created", "user_followed")
+
+# Coaching notices are KEPT in the other person's inbox — a record of their coaching,
+# its months and its money — with the erased person's name scrubbed in place: the notice
+# and its date stay, and the name reads "Deleted account" in the reader's language (S-207;
+# the manager's ruling A, 2026-11-24). Each names its `actor` as `context.name`
+# (`notifications/listeners/trainer_client_listeners.py`, `users/coaching.py`); a
+# finished session names the client to their trainer, with no actor, by
+# `data.client_id` (`routine/views.py`).
+NOTICES_NAMING_THEIR_ACTOR = (
+    "trainer_assignment_request", "trainer_unassignment", "client_request_received",
+    "client_request_approved", "client_request_rejected", "client_request_cancelled",
+    "client_unassigned_trainer", "coaching_renewed", "coaching_renewal_soon",
+    "coaching_ending_soon", "coaching_payment_due", "coaching_ended", "coaching_finished",
+    "coaching_fee_held", "coaching_fee_released", "coaching_fee_refunded")
+
+
+def _notices_that_go_with_them(user):
     from notifications.models import Notification
 
-    return Notification.objects.filter(actor=user, event_type="chat_message")
+    return Notification.objects.filter(actor=user,
+                                       event_type__in=NOTICES_ERASED_WITH_THEIR_ACTOR)
+
+
+def _scrub_their_name_elsewhere(user, queryset, *, dry_run):
+    """Scrub the erased person's name from the coaching notices in other inboxes (see
+    above): `context.name` emptied and `context.name_erased` set, which the resolver
+    reads as "Deleted account" in the language it renders in
+    (`notifications/template_resolver.py`); the pre-rendered `context.message` a
+    finished session carries is emptied too; and `actor` cleared, so nothing in the row
+    points at the person any more. The inbox hides a row whose actor cannot be shown
+    (the owner's decision 8: a SUSPENDED account's rows come back when it is
+    reinstated); an erasure is final, and a row with no actor is listed like any system
+    notice, so the notice and its date stay in the other person's inbox, as the ruling
+    says. A page of rows at a time. Counts nothing: the rows are other people's."""
+    if dry_run:
+        return {}
+    from django.db.models import Q
+
+    from notifications.models import Notification
+
+    from .registry import batch_rows
+
+    rows = (Notification.objects
+            .filter(Q(actor=user, event_type__in=NOTICES_NAMING_THEIR_ACTOR)
+                    | Q(event_type="session_completed", metadata__data__client_id=user.pk))
+            .exclude(recipient=user))
+    last = None
+    while True:
+        page = rows.order_by("pk")
+        if last is not None:
+            page = page.filter(pk__gt=last)
+        found = list(page[:batch_rows()])
+        if not found:
+            return {}
+        for row in found:
+            metadata = dict(row.metadata or {})
+            context = dict(metadata.get("context") or {})
+            context["name"] = ""
+            context["name_erased"] = True
+            if "message" in context:
+                context["message"] = ""
+            metadata["context"] = context
+            row.metadata = metadata
+            row.actor = None
+        Notification.objects.bulk_update(found, ["metadata", "actor"])
+        last = found[-1].pk
 
 
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
-    retention_days=90, erase_also=_chat_notices_sent,
+    retention_days=90, erase_also=_notices_that_go_with_them,
+    before_erase=_scrub_their_name_elsewhere,
     purpose=("The person's in-app inbox of notices (payments, coaching, chat, reminders); "
              "each push goes out through Firebase."),
     recipients=("push_provider",),

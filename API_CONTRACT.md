@@ -2054,6 +2054,15 @@ an operator has recorded the settlement of every currency. The same refusal hold
 web request (`/legal/delete-account/`): the operator's erase leaves the request open and
 says how much is held. Before, R4 deleted the account and only reported `agent_cash`.
 
+**What an erasure does to OTHER people's inboxes (the fix run's ACC-2, 2026-11-24).** The
+notices the erased person caused in someone else's inbox: their chat notices (as since
+S-146), a trainer's own words to a client (`custom`), and the like, comment and follow
+notices (`post_liked`, `comment_created`, `user_followed`) are deleted with them. A
+coaching notice that names them (the trainer-client and coaching-month kinds, and a
+trainer's `session_completed` about the client) is KEPT, with its date: it no longer has
+an `actor`, and the name in it reads "Deleted account" in the reader's language
+(«حساب محذوف»). No new code or key; the app renders `message` as before.
+
 The export discloses nothing the API itself withholds: its `blocks` section is `{id,
 blocked, created_at}` for the blocks this person MADE, never one made against them, and
 `reports_made` carries what `GET /api/v1/reports/mine/` pages, without who handled it.
