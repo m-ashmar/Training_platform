@@ -423,12 +423,17 @@ def recount(challenge, user_ids=None, *, moved_users=None) -> bool:
         rows = list(rows)
         values, over = measure_challenge(locked, [row.user_id for row in rows])
         moved = []
+        crossed_zero = False
         fields = ['current_value', 'progress_percentage', 'status', 'completed_at',
                   'review_state', 'review_reason']
         for row in rows:
             value = values.get(row.user_id, 0.0)
             changed = False
             if value != row.current_value:
+                # A number that crosses zero moves the challenge's `active_participants`
+                # (those whose counted number is above zero), which every reader's list
+                # shows, not only the people whose place moved.
+                crossed_zero = crossed_zero or (value > 0) != (row.current_value > 0)
                 apply_value(row, locked, value)
                 changed = True
             if (row.user_id in over and _flags_again(row, over[row.user_id])):
@@ -441,6 +446,15 @@ def recount(challenge, user_ids=None, *, moved_users=None) -> bool:
             ChallengeParticipation.objects.bulk_update(moved, fields)
             if moved_users is not None:
                 moved_users.update(row.user_id for row in moved)
+        if crossed_zero:
+            # Every reader's cached list carries `active_participants`, documented as
+            # live: drop them all (`social/challenge_cache.py`, the version a join or a
+            # leave bumps). The callers drop only the lists of the people whose place
+            # moved, so a reader outside the moved standing kept the old figure for the
+            # list's 120 s (SIDE_BUGS S-254, the fix run's SOC-2).
+            from .challenge_cache import bump_everyone
+
+            bump_everyone()
         return bool(moved)
 
 
