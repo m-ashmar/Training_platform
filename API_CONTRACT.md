@@ -1405,8 +1405,9 @@ every build.
 
 Codes: `not_a_trainer` (403), `not_found` (404), `validation_error` (400;
 `field_errors.<field>[0].code`: `template_not_yours`, `price_out_of_range`,
-`preview_days_out_of_range`, `cover_not_yours`), `product_not_editable` (409, `status`),
-`trainer_not_verified` (403), `product_not_submittable` (409, `status`),
+`preview_days_out_of_range`, `cover_not_yours`), `product_not_editable` (409, `status`;
+a product in review or published still takes a PATCH of `place` ALONE — no new review,
+nothing else touched; the fix run's S-249, 2026-11-24, additive), `trainer_not_verified` (403), `product_not_submittable` (409, `status`),
 `product_incomplete` (409, `missing`), `program_too_long` (409, `max_days`,
 `program_days`), `preview_covers_program` (409, `program_days`, `cycle_days`: the preview must be shorter than the template's week, which the program repeats),
 `product_already_retired` (409), `bad_trainer_id` (400), `own_product` (403),
