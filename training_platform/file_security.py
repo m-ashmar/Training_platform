@@ -1076,6 +1076,11 @@ OGG_HEAD_BYTES = 512
 OGG_MAX_CANDIDATES = 64
 #: A page on which no packet ends carries this granule position: no time.
 _OGG_NO_GRANULE = 0xFFFFFFFFFFFFFFFF
+#: The granule position is a SIGNED 64-bit number (RFC 3533: "-1" in two's complement is
+#: the page above). Read unsigned, every negative one was a length of thousands of
+#: years — 2**63 read 192,153,584,101,141 seconds — and the upload was refused as too
+#: long. Any other negative granule declares no time.
+_OGG_NEGATIVE_GRANULE = 1 << 63
 
 
 def _ogg_page(buffer, at):
@@ -1146,6 +1151,8 @@ def _ogg_duration(file):
         _header_type, granule, page_serial, _end = page
         if page_serial != serial or granule == _OGG_NO_GRANULE:
             continue
+        if granule >= _OGG_NEGATIVE_GRANULE:
+            return None                     # a negative position: no length declared
         seconds = (granule - skip) / rate
         return round(seconds, 3) if seconds > 0 else None
     return None

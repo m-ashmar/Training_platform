@@ -564,6 +564,36 @@ def test_a_length_that_rounds_to_nothing_is_none_and_measured_later(
     assert queued == [sent.json()['id']], "the worker was not asked to measure it"
 
 
+def test_a_negative_granule_declares_no_length(api, pair, conversation):
+    """The adversarial review of B-177 (2026-11-24): the granule position is a signed
+    64-bit number (RFC 3533), and the reader read it unsigned. A last page at 2**63
+    declared 192,153,584,101,141 seconds, and a voice note of a few seconds was refused
+    as `media_audio_too_long`. A negative granule declares nothing now: None, capped on
+    size alone, and measured by the worker. A last page of -1 (no packet ends on it) is
+    still skipped for the page before it."""
+    from training_platform.file_security import probe_declared_duration
+
+    def last_page_at(granule):
+        whole = ogg_opus_bytes(7.0)
+        cut = whole.rfind(b"OggS")
+        return (whole[:cut + 6] + struct.pack("<Q", granule) + whole[cut + 14:])
+
+    def read(data):
+        return probe_declared_duration(io.BytesIO(data), 'ogg')
+
+    assert read(last_page_at(2 ** 63)) is None
+    assert read(last_page_at(2 ** 64 - 2)) is None            # -2
+    assert read(last_page_at(2 ** 64 - 1)) == 1.0             # -1: the page before it
+    assert read(last_page_at(2 ** 63 - 1)) > 90               # a huge positive: declared
+
+    trainer, _client = pair
+    sent = _post(api, trainer, conversation, 'voice',
+                 SimpleUploadedFile("note.ogg", last_page_at(2 ** 63),
+                                    content_type="audio/ogg"))
+    assert sent.status_code == 201, sent.content
+    assert sent.json()['media']['duration_seconds'] is None
+
+
 def test_an_ogg_or_webm_voice_note_is_capped_and_timed_on_the_request(
         api, pair, conversation, settings, media_root):
     """The route, on hand-built bytes (no ffmpeg needed): the length is on the answer,
