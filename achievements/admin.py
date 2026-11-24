@@ -79,6 +79,7 @@ class UserAchievementAdmin(admin.ModelAdmin):
         # This is a placeholder - implement as needed
         messages.info(request, f'Bulk award not yet implemented.')
     award_to_all_users.short_description = 'Award to all users'
+    award_to_all_users.allowed_permissions = ('add',)
 
 
 @admin.register(AchievementProgress)
