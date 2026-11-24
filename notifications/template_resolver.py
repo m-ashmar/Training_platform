@@ -88,6 +88,25 @@ class NotificationTemplateResolver:
             # Graceful degradation — don't crash the worker
             return str(_("Notification")), safe_fallback_body
 
+        # A row that names one of its template's `variants` is rendered from that body,
+        # in the ACTIVE language — the request's in the inbox, the recipient's saved one
+        # in a push — whatever language the row was written in (Road to 10, notification
+        # language P1). A row with no variant, or a variant no longer offered, or whose
+        # params no longer fit it, reads `body` below: the sentence stored with it.
+        variants = getattr(template, "variants", None) or {}
+        key = (context or {}).get("variant")
+        variant = variants.get(key) if variants and isinstance(key, str) else None
+        if variant is not None:
+            try:
+                title = str(template.title) % context
+                return title, str(variant) % context
+            except (KeyError, TypeError, ValueError):
+                logger.warning(
+                    "notification.variant.unrenderable",
+                    extra={"event_type": event_type, "variant": context.get("variant"),
+                           "recipient_id": recipient_id, "language": lang},
+                )
+
         try:
             title = str(template.title) % context if context else str(template.title)
             body = str(template.body) % context if context else str(template.body)

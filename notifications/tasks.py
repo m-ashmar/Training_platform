@@ -253,11 +253,12 @@ def send_workout_reminders(now=None, after=None):
     from django.contrib.auth import get_user_model
     from django.db.models import Max, Q
     from django.utils import timezone
-    from django.utils.translation import gettext as _
-
+    from notifications.domain.routine_events import SessionReminderEvent
     from notifications.services import NotificationService
     from routine.models import RoutineProgress
+    from routine.services import routine_name_for
     from training_platform.batching import Batch, as_datetime, carry
+    from training_platform.i18n import LanguageContext
 
     User = get_user_model()
     now = as_datetime(now) or timezone.now()
@@ -354,10 +355,15 @@ def send_workout_reminders(now=None, after=None):
             if routines and all(refused(r) for r in routines):
                 continue
 
+        # The sentence by its key on the template (`SessionReminderEvent.template.
+        # variants`) and its params: the inbox renders it in the reader's language and a
+        # push in the saved one (Road to 10, notification language P1). It was rendered
+        # here with no language set, so every reminder was English, Arabic users
+        # included.
         if pending:
-            message = _("Day %(day)d of %(routine)s is waiting for you.") % {
+            variant, params = "scheduled", {
                 "day": pending.day,
-                "routine": pending.routine.name,
+                "routine": routine_name_for(pending.routine, user),
             }
             data = {
                 "type": "session_reminder",
@@ -372,13 +378,11 @@ def send_workout_reminders(now=None, after=None):
             if not (1 <= gap <= 14):
                 continue
             if gap == 1:
-                message = _("You trained yesterday. Keep the streak alive.")
+                variant, params = "yesterday", {}
             elif gap <= 3:
-                message = _("It has been %(days)d days since your last workout.") % {"days": gap}
+                variant, params = "days", {"days": gap}
             else:
-                message = _(
-                    "It has been %(days)d days. Even a short session gets you moving again."
-                ) % {"days": gap}
+                variant, params = "days_long", {"days": gap}
             data = {"type": "session_reminder", "reason": "drift", "days_since_last_workout": gap}
 
         # A reminder is a nudge, not a record: muted means not written at all (the
@@ -386,11 +390,16 @@ def send_workout_reminders(now=None, after=None):
         from notifications.models import UserNotificationPreference
         if not UserNotificationPreference.is_channel_enabled(user, 'session_reminder'):
             continue
+        # `message`, the fallback a reader without the variant reads, in the saved
+        # language.
+        with LanguageContext.for_user(user):
+            message = str(SessionReminderEvent.template.variants[variant]) % params
         result = NotificationService.create_and_send(
             recipient=user,
             event_type="session_reminder",
             related_object_id=today.isoformat(),
-            metadata={"context": {"message": message}, "data": data},
+            metadata={"context": {"variant": variant, **params, "message": message},
+                      "data": data},
         )
         if result is not None:
             sent += 1

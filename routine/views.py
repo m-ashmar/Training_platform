@@ -3294,13 +3294,17 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
         # `workout-sessions/{session_id}/?expand=sets` on the client's card.
         opens = {'session_id': instance.pk, 'client_id': client.pk,
                  'routine_id': instance.routine_id}
+        # Each row also names its sentence (`variant`) and params, so the inbox reads it
+        # in the reader's language and a push in the saved one (Road to 10, notification
+        # language P1, `notifications/domain/routine_events.py`).
+        mine = {'routine': routine_name_for(instance.routine, client)}
         send_notification(
             user=client,
             notif_type="session_completed",
             message=in_recipients_language(client, lambda: _(
-                "Well done! You finished a workout on %(routine)s.")
-                % {'routine': routine_name_for(instance.routine, client)}),
-            related_object=instance, data=opens
+                "Well done! You finished a workout on %(routine)s.") % mine),
+            related_object=instance, data=opens,
+            context={'variant': 'client', **mine},
         )
         # Notify the trainer this client actually has an APPROVED relation with.
         # Reading `assigned_trainer` would tell a dismissed trainer what their former
@@ -3310,15 +3314,16 @@ class WorkoutSessionViewSet(viewsets.ModelViewSet):
                         .filter(client=instance.user, status='approved')
                         .select_related('trainer')):
             # The client's name, not their username, in the trainer's language.
+            theirs = {'name': f"{client.first_name or ''} {client.last_name or ''}".strip()
+                              or client.username,
+                      'routine': routine_name_for(instance.routine, trainer)}
             send_notification(
                 user=trainer,
                 notif_type="session_completed",
                 message=in_recipients_language(trainer, lambda: _(
-                    "%(name)s finished a workout on %(routine)s.")
-                    % {'name': f"{client.first_name or ''} {client.last_name or ''}".strip()
-                               or client.username,
-                       'routine': routine_name_for(instance.routine, trainer)}),
-                related_object=instance, data=opens
+                    "%(name)s finished a workout on %(routine)s.") % theirs),
+                related_object=instance, data=opens,
+                context={'variant': 'trainer', **theirs},
             )
 
         # Milestones. Deferred to on_commit so a rolled-back completion cannot

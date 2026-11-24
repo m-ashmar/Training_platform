@@ -203,6 +203,17 @@ as `platform: ios` is the ios build. `data` never changes. apk and web read and 
 every notice exactly as before, and every record of money that already moved (a receipt, a
 fee, a top-up with its amount, a sale, a withdrawal) reads the same on every build.
 
+**Which language (Road to 10, 2026-11-24).** The inbox renders every row's `title` and
+`message` in the REQUEST's language (`Accept-Language`, else the account's saved
+`preferred_language`), whatever language the row was written in. The build chooses the
+text, the language renders it. A push and an e-mail are in the account's saved
+`preferred_language` (there is no request when they are sent): the app keeps it equal to
+its own language through `user/update/`. Rows of `custom` (the trainer's own words) read as
+written, and so do rows of `routine_assignment`, `session_completed`, `progress_milestone`
+and `session_reminder` written before this change. Names inside a sentence (a routine,
+a programme, a badge, an exercise, a challenge) are as they were when the row was
+written. Nothing for the app to change: draw `title` and `message` as sent.
+
 **`data.type` is always exactly the `event_type`** — the same values
 `GET /api/notifications/preferences/event_types/` returns. Every value is a string (FCM requires it),
 so parse ids client-side.

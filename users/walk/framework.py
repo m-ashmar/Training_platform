@@ -226,7 +226,13 @@ class Walk:
         password, its address verified (the operator's path, `create_user`). `role`
         defaults to the state's own for the main account and to `client` for a part.
         `fields` override the role's profile; `onboarded=False` leaves the profile empty
-        (names, birth date and the client's body and goal), as a new sign-up's is."""
+        (names, birth date and the client's body and goal), as a new sign-up's is.
+
+        The saved language (`preferred_language`, the language of the account's pushes,
+        e-mails and the sentences written for it) is Arabic, as a sign-up from an Arabic
+        phone saves it (`users/serializers.py SIGNUP_DEFAULT_LANGUAGE`); `create_user`
+        alone leaves the column default, English. A state that needs an English account
+        passes `preferred_language="en"`."""
         from datetime import date
 
         from users.models import CustomUser
@@ -237,7 +243,10 @@ class Walk:
         if key in self.accounts:
             raise ValueError(f"walk state {self.spec.name}: account {key!r} made twice")
         role = role or (self.spec.role if part is None else "client")
+        from users.serializers import SIGNUP_DEFAULT_LANGUAGE
+
         profile = dict(PROFILES[role]) if onboarded else {}
+        profile["preferred_language"] = SIGNUP_DEFAULT_LANGUAGE
         profile.update(fields)
         if isinstance(profile.get("date_of_birth"), str):
             profile["date_of_birth"] = date.fromisoformat(profile["date_of_birth"])

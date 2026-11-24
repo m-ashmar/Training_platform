@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import logging
 
-from django.utils.translation import gettext_lazy as _
-
 logger = logging.getLogger(__name__)
 
 # Thresholds are deliberately sparse. A notification for every session is noise, and
@@ -31,36 +29,47 @@ STREAK_MILESTONES = (3, 7, 14, 30, 60, 100, 365)
 SESSION_MILESTONES = (1, 10, 25, 50, 100, 250, 500, 1000)
 
 
-def _streak_message(days: int) -> str:
+def _streak_variant(days: int) -> tuple:
+    """The `progress_milestone` variant for a streak of `days`, and its params."""
     if days >= 365:
-        return _("A full year of training. %(days)d days in a row.") % {"days": days}
+        return "streak_year", {"days": days}
     if days >= 100:
-        return _("%(days)d days without missing one. Remarkable.") % {"days": days}
+        return "streak_100", {"days": days}
     if days >= 30:
-        return _("%(days)d-day streak — this is a habit now.") % {"days": days}
-    return _("%(days)d days in a row. Keep it going.") % {"days": days}
+        return "streak_30", {"days": days}
+    return "streak", {"days": days}
 
 
-def _session_message(count: int) -> str:
+def _session_variant(count: int) -> tuple:
+    """The `progress_milestone` variant for `count` workouts, and its params."""
     if count == 1:
-        return _("First workout complete. The hardest one is behind you.")
+        return "sessions_first", {"count": count}
     if count >= 500:
-        return _("%(count)d workouts completed. That is a training career.") % {"count": count}
+        return "sessions_500", {"count": count}
     if count >= 100:
-        return _("%(count)d workouts completed.") % {"count": count}
-    return _("%(count)d workouts done. Momentum is building.") % {"count": count}
+        return "sessions_100", {"count": count}
+    return "sessions", {"count": count}
 
 
-def evaluate(user) -> list:
-    """Return the milestones this user has just reached, as (milestone_id, message).
+def _say(variant: str, params: dict) -> str:
+    """The variant's sentence in the ACTIVE language. The sentences live on the event's
+    template (`ProgressMilestoneEvent.template.variants`), the one place the inbox and a
+    push render them from (Road to 10, notification language P1)."""
+    from notifications.domain.routine_events import ProgressMilestoneEvent
 
-    Returns every crossed milestone rather than only the newest: dedup makes resends
-    free, and a user whose first sync lands several at once should hear about all of
-    them rather than have the platform quietly pick one.
+    return str(ProgressMilestoneEvent.template.variants[variant]) % params
+
+
+def reached(user) -> list:
+    """The milestones this user has reached, as (milestone_id, variant, params).
+
+    Every crossed milestone rather than only the newest: dedup makes resends free, and a
+    user whose first sync lands several at once should hear about all of them rather
+    than have the platform quietly pick one.
     """
     from routine.models import WorkoutSession
 
-    reached = []
+    found = []
 
     try:
         from achievements.engine import AchievementEngine
@@ -74,14 +83,21 @@ def evaluate(user) -> list:
 
     for threshold in STREAK_MILESTONES:
         if streak >= threshold:
-            reached.append((f"streak-{threshold}", _streak_message(threshold)))
+            found.append((f"streak-{threshold}", *_streak_variant(threshold)))
 
     sessions = WorkoutSession.objects.filter(user=user, status="completed").count()
     for threshold in SESSION_MILESTONES:
         if sessions >= threshold:
-            reached.append((f"sessions-{threshold}", _session_message(threshold)))
+            found.append((f"sessions-{threshold}", *_session_variant(threshold)))
 
-    return reached
+    return found
+
+
+def evaluate(user) -> list:
+    """The milestones this user has reached, as (milestone_id, message), the message in
+    the active language."""
+    return [(milestone_id, _say(variant, params))
+            for milestone_id, variant, params in reached(user)]
 
 
 def award(user) -> int:
@@ -95,20 +111,22 @@ def award(user) -> int:
     from training_platform.i18n import LanguageContext
 
     sent = 0
-    # Rendered here, inside the recipient's language. `evaluate` builds lazy strings;
-    # resolving them on the worker without this context would use LANGUAGE_CODE, and
-    # the sentence would arrive in English inside an Arabic notification because the
-    # FCM boundary translates the template around it, not the text handed to it.
+    # The row names its variant and params, so the inbox renders it in the READING
+    # language and a push in the saved one (Road to 10, notification language P1).
+    # `message` is the same sentence in the recipient's saved language, rendered here:
+    # what a reader without the variant falls back to (a row read by older code). On
+    # the worker without this context it would be LANGUAGE_CODE's.
+    milestones_reached = reached(user)
     with LanguageContext.for_user_id(user.pk):
-        milestones_reached = [(mid, str(msg)) for mid, msg in evaluate(user)]
+        said = [_say(variant, params) for _id, variant, params in milestones_reached]
 
-    for milestone_id, message in milestones_reached:
+    for (milestone_id, variant, params), message in zip(milestones_reached, said):
         result = NotificationService.create_and_send(
             recipient=user,
             event_type="progress_milestone",
             related_object_id=milestone_id,
             metadata={
-                "context": {"message": message},
+                "context": {"variant": variant, **params, "message": message},
                 "data": {
                     "type": "progress_milestone",
                     "milestone": milestone_id,
