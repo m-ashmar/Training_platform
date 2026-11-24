@@ -19,45 +19,51 @@ JSON = "application/json"
 
 
 @pytest.fixture(autouse=True)
-def platform(db, settings, tmp_path):
-    """What `bootstrap_platform` gives a development server and these states read: the
-    spec's build rows, a paid plan with the diet, a diet template and two foods. And the
-    documents a trainer sends for verification kept in a temporary directory."""
-    from diet.models import DietPlanTemplate, FoodCategory, FoodItem
-    from policy.defaults import DEFAULT_FLAGS
-    from policy.models import ChannelCapabilities
+def platform(db, settings, tmp_path, monkeypatch):
+    """A database as `bootstrap_platform` leaves a development server (its plans, diet
+    templates, starter exercises, the platform's templates and the badges; the food
+    catalogue left out for speed, two foods in its place), and the documents a trainer
+    sends for verification kept in a temporary directory. Until the shared walk fixture
+    lands (the manager, 2026-11-24). Answers the cheapest paid plan."""
+    import io
+
+    from django.core.management import call_command
+
+    from diet.models import FoodCategory, FoodItem
     from subscription.models import SubscriptionPlan
 
     settings.MEDIA_ROOT = str(tmp_path / "media")
     settings.PRIVATE_MEDIA_ROOT = str(tmp_path / "private")
     settings.COACHING_COMMISSION_RATE = Decimal("0.20")
-    for channel, flags in DEFAULT_FLAGS.items():
-        ChannelCapabilities.objects.get_or_create(channel=channel, min_version="0.0.0",
-                                                  defaults=flags)
-    plan = SubscriptionPlan.objects.create(
-        name="walk premium", plan_type="premium", description="d", price=Decimal("30000.00"),
-        currency="SYP", duration_days=30, is_active=True, has_diet_access=True,
-        has_routine_access=True)
-    DietPlanTemplate.objects.create(name="walk 3 meals", meals_per_day=3, snacks_per_day=0)
+    monkeypatch.setenv("WALK_ACCOUNTS_PASSWORD", PASSWORD)
+    call_command("bootstrap_platform", "--skip-food-catalogue", stdout=io.StringIO())
     category = FoodCategory.objects.create(name="walk grains")
     for name in ("Walk rice", "Walk lentils"):
         FoodItem.objects.create(name=name, name_en=name, category=category,
                                 api_id=f"walk-{name}", calories=130, protein=5, carbs=25,
                                 fat=1, serving_size="100g", allergens=[],
                                 allergen_source="verified")
-    return plan
+    return (SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
+            .order_by("price", "id").first())
 
 
-def _build(name, django_capture_on_commit_callbacks):
-    """The state as the command builds it (one transaction), its notices delivered as
+def _build(name, django_capture_on_commit_callbacks, tmp_path=None):
+    """The state as `seed_walk_states --only <name>` makes it, its notices delivered as
     they are on commit. Answers its manifest entry and its main account."""
-    from users.models import CustomUser
-    from users.walk import STATES, load_states
-    from users.walk.framework import build
+    import io
+    import json
+    import tempfile
+    from pathlib import Path
 
-    load_states()
+    from django.core.management import call_command
+
+    from users.models import CustomUser
+
+    manifest = Path(tempfile.mkdtemp()) / "walk.json"
     with django_capture_on_commit_callbacks(execute=True):
-        entry = build(STATES[name], PASSWORD)
+        call_command("seed_walk_states", "--only", name, "--manifest", str(manifest),
+                     stdout=io.StringIO())
+    entry = json.loads(manifest.read_text(encoding="utf-8"))["states"][name]
     return entry, CustomUser.objects.get(pk=entry["ids"]["user"])
 
 
@@ -225,7 +231,7 @@ def test_client_wallet_covers_plan(api, django_capture_on_commit_callbacks, plat
     assert current.status_code == 404 or not current.json().get("id"), current.content
     gateways = api(me).get("/api/subscription/v1/gateways/").json()
     assert gateways["can_pay_from_wallet"] is True
-    assert Decimal(gateways["wallet"]["balance"]) == platform.price
+    assert Decimal(gateways["wallet"]["balance"]) == platform.price  # the cheapest
 
 
 def test_client_wallet_short_of_coach(api, django_capture_on_commit_callbacks):

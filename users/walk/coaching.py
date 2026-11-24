@@ -1,14 +1,17 @@
 """Walk states: coaching and plans (`users/walk/__init__.py` says how to add one).
 
-Owned by the money worker. Every state goes through the platform's real services: the
-app's own API in process for what a person taps (`users/walk/wallet.py api`: the
-request, the answers, the first programme, a plan paid from the wallet, the renewal
-switch, a cancel), and the scheduled task's own function for what time does. A state
-that time makes moves the DATES (a coaching month's or a plan's start and end, nothing
-else) and then calls that task: `users.tasks.renew_coaching_periods` (reminders,
-renewals, freezes), `subscription.tasks.expire_lapsed_subscriptions`,
+Owned by the money worker. Every state goes through the platform's real paths: the
+routes the app calls (`walk.api`, through `users/walk/wallet.py call`: the request and
+the answers, `users/walk/shared.py coach_client`, the first programme, a plan paid from
+the wallet, the renewal switch, a cancel), and the scheduled task's own function for
+what time does. A state that time makes moves the DATES (a coaching month's or a plan's
+start and end, nothing else) and then calls that task:
+`users.tasks.renew_coaching_periods` (reminders, renewals, freezes),
+`subscription.tasks.expire_lapsed_subscriptions`,
 `subscription.tasks.send_renewal_reminders`. Never a hand-written ledger row, payment
-state or hold.
+state or hold. The states that read platform data (a plan on sale, the diet templates
+and the food catalogue, the starter exercises) need a bootstrapped database
+(`walk.require_bootstrap`).
 
 Not reachable here, by design of the platform rather than of this command:
 - **a plan payment pending review** needs a checkout opened on the ShamCash gateway and
@@ -30,48 +33,42 @@ from decimal import Decimal
 from django.utils import timezone
 
 from . import state
-from .wallet import COACH_RATE, WalkStepRefused, agent, api, coach, funded_client, key, top_up
+from .framework import WalkRefused
+from .shared import coach_client, starter_exercise
+from .wallet import COACH_RATE, agent, call, coach, funded_client, key, top_up
 
 
 # ------------------------------------------------------------------ coaching steps
-def ask_for(client, trainer):
+def ask_for(walk, client, trainer):
     """The client asks the trainer to coach them (`POST client/request-trainer/`)."""
     from users.models import TrainerClientRelation
 
-    api(client, "post", "/api/auth/client/request-trainer/", {"trainer_id": trainer.pk})
+    call(walk, client, "post", "/api/auth/client/request-trainer/", {"trainer_id": trainer.pk})
     return TrainerClientRelation.objects.get(trainer=trainer, client=client)
 
 
-def accept(trainer, relation):
-    """The trainer accepts (`POST trainer/respond-to-request/`): month 1 is held."""
-    api(trainer, "post", "/api/auth/trainer/respond-to-request/",
-        {"request_id": relation.pk, "action": "approve"})
-    relation.refresh_from_db()
-    return relation
-
-
-def first_programme(trainer, client, name="برنامج الشهر الأول"):
-    """The trainer writes a one-day programme and sends it to the client
-    (`assign_to_client`): the held month is paid out."""
-    from routine.models import Exercise, Routine, RoutineExercise
+def first_programme(walk, trainer, client, name="برنامج الشهر الأول"):
+    """The trainer writes a one-day programme of a starter exercise and sends it to the
+    client (`assign_to_client`): the held month is paid out."""
+    from routine.models import Routine, RoutineExercise
 
     routine = Routine.objects.create(name=name, created_by=trainer, days=1)
-    exercise = (Exercise.objects.filter(created_by__isnull=True).order_by("id").first()
-                or Exercise.objects.create(name="Squat", created_by=trainer))
-    RoutineExercise.objects.create(routine=routine, exercise=exercise, day=1, sets=3, reps=10)
-    api(trainer, "post", f"/api/routine/routines/{routine.pk}/assign_to_client/",
-        {"client_id": client.pk})
+    RoutineExercise.objects.create(routine=routine, exercise=starter_exercise(walk),
+                                   day=1, sets=3, reps=10)
+    call(walk, trainer, "post", f"/api/routine/routines/{routine.pk}/assign_to_client/",
+         {"client_id": client.pk})
     return routine
 
 
 def coached(walk, *, funds, rate=COACH_RATE, deliver=True):
-    """A client (the state's main account) topped up with `funds`, who asked a trainer
-    charging `rate`; the trainer accepted; with `deliver`, the first programme is sent
-    and month 1 paid out."""
+    """A client (the state's main account) topped up with `funds`, coached by a trainer
+    charging `rate` (`coach_client`: month 1 held); with `deliver`, the first programme
+    is sent and month 1 paid out."""
+    walk.require_bootstrap()
     trainer = coach(walk, rate=rate)
     client = funded_client(walk, amount=funds)
-    relation = accept(trainer, ask_for(client, trainer))
-    routine = first_programme(trainer, client) if deliver else None
+    relation = coach_client(walk, client, trainer)
+    routine = first_programme(walk, trainer, client) if deliver else None
     return trainer, client, relation, routine
 
 
@@ -92,16 +89,18 @@ def run_the_coaching_hour():
 
 
 # ------------------------------------------------------------------ plan steps
-def cheapest_plan(*, diet=False):
+def cheapest_plan(walk, *, diet=False):
     from subscription.models import SubscriptionPlan
 
+    walk.require_bootstrap()
     plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
     if diet:
         plans = plans.filter(has_diet_access=True)
     plan = plans.order_by("price", "id").first()
     if plan is None:
-        raise WalkStepRefused("No paid plan is on sale" + (" with the diet" if diet else "")
-                              + ": run `manage.py bootstrap_platform` first.")
+        raise WalkRefused("this database has no paid plan on sale"
+                          + (" with the diet" if diet else "")
+                          + ": run `manage.py bootstrap_platform` first.")
     return plan
 
 
@@ -113,16 +112,18 @@ def plan_price(plan, client):
     return charge_for(plan.price, plan.currency, currency_for(client))
 
 
-def buy_plan(client, plan):
+def buy_plan(walk, client, plan):
     """The client chooses the plan (`POST v1/subscriptions/`) and pays it from the
     wallet (`pay-from-wallet/`, the quote the screen showed)."""
     from subscription.models import Subscription
 
-    made = api(client, "post", "/api/subscription/v1/subscriptions/", {"plan_id": plan.pk})
+    made = call(walk, client, "post", "/api/subscription/v1/subscriptions/",
+                {"plan_id": plan.pk})
     priced = plan_price(plan, client)
-    api(client, "post", f"/api/subscription/v1/subscriptions/{made['id']}/pay-from-wallet/",
-        {"idempotency_key": key(), "amount": f"{priced.amount:.2f}",
-         "currency": priced.currency})
+    call(walk, client, "post",
+         f"/api/subscription/v1/subscriptions/{made['id']}/pay-from-wallet/",
+         {"idempotency_key": key(), "amount": f"{priced.amount:.2f}",
+          "currency": priced.currency})
     return Subscription.objects.get(pk=made["id"])
 
 
@@ -139,10 +140,10 @@ def plan_ends_at(subscription, when):
 def subscribed_client(walk, *, diet=False, extra=Decimal("0")):
     """A client (main account) who bought the cheapest plan from a wallet an agent
     topped up with its price (and `extra` more)."""
-    plan = cheapest_plan(diet=diet)
+    plan = cheapest_plan(walk, diet=diet)
     client = walk.account(role="client")
-    top_up(agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
-    return client, buy_plan(client, plan)
+    top_up(walk, agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
+    return client, buy_plan(walk, client, plan)
 
 
 def coach_diet_plan(trainer, client):
@@ -154,8 +155,8 @@ def coach_diet_plan(trainer, client):
     template = DietPlanTemplate.objects.filter(is_active=True).order_by("id").first()
     foods = list(FoodItem.objects.filter(needs_review=False).order_by("id")[:2])
     if template is None or len(foods) < 2:
-        raise WalkStepRefused("No diet template or food catalogue: run "
-                              "`manage.py bootstrap_platform` first.")
+        raise WalkRefused("this database lacks the diet templates or the food catalogue: "
+                          "run `manage.py bootstrap_platform` first.")
     service = TrainerDietPlanService(trainer)
     today = timezone.localdate()
     plan = service.create_diet_plan(client, template, today, duration_weeks=1)
@@ -172,14 +173,14 @@ def coach_diet_plan(trainer, client):
 def coaching_frozen(walk):
     from subscription.tasks import expire_lapsed_subscriptions
 
-    plan = cheapest_plan(diet=True)
+    plan = cheapest_plan(walk, diet=True)
     trainer = coach(walk)
     client = walk.account(role="client")
     # The plan's price and one month of coaching, and a little: not a second month.
-    top_up(agent(walk), client, plan_price(plan, client).amount + COACH_RATE + 5000)
-    subscription = buy_plan(client, plan)
-    relation = accept(trainer, ask_for(client, trainer))
-    routine = first_programme(trainer, client)
+    top_up(walk, agent(walk), client, plan_price(plan, client).amount + COACH_RATE + 5000)
+    subscription = buy_plan(walk, client, plan)
+    relation = coach_client(walk, client, trainer)
+    routine = first_programme(walk, trainer, client)
     diet_plan = coach_diet_plan(trainer, client)
     # A month later: the coaching month ends unpaid (the wallet holds 5,000 of 40,000)
     # and the hourly run freezes it; the plan's cover ends and the daily run lapses it.
@@ -207,7 +208,7 @@ def coaching_renews_soon(walk):
                "to renew (stop_renewal on); the ending reminder has gone out.")
 def coaching_stops_soon(walk):
     trainer, client, relation, routine = coached(walk, funds=COACH_RATE * 2 + 5000)
-    api(client, "post", "/api/v1/coaching/renewal/", {"renew": False})
+    call(walk, client, "post", "/api/v1/coaching/renewal/", {"renew": False})
     month_ends_at(relation, timezone.now() + timedelta(days=2, hours=20))
     run_the_coaching_hour()
     walk.ids(trainer=trainer.pk, relation=relation.pk, routine=routine.pk)
@@ -231,7 +232,8 @@ def plan_lapsed(walk):
        summary="An active plan the client turned off renewing: it runs to its end date.")
 def plan_not_renewing(walk):
     client, subscription = subscribed_client(walk)
-    api(client, "post", f"/api/subscription/v1/subscriptions/{subscription.pk}/cancel/", {})
+    call(walk, client, "post",
+         f"/api/subscription/v1/subscriptions/{subscription.pk}/cancel/", {})
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
 
 
@@ -253,7 +255,7 @@ def plan_renewal_due(walk):
 def client_request_waiting(walk):
     trainer = coach(walk)
     client = funded_client(walk, amount=COACH_RATE + 5000)
-    relation = ask_for(client, trainer)
+    relation = ask_for(walk, client, trainer)
     walk.ids(trainer=trainer.pk, request=relation.pk)
 
 
@@ -273,8 +275,8 @@ def client_invited_by_coach(walk):
 
     trainer = coach(walk)
     client = funded_client(walk, amount=COACH_RATE + 5000)
-    api(trainer, "post", "/api/auth/trainer/assign-client/",
-        {"client_id": client.pk, "message": "أهلاً! أنا مدرّبك المقترح لبرنامج القوة."})
+    call(walk, trainer, "post", "/api/auth/trainer/assign-client/",
+         {"client_id": client.pk, "message": "أهلاً! أنا مدرّبك المقترح لبرنامج القوة."})
     relation = TrainerClientRelation.objects.get(trainer=trainer, client=client)
     walk.ids(trainer=trainer.pk, request=relation.pk)
 
@@ -283,7 +285,7 @@ def client_invited_by_coach(walk):
 @state("client_wallet_covers_plan", area="coaching", role="client",
        summary="A client with no plan whose wallet covers the cheapest plan exactly.")
 def client_wallet_covers_plan(walk):
-    plan = cheapest_plan()
+    plan = cheapest_plan(walk)
     client = walk.account(role="client")
-    top_up(agent(walk), client, plan_price(plan, client).amount)
+    top_up(walk, agent(walk), client, plan_price(plan, client).amount)
     walk.ids(plan=plan.pk)
