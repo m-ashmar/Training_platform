@@ -656,31 +656,67 @@ class TrainerProfileView(APIView):
         return Response({**saved, 'message': _('Trainer profile updated successfully!')},
                         status=status.HTTP_200_OK)
 
-class TrainerClientsView(APIView):
-    """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
+#: What `trainer/clients/` holds back while a coaching may not be used: the client's
+#: address and body record. Nulled, never dropped, so the row keeps its keys.
+WITHHELD_WHILE_FROZEN = ('email', 'height', 'weight', 'age', 'gender', 'activity_level',
+                         'client_goals', 'client_preferences')
 
-    200 `{trainer_id, trainer_name, client_count, clients: [...]}`.
+
+class TrainerClientsView(APIView):
+    """GET /api/auth/trainer/clients/ — the clients this trainer coaches.
+
+    200 `{trainer_id, trainer_name, client_count, clients: [...]}`, a row per client
+    with `id, username, email, first_name, last_name, profile_picture, height, weight,
+    age, gender, activity_level, client_goals, client_preferences, date_joined` and
+    `coaching_refusal`, ordered by id. `profile_picture` is a signed URL that expires
+    (use it now, never store it), or null.
     403 `not_a_trainer` when the caller is not a trainer (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
+
+    WHO IS LISTED (the fix run's G10, 2026-11-24): the clients of an APPROVED
+    `TrainerClientRelation` with the caller — the one predicate every other read of a
+    client's record uses (`routine.permissions.accessible_user_ids`). It listed the
+    `assigned_trainer` pointer instead, so a client whose pointer still named a
+    dismissed trainer was shown to that trainer, body record and address included, and
+    a client coached through an approved relation the pointer had drifted from was not.
+
+    WHILE THE COACHING MAY NOT BE USED (frozen, unpaid or ended, as the chat and the
+    trainer's diet reads judge it, `users.coaching.refusals_for`): the client is still
+    listed, by name, and `coaching_refusal` says why (`coaching_frozen`,
+    `coaching_unpaid`, `coaching_ended`; null while the coaching may be used); their
+    `email` and body record (`height`, `weight`, `age`, `gender`, `activity_level`,
+    `client_goals`, `client_preferences`) are null — the rule
+    `diet/trainer_reads.py` applies to the same record. `coaching_refusal` is additive.
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Get all clients assigned to this trainer"""
+        """The clients this trainer coaches (an approved relation)."""
         if not request.user.is_trainer:
             return _not_a_trainer()
 
-        clients = request.user.clients.all()
+        from training_platform.media_storage import media_url
+
+        from .coaching import refusals_for
+        from .models import TrainerClientRelation
+
+        clients = list(CustomUser.objects.filter(
+            pk__in=TrainerClientRelation.objects.filter(
+                trainer=request.user, status='approved').values('client_id'))
+            .order_by('id'))
+        refusals = refusals_for(request.user.pk, [client.pk for client in clients])
         client_data = []
-        
         for client in clients:
-            client_data.append({
+            refusal = refusals.get(client.pk)
+            row = {
                 'id': client.id,
                 'username': client.username,
                 'email': client.email,
                 'first_name': client.first_name,
                 'last_name': client.last_name,
-                'profile_picture': client.profile_picture.url if client.profile_picture else None,
+                'profile_picture': (media_url(client.profile_picture, request)
+                                    if client.profile_picture else None),
                 'height': client.height,
                 'weight': client.weight,
                 'age': client.age,
@@ -689,8 +725,12 @@ class TrainerClientsView(APIView):
                 'client_goals': client.client_goals,
                 'client_preferences': client.client_preferences,
                 'date_joined': client.date_joined,
-            })
-        
+                'coaching_refusal': refusal,
+            }
+            if refusal is not None:
+                row.update(dict.fromkeys(WITHHELD_WHILE_FROZEN))
+            client_data.append(row)
+
         return Response({
             'trainer_id': request.user.id,
             'trainer_name': request.user.full_name,

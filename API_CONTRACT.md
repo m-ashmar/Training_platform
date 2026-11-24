@@ -1733,6 +1733,15 @@ reads 1, 2, 4. Nor does a block end or hide an approved coaching: a client who b
 their current trainer is still in that trainer's `trainer/clients/` list until the
 coaching ends.
 
+**`GET /api/auth/trainer/clients/` (the fix run's G10, 2026-11-24; additive).** The list is
+the clients of an APPROVED relation with the trainer, ordered by id — the record every
+other read of a client uses — never the `assigned_trainer` pointer, which could still name
+a dismissed trainer. Each row adds `coaching_refusal`: null while the coaching may be used,
+else `coaching_frozen`, `coaching_unpaid` or `coaching_ended`; the client is still listed,
+by name, and `email`, `height`, `weight`, `age`, `gender`, `activity_level`,
+`client_goals` and `client_preferences` are null meanwhile (the rule of the trainer's
+diet reads). `profile_picture` is a signed URL that expires, or null.
+
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
 `likes_count` and `comments_count` on a post and a comment, all exclude the rows a

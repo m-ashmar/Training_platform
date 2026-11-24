@@ -734,7 +734,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.is_admin:
             return CustomUser.objects.filter(user_type='client')
         elif self.is_trainer:
-            return self.clients.all()
+            # The APPROVED relation, as `can_access_user_data` above: never the
+            # `assigned_trainer` pointer's reverse accessor (the fix run's G10).
+            return CustomUser.objects.filter(pk__in=TrainerClientRelation.objects.filter(
+                trainer=self, status='approved').values('client_id'))
         return CustomUser.objects.none()
 
     def retire(self, reason=""):
