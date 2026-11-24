@@ -413,6 +413,11 @@ COACHING_COMMISSION_RATE = _Decimal("0.20")
 # deleted from the code, it is priced at nothing. Until then every plan payment lands in
 # the platform's revenue wallet and no trainer is paid for it. See
 # `wallet/signals.py:handle_payment_completed`.
+# BEFORE RAISING IT ABOVE 0 the owner decides the cross-currency case: a trainer whose
+# wallet is in the other currency than the client's payment. Until then (Road to 10,
+# ruled 2026-11-24; SIDE_BUGS S-179) nothing is converted: the platform keeps that
+# trainer's share and an audit entry is written for a person
+# (`subscription_trainer_share_unpaid`, with the amount and the payment).
 SUBSCRIPTION_TRAINER_SHARE = _Decimal("0")
 COACHING_PERIOD_DAYS = 30
 COACHING_RENEWAL_REMINDER_DAYS = 3
