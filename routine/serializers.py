@@ -1242,9 +1242,10 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
 
     **The progress row decides the day.** `date` is a copy of
     `user_exercise_progress.date` and nothing else: send it and it must match (400
-    `set_date_mismatch` on `date`), omit it and the set is TODAY's — and must match the
-    row just the same, so an undated set cannot be backdated onto an older row
-    rather than today. `routine/models.py ExerciseSetLog` says why the two must agree.
+    `set_date_mismatch` on `date`), omit it and the set is TODAY's — or, when it names
+    its `workout_session`, that session's START day (S-289: a workout begun at 23:40 is
+    one day's workout) — and must match the row just the same, so an undated set cannot
+    be backdated onto an older row. `routine/models.py ExerciseSetLog` says why the two must agree.
     A new set's day must also be inside the training window: 400 `date_in_future` or
     `date_too_old` on `date` (`training_date_refusal`, SIDE_BUGS S-112).
     That is about a NEW set: an edit keeps the date the set was stored with, so a set
@@ -1414,10 +1415,16 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
         # an omitted date there means "leave it", not "today": filling in today made
         # every correction of a set from any earlier day fail with `set_date_mismatch`.
         # The model's `clean()` still holds the stored row to its progress row's day.
+        #
+        # A set that names its WORKOUT SESSION and sends no date is dated on that
+        # session's start day instead (S-289, `routine/models.py set_day_without_date`):
+        # judged as the session is (`perform_create` asks when the session began), so
+        # this opens nothing the sent date did not.
         owner_date = getattr(progress, 'date', None)
         if self.instance is None and progress is not None and owner_date is not None:
             if attrs.get('date') is None:
-                attrs['date'] = timezone.localdate()
+                from .models import set_day_without_date
+                attrs['date'] = set_day_without_date(attrs.get('workout_session'))
             elif attrs['date'] != owner_date:
                 raise serializers.ValidationError({'date': [serializers.ErrorDetail(
                     _("A set is logged on the day of the exercise it belongs to "

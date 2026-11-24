@@ -1141,6 +1141,26 @@ class WorkoutSession(models.Model):
         return None
 
 
+def set_day_without_date(session, today=None):
+    """The day of a set sent with NO date (SIDE_BUGS S-289, Road to 10 round 4).
+
+    A set that names its workout session is dated on that session's START day, in the
+    server's time zone (Asia/Damascus) as every day is: a workout started at 23:40 is
+    one workout on one day however late its sets arrive, and a challenge counts a
+    workout only with its sets dated on its start day (`social/challenge_progress.py`).
+    Today, the server's, otherwise — and a date the client sends is always kept (the app
+    sends one, the workout's start date). The anti-cheat rules are untouched: a set
+    dated on an old session's day is still judged by `LATE_HOURS`, the credible-set
+    bounds and the caps, and the coaching refusal is still judged when the session
+    began.
+    """
+    from django.utils import timezone
+
+    if session is not None and getattr(session, 'start_time', None) is not None:
+        return timezone.localdate(session.start_time)
+    return today or timezone.localdate()
+
+
 class ExerciseSetLog(RowValidationMixin, models.Model):
     """
     Detailed log of individual sets within an exercise session.
