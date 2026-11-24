@@ -106,3 +106,9 @@ def test_t2_an_operator_assignment_carries_no_ones_note(make_user, api, rf):
     for row in rows:
         payload = row.get("request", row) if isinstance(row, dict) else {}
         assert payload.get("trainer_note") in (None, ""), status
+    # One line was removed here with the owner's decision 5 (2026-11-24): `"my own words
+    # about my knee" not in str(status)`. The request now stays the client's own and
+    # pending, and `client/request-status/` answers their own note to them as `note`
+    # (users/views.py), which is theirs to read. No privacy check was lost: what this
+    # test guards, the client's words never served back as the TRAINER's, is the
+    # `trainer_note` assertion above.

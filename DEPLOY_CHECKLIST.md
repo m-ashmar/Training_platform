@@ -746,6 +746,23 @@ commit landed after `9b286e7` reaches the server only after the owner's next pus
     the password at a hidden prompt, the same address pattern every time), and again
     shortly before each store submission:
     `docker compose exec -u appuser -e REVIEW_ACCOUNTS_EMAIL -e REVIEW_ACCOUNTS_PASSWORD web python manage.py seed_review_accounts`.
+- After the update that carries landing 2a (the fix run, 2026-11-24):
+  - A password change, a forgot-password reset, the console's reset and a deactivation
+    sign the account out of EVERY device at once (each token carries a digest of the
+    password hash it was made under). The deploy itself signs nobody out: a token from
+    before it is accepted and gains the digest at its first refresh. Side effect worth
+    knowing: after a Django upgrade that raises the password hasher's work factor, each
+    account's next password sign-in re-hashes the password and so signs its OTHER
+    devices out, once.
+  - The two doors: the stock `/admin/` (Django's raw tables) admits only console
+    operators — a superuser, or an `admin` account, active and staff — so a staff account
+    that is not an operator can no longer sign in there. `/dj-admin/` (the console) is
+    unchanged: any active staff account gets in, sees only the pages its permissions
+    name and acts only where an action's permission is granted; its operator queues
+    answer 403 to a staff account that is not an operator.
+  - A new worker task, `chat.fill_media_duration` (a voice note or video that declares no
+    length is measured after it is sent); `docker compose up -d` restarts the worker
+    with the update, nothing else to do.
 - Not for the server: `manage.py seed_walk_states` (Road to 10) is a DEVELOPMENT tool
   for the app's walk-throughs. It refuses any settings but `settings_local`, so under
   this server's `settings_production` it writes nothing; never run it here.

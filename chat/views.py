@@ -283,7 +283,11 @@ class MediaMessageView(APIView):
     the same 90 s. The 90 s holds for every container that declares its length where
     it can be read without decoding — an MP4/MOV/M4A, an Ogg (Opus or Vorbis), a WebM
     with Info/Duration (Ogg and WebM since BACKEND_BUGS B-177; before, only their size
-    was capped) — and the answer's `media.duration_seconds` is that length. The stored
+    was capped) — and the answer's `media.duration_seconds` is that length. A recording
+    that declares no length is measured after it is sent (`chat.fill_media_duration`);
+    a length measured past 90 s is stored as measured and the message stays (the
+    manager's ruling, 2026-11-24: a delivered message is not taken back, the size cap
+    bounds abuse, and the declared-length refusal stops the honest case here). The stored
     file is private: its URL is signed, expires, and appears only in answers the two
     people in this conversation receive.
 
