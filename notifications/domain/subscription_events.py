@@ -31,6 +31,14 @@ class SubscriptionExpiredEvent(BaseDomainEvent):
         body=_("Your diet plan and routine are saved and you can still see them. Using "
                "them needs an active subscription."),
     )
+    # A build that may not sell the plan (play, ios) is told the state only: the last
+    # sentence says a subscription is needed, which that build cannot offer (Road to 10
+    # R1, the manager's ruling of 2026-11-24). `notifications/build_gate.py`.
+    requires = "can_purchase_platform_sub"
+    store_template = NotificationTemplate(
+        title=_("Your subscription has ended"),
+        body=_("Your diet plan and routine are saved and you can still see them."),
+    )
     recipient_id: int = 0
     subscription_id: int = 0
 
@@ -39,14 +47,19 @@ class SubscriptionExpiredEvent(BaseDomainEvent):
 class CheckoutExpiredEvent(BaseDomainEvent):
     """A checkout the customer opened and never finished, closed by the poller.
 
-    No amount, no link, no "pay now": a push reaches every build, and a store build may
-    not sell the plan in the app. It says what happened and nothing else.
+    No amount, no link, no "pay now". It reaches only a build that can open a plan
+    checkout (`requires`, below): apk and web.
     """
     template = NotificationTemplate(
         title=_("Your checkout expired"),
         body=_("You did not finish your last checkout, so it was closed. You can start "
                "again whenever you like."),
     )
+    # Only a build that can open a plan checkout is told (Road to 10 R1, the manager's
+    # ruling of 2026-11-24): on play and ios it invited restarting a purchase those
+    # builds lock off. No store text, so those builds get no inbox row, no unread count
+    # and no push. Nothing was paid, so nothing is lost. `notifications/build_gate.py`.
+    requires = "can_purchase_platform_sub"
     recipient_id: int = 0
     payment_id: str = ""
 

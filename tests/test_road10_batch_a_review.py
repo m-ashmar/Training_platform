@@ -179,3 +179,60 @@ def test_s21_a_request_still_waiting_elsewhere_still_refuses(make_user, api):
     again = api(client).post("/api/auth/client/request-trainer/", {"trainer_id": second.pk},
                              content_type=JSON)
     assert (again.status_code, again.json()["code"]) == (400, "request_pending_elsewhere")
+
+
+# ------------------------------------------------------------------ S2.8, no password
+def test_s28_an_account_with_no_password_is_told_so_and_never_throttled(make_user, api):
+    """An operator's reset (or an account made without a password) leaves nothing to
+    check: every attempt answered `current_password_wrong` and the sixth was a 429
+    (Road to 10 round 4). Now the plain code, every time, counted against nothing."""
+    from training_platform.cache import ratelimit_cache
+    from users.password_views import _wrong_count
+
+    ratelimit_cache().clear()
+    person = make_user(_name("nopass"), email_verified=True)
+    person.set_unusable_password()
+    person.save(update_fields=["password"])
+    try:
+        for _ in range(7):
+            resp = api(person).post(CHANGE, {"current_password": "anything",
+                                             "new_password": NEW}, content_type=JSON)
+            assert (resp.status_code, resp.json()["code"]) == (400, "password_not_set")
+        assert _wrong_count(person.pk) == 0
+        person.refresh_from_db()
+        assert not person.has_usable_password()
+    finally:
+        ratelimit_cache().clear()
+
+
+# ------------------------------------------------------------------ the console's reset
+def test_s28_the_operators_password_reset_ends_every_session(make_user, api):
+    """The console's reset made the password unusable and left every refresh token
+    alive: each signed-in device stayed signed in for up to seven days (Road to 10
+    round 4). Now the same revocation the password change makes."""
+    from django.contrib.admin.sites import site as stock_site
+    from django.contrib.messages.storage.fallback import FallbackStorage
+    from django.contrib.sessions.middleware import SessionMiddleware
+    from django.test import RequestFactory
+
+    from admin_dashboard.admin import admin_site
+    from users.models import CustomUser
+
+    person = make_user(_name("reset"), email_verified=True)
+    phones = [api().post("/api/auth/token/", {"email": person.email, "password": OLD},
+                         content_type=JSON).json()["refresh"] for _ in range(2)]
+    operator = make_user(_name("resetop"), user_type="admin")
+
+    for site in (admin_site, stock_site):
+        request = RequestFactory().post("/", {"_reset_password": "1"})
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.user = operator
+        request._messages = FallbackStorage(request)
+        site._registry[CustomUser].response_change(request, person)
+        person.refresh_from_db()
+        assert not person.has_usable_password()
+
+    for refresh in phones:
+        dead = api().post("/api/auth/token/refresh/", {"refresh": refresh},
+                          content_type=JSON)
+        assert dead.status_code == 401, dead.content

@@ -173,11 +173,18 @@ class CoachingPaymentDueEvent(BaseDomainEvent):
     """The month ended and the wallet could not cover the next one: the coaching is
     paused (frozen). Sent when it freezes (`step` 0) and again on each step of
     COACHING_FROZEN_REMINDER_DAYS while it stays paused. States the fact only: no amount,
-    no link, the same on every build."""
+    no link. A build that may not pay for coaching in the app reads `store_template`."""
     template = NotificationTemplate(
         title=_("Your coaching is paused"),
         body=_("Your coaching with %(name)s is paused until the next month is paid. "
                "You can still see your routines."),
+    )
+    # A build that may not pay for coaching in the app (ios) is not asked to pay (Road to
+    # 10 R1, the manager's ruling of 2026-11-24). `notifications/build_gate.py`.
+    requires = "can_pay_coaching_in_app"
+    store_template = NotificationTemplate(
+        title=_("Your coaching is paused"),
+        body=_("Your coaching with %(name)s is paused. You can still see your routines."),
     )
     actor_id: int = 0          # the trainer
     recipient_id: int = 0      # the client

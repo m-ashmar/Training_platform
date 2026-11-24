@@ -135,13 +135,18 @@ class FCMChannel:
             notification.refresh_from_db()
             current_status = notification.status.get('fcm', {})
             sent_tokens_history = set(current_status.get('sent_tokens', []))
+            # Devices whose BUILD is not shown this event (Road to 10 R1, below): settled
+            # like a sent token, never retried.
+            withheld_history = set(current_status.get('withheld_tokens', []))
 
-            # Get active tokens
-            tokens_qs = DeviceToken.objects.filter(user=recipient, is_active=True).values_list('token', flat=True)
-            all_tokens = set(tokens_qs)
+            # Get active tokens, each with the build that registered it.
+            rows = list(DeviceToken.objects.filter(user=recipient, is_active=True)
+                        .values_list('token', 'app_channel', 'app_version', 'platform'))
+            builds = {row[0]: row[1:] for row in rows}
+            all_tokens = set(builds)
 
             # Filter out already successfully sent tokens (Idempotency)
-            tokens_to_send = list(all_tokens - sent_tokens_history)
+            tokens_to_send = list(all_tokens - sent_tokens_history - withheld_history)
 
             if not tokens_to_send:
                 logger.info(f"No new tokens to send for {recipient.id}. Completed: {len(sent_tokens_history)}")
@@ -152,19 +157,31 @@ class FCMChannel:
                 # the drain's window. Settle it: delivered to at least one device, or to
                 # none that still exists.
                 if current_status.get('status') in cls.RETRYABLE_STATUSES:
-                    cls._settle(notification, 'sent' if sent_tokens_history else 'undeliverable')
+                    cls._settle(notification, 'sent' if sent_tokens_history
+                                else 'withheld' if withheld_history else 'undeliverable')
                 return
 
-            # --- Template resolution at delivery boundary ---
-            template = _resolve_event_template(notification.event_type)
-            context = notification.metadata.get('context', {})
+            # --- Template resolution at delivery boundary, per BUILD (Road to 10 R1) ---
+            # One account, several devices, possibly several builds: each device gets the
+            # text ITS build is shown (`notifications/build_gate.py`), from the channel
+            # and version the token recorded when it registered — the default, a gated
+            # event's store text, or no push at all. Every apk and web device gets the
+            # default, as before. One rendering per distinct text.
+            from notifications.build_gate import HIDDEN, choose, flags_for_token
 
-            title, body = NotificationTemplateResolver.render(
-                event_type=notification.event_type,
-                template=template,
-                context=context,
-                recipient_id=recipient.id,
-            )
+            flags_seen = {}
+            groups = {}
+            withheld = []
+            for token in tokens_to_send:
+                build = builds[token]
+                if build not in flags_seen:
+                    flags_seen[build] = flags_for_token(*build)
+                template = choose(notification.event_type, flags_seen[build])
+                if template is HIDDEN:
+                    withheld.append(token)
+                    continue
+                groups.setdefault(id(template), (template, []))[1].append(token)
+            context = notification.metadata.get('context', {})
 
             data = notification.metadata.get('data', {})
             # Ensure data values are strings
@@ -175,14 +192,22 @@ class FCMChannel:
             newly_sent_tokens = []
             dead_tokens = []
 
-            # Chunk tokens
-            for i in range(0, len(tokens_to_send), cls.CHUNK_SIZE):
-                chunk = tokens_to_send[i:i + cls.CHUNK_SIZE]
-                success, failure, success_tokens, chunk_dead = cls._send_chunk(chunk, title, body, data)
-                total_success += success
-                total_failure += failure
-                newly_sent_tokens.extend(success_tokens)
-                dead_tokens.extend(chunk_dead)
+            for template, group in groups.values():
+                title, body = NotificationTemplateResolver.render(
+                    event_type=notification.event_type,
+                    template=template,
+                    context=context,
+                    recipient_id=recipient.id,
+                )
+                # Chunk tokens
+                for i in range(0, len(group), cls.CHUNK_SIZE):
+                    chunk = group[i:i + cls.CHUNK_SIZE]
+                    success, failure, success_tokens, chunk_dead = cls._send_chunk(
+                        chunk, title, body, data)
+                    total_success += success
+                    total_failure += failure
+                    newly_sent_tokens.extend(success_tokens)
+                    dead_tokens.extend(chunk_dead)
 
             # Update metrics
             try:
@@ -204,6 +229,8 @@ class FCMChannel:
 
                 existing_sent = set(status_data.get('sent_tokens', []))
                 updated_sent = list(existing_sent.union(set(newly_sent_tokens)))
+                updated_withheld = list(set(status_data.get('withheld_tokens', []))
+                                        .union(withheld))
 
                 attempts = status_data.get('attempts', 0) + 1
 
@@ -211,15 +238,19 @@ class FCMChannel:
                 # token: those tokens are still active and not in sent_tokens, so a
                 # retry reaches exactly them. Recording 'sent' on the first success hid a
                 # multi-device user's transient failure from the drain for good.
+                # 'withheld' (Road to 10 R1): nothing failed and nothing was sent because
+                # no device's build is shown this event. Not retryable.
                 if total_failure > len(dead_tokens):
                     outcome = 'partial' if updated_sent else 'failed'
                 else:
-                    outcome = 'sent' if updated_sent else 'undeliverable'
+                    outcome = ('sent' if updated_sent
+                               else 'withheld' if updated_withheld else 'undeliverable')
                 new_status = {
                     'status': outcome,
                     'success_count': status_data.get('success_count', 0) + total_success,
                     'failure_count': status_data.get('failure_count', 0) + total_failure,
                     'sent_tokens': updated_sent,
+                    'withheld_tokens': updated_withheld,
                     'attempts': attempts,
                     'last_attempt': timezone.now().isoformat()
                 }

@@ -1127,6 +1127,12 @@ class DeviceToken(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='device_tokens')
     token = models.CharField(max_length=255, unique=True, db_index=True)
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES, default='android')
+    #: The BUILD that registered this token: the `X-App-Channel` its request declared
+    #: (`policy.channels.Channel`: apk, play, ios, web), or null when it declared none
+    #: (every token registered before 2026-11-24). A push gives this device the text its
+    #: build is shown (`notifications/build_gate.py`, Road to 10 R1); null is read as the
+    #: strictest build, or as ios for `platform` ios.
+    app_channel = models.CharField(max_length=8, blank=True, null=True)
     app_version = models.CharField(max_length=50, blank=True, null=True)
     device_id = models.CharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True, db_index=True, help_text="Soft delete for invalid tokens")
