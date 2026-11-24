@@ -15,6 +15,12 @@ alone. A payout method whose new digest another method of the same trainer alrea
 carries (the same address saved twice across a rotation, before the fix) is not
 rewritten — the constraint would refuse it — and is reported for an operator to delete
 one of the two. `--dry-run` counts without writing.
+
+Each row is re-read under its own lock and its digest computed from the address it holds
+THEN (SIDE_BUGS S-261): `payer_address.save` takes the same lock to replace an address,
+and a write by primary key alone, computed from an earlier read, could give a newly
+saved address its predecessor's digest — after which that customer's transfers stopped
+matching their saved address.
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -35,30 +41,37 @@ class Command(BaseCommand):
         from subscription.models import PayerAddress
 
         payer_rewritten = 0
-        for row in PayerAddress.objects.order_by("id").iterator():
-            current = payer_address.address_digest(row.address)
-            if row.address and row.address_digest != current:
-                payer_rewritten += 1
-                if not dry_run:
-                    PayerAddress.objects.filter(pk=row.pk).update(address_digest=current)
+        for pk in PayerAddress.objects.order_by("id").values_list("pk", flat=True):
+            with transaction.atomic():
+                row = PayerAddress.objects.select_for_update().filter(pk=pk).first()
+                if row is None:
+                    continue
+                current = payer_address.address_digest(row.address)
+                if row.address and row.address_digest != current:
+                    payer_rewritten += 1
+                    if not dry_run:
+                        PayerAddress.objects.filter(pk=pk).update(address_digest=current)
 
         method_rewritten, clashes = 0, []
         methods = PayoutMethod.objects.filter(kind=MethodKind.SHAMCASH).order_by("id")
-        for method in methods.iterator():
-            current = payouts.address_digest(method.shamcash_address)
-            if not method.shamcash_address or method.address_digest == current:
-                continue
-            clash = (PayoutMethod.objects.filter(trainer_id=method.trainer_id,
-                                                 kind=MethodKind.SHAMCASH,
-                                                 address_digest=current)
-                     .exclude(pk=method.pk).values_list("pk", flat=True).first())
-            if clash is not None:
-                clashes.append((method.pk, clash))
-                continue
-            method_rewritten += 1
-            if not dry_run:
-                with transaction.atomic():
-                    PayoutMethod.objects.filter(pk=method.pk).update(address_digest=current)
+        for pk in methods.values_list("pk", flat=True):
+            with transaction.atomic():
+                method = PayoutMethod.objects.select_for_update().filter(pk=pk).first()
+                if method is None:
+                    continue
+                current = payouts.address_digest(method.shamcash_address)
+                if not method.shamcash_address or method.address_digest == current:
+                    continue
+                clash = (PayoutMethod.objects.filter(trainer_id=method.trainer_id,
+                                                     kind=MethodKind.SHAMCASH,
+                                                     address_digest=current)
+                         .exclude(pk=pk).values_list("pk", flat=True).first())
+                if clash is not None:
+                    clashes.append((pk, clash))
+                    continue
+                method_rewritten += 1
+                if not dry_run:
+                    PayoutMethod.objects.filter(pk=pk).update(address_digest=current)
 
         verb = "would rewrite" if dry_run else "rewrote"
         self.stdout.write(f"Payer addresses: {verb} {payer_rewritten}. "
