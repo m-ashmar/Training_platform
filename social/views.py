@@ -78,6 +78,16 @@ class AlreadyFollowing(APIException):
     default_detail = _lazy('You already follow this person.')
 
 
+def _announce_follow(follower, followed) -> None:
+    """The person followed is told (`user_followed`, inbox and push), once per follow
+    made — by `POST follows/` and `POST follows/follow_user/` alike (SIDE_BUGS S-285:
+    only `follow_user/` told them)."""
+    from notifications.domain.dispatcher import emit_event
+    from notifications.domain.events import UserFollowedEvent
+
+    emit_event(UserFollowedEvent(actor_id=follower.id, target_user_id=followed.id))
+
+
 class UserFollowViewSet(viewsets.ModelViewSet):
     """
     API endpoints for user following system
@@ -107,6 +117,10 @@ class UserFollowViewSet(viewsets.ModelViewSet):
     `not_your_follow` (was `permission_denied`); `POST follows/` with your own id is
     400 `validation_error` with the field code `cannot_follow_yourself` on
     `following_id`, and a follow you already have is 400 `already_following`.
+
+    Both make the same follow and send the same notice: the person followed gets
+    `user_followed` (inbox and push). `POST follows/` saved the follow and sent nothing,
+    so a follow made there reached nobody (SIDE_BUGS S-285, the fix run's SOC-2).
 
     A follow is never edited (the routes review, 2026-11-23): `PUT`/`PATCH
     follows/{id}/` of your own follow answers 400 `follow_not_editable` and changes
@@ -148,6 +162,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             # The unique pair was a 500 (IntegrityError) on a repeated follow.
             raise AlreadyFollowing()
         serializer.save(follower=self.request.user)
+        _announce_follow(self.request.user, target)
 
     @staticmethod
     def _target_id(request):
@@ -228,16 +243,7 @@ class UserFollowViewSet(viewsets.ModelViewSet):
             )
             
             if created:
-                # Send Push Notification
-                # Emit Domain Event
-                from notifications.domain.dispatcher import emit_event
-                from notifications.domain.events import UserFollowedEvent
-                
-                emit_event(UserFollowedEvent(
-                    actor_id=request.user.id,
-                    target_user_id=user_to_follow.id
-                ))
-                
+                _announce_follow(request.user, user_to_follow)
                 return Response(
                     {'message': _('Successfully followed user')}, 
                     status=status.HTTP_201_CREATED
