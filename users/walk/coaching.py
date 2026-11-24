@@ -10,8 +10,8 @@ start and end, nothing else) and then calls that task:
 `subscription.tasks.expire_lapsed_subscriptions`,
 `subscription.tasks.send_renewal_reminders`. Never a hand-written ledger row, payment
 state or hold. The states that read platform data (a plan on sale, the diet templates
-and the food catalogue, the starter exercises) need a bootstrapped database
-(`walk.require_bootstrap`).
+and the food catalogue, the starter exercises) need a bootstrapped database: the
+command refuses once, before any state, when one is not (`framework.bootstrap_gaps`).
 
 Not reachable here, by design of the platform rather than of this command:
 - **a plan payment pending review** needs a checkout opened on the ShamCash gateway and
@@ -33,7 +33,6 @@ from decimal import Decimal
 from django.utils import timezone
 
 from . import state
-from .framework import WalkRefused
 from .shared import coach_client, starter_exercise
 from .wallet import COACH_RATE, agent, call, coach, funded_client, key, top_up
 
@@ -64,7 +63,6 @@ def coached(walk, *, funds, rate=COACH_RATE, deliver=True):
     """A client (the state's main account) topped up with `funds`, coached by a trainer
     charging `rate` (`coach_client`: month 1 held); with `deliver`, the first programme
     is sent and month 1 paid out."""
-    walk.require_bootstrap()
     trainer = coach(walk, rate=rate)
     client = funded_client(walk, amount=funds)
     relation = coach_client(walk, client, trainer)
@@ -89,19 +87,15 @@ def run_the_coaching_hour():
 
 
 # ------------------------------------------------------------------ plan steps
-def cheapest_plan(walk, *, diet=False):
+def cheapest_plan(*, diet=False):
+    """The cheapest paid plan on sale (with the diet: `framework.bootstrap_gaps` makes
+    sure there is one)."""
     from subscription.models import SubscriptionPlan
 
-    walk.require_bootstrap()
     plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
     if diet:
         plans = plans.filter(has_diet_access=True)
-    plan = plans.order_by("price", "id").first()
-    if plan is None:
-        raise WalkRefused("this database has no paid plan on sale"
-                          + (" with the diet" if diet else "")
-                          + ": run `manage.py bootstrap_platform` first.")
-    return plan
+    return plans.order_by("price", "id").first()
 
 
 def plan_price(plan, client):
@@ -140,7 +134,7 @@ def plan_ends_at(subscription, when):
 def subscribed_client(walk, *, diet=False, extra=Decimal("0")):
     """A client (main account) who bought the cheapest plan from a wallet an agent
     topped up with its price (and `extra` more)."""
-    plan = cheapest_plan(walk, diet=diet)
+    plan = cheapest_plan(diet=diet)
     client = walk.account(role="client")
     top_up(walk, agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
     return client, buy_plan(walk, client, plan)
@@ -152,11 +146,8 @@ def coach_diet_plan(trainer, client):
     from diet.models import DietPlanTemplate, FoodItem
     from diet.trainer_services import TrainerDietPlanService
 
-    template = DietPlanTemplate.objects.filter(is_active=True).order_by("id").first()
+    template = DietPlanTemplate.objects.order_by("id").first()
     foods = list(FoodItem.objects.filter(needs_review=False).order_by("id")[:2])
-    if template is None or len(foods) < 2:
-        raise WalkRefused("this database lacks the diet templates or the food catalogue: "
-                          "run `manage.py bootstrap_platform` first.")
     service = TrainerDietPlanService(trainer)
     today = timezone.localdate()
     plan = service.create_diet_plan(client, template, today, duration_weeks=1)
@@ -173,7 +164,7 @@ def coach_diet_plan(trainer, client):
 def coaching_frozen(walk):
     from subscription.tasks import expire_lapsed_subscriptions
 
-    plan = cheapest_plan(walk, diet=True)
+    plan = cheapest_plan(diet=True)
     trainer = coach(walk)
     client = walk.account(role="client")
     # The plan's price and one month of coaching, and a little: not a second month.
@@ -285,7 +276,7 @@ def client_invited_by_coach(walk):
 @state("client_wallet_covers_plan", area="coaching", role="client",
        summary="A client with no plan whose wallet covers the cheapest plan exactly.")
 def client_wallet_covers_plan(walk):
-    plan = cheapest_plan(walk)
+    plan = cheapest_plan()
     client = walk.account(role="client")
     top_up(walk, agent(walk), client, plan_price(plan, client).amount)
     walk.ids(plan=plan.pk)
