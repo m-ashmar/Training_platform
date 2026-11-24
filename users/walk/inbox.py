@@ -6,6 +6,7 @@ import re
 from decimal import ROUND_UP, Decimal
 
 from . import state
+from .framework import agent_cash_gaps, needs, withdrawal_gaps
 
 #: A value for every placeholder a notice template names, so each renders as it reads
 #: in the app (`notifications/domain/*.py`; the resolver answers a fallback sentence for
@@ -43,9 +44,27 @@ PEOPLE_KEYS = {
 #: e-mail would fail and be reported. The payout steps send them (`payouts/services.py`).
 MADE_FOR_REAL = ("withdrawal_requested", "withdrawal_paid", "withdrawal_failed")
 
-#: What the coach earns before the two withdrawals, in SYP, and what each takes out.
+#: What the coach earns before the two withdrawals, in a new wallet's currency, and what
+#: each takes out (the one paid, the one that fails), both on the same day. Read by the
+#: state and by its `@needs`, so the check cannot drift from what the state moves.
 EARNED = Decimal("40000")
 PAID_OUT, FAILED = Decimal("20000"), Decimal("15000")
+
+
+def _gross() -> Decimal:
+    """What the client sends the coach so that EARNED is left after the platform's
+    coaching commission: the cash one agent takes from that client, in one top-up day."""
+    from django.conf import settings
+
+    rate = Decimal(str(settings.COACHING_COMMISSION_RATE))
+    return (EARNED / (1 - rate)).quantize(Decimal("1"), rounding=ROUND_UP)
+
+
+@needs("inbox_every_kind")
+def _what_the_inbox_coach_moves():
+    return (agent_cash_gaps("inbox_every_kind", in_a_day=_gross())
+            + withdrawal_gaps("inbox_every_kind", smallest=min(PAID_OUT, FAILED),
+                              in_a_day=PAID_OUT + FAILED))
 
 
 def _withdrawals(walk, coach):
@@ -56,8 +75,6 @@ def _withdrawals(walk, coach):
     and one the operator could not pay (`withdrawal_requested`, `withdrawal_failed`).
     Neither is left open, so nothing waits on the operator's desk. Answers the ids."""
     import uuid
-
-    from django.conf import settings
 
     from payouts import services
 
@@ -73,8 +90,7 @@ def _withdrawals(walk, coach):
         "kind": "shamcash", "address": address, "address_confirm": address,
         "holder_name": f"{coach.first_name} {coach.last_name}"})
 
-    rate = Decimal(str(settings.COACHING_COMMISSION_RATE))
-    gross = (EARNED / (1 - rate)).quantize(Decimal("1"), rounding=ROUND_UP)
+    gross = _gross()
     agent = open_agent(walk)
     payer = walk.account("payer", first_name="رامي", last_name="الحلبي")
     top_up(walk, agent, payer, f"{gross:.2f}")

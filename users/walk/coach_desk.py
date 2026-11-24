@@ -3,10 +3,25 @@ how to add one). Kept apart from `trainer.py` (the batch B worker's).
 
 Owned by the phase 3 worker.
 """
-from . import state
+from decimal import Decimal
 
-#: The trainer's monthly fee in the queue state, in SYP: month 1 is held from it.
+from . import state
+from .framework import agent_cash_gaps, needs
+
+#: The trainer's monthly fee in the queue state, in a new wallet's currency: month 1 is
+#: held from it.
 FEE = "10000.00"
+
+#: What each of the queue's three clients (active, held, asking) is handed in cash, at
+#: the state's ONE agent, on the same day: enough for the fee. Read by the state and by
+#: its `@needs`.
+CLIENT_TOP_UP = Decimal("30000.00")
+CLIENTS = ("active", "held", "asking")
+
+
+@needs("trainer_full_queue")
+def _what_the_queues_agent_takes():
+    return agent_cash_gaps("trainer_full_queue", in_a_day=CLIENT_TOP_UP * len(CLIENTS))
 
 
 @state("trainer_just_signed_up", area="coach_desk", role="trainer",
@@ -40,8 +55,10 @@ def trainer_full_queue(walk):
     agent = open_agent(walk)
 
     def asks(part, **profile):
+        if part not in CLIENTS:                  # the agent's day is declared above
+            raise ValueError(f"trainer_full_queue: {part!r} is not one of {CLIENTS}")
         client = walk.account(part, **profile)
-        top_up(walk, agent, client, "30000.00")
+        top_up(walk, agent, client, f"{CLIENT_TOP_UP:.2f}")
         walk.api(client, "post", "/api/auth/client/request-trainer/", {"trainer_id": me.pk})
         return client, TrainerClientRelation.objects.get(trainer=me, client=client)
 

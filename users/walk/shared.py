@@ -120,6 +120,14 @@ def missing_plan(currency: str | None = None, *, diet: bool = False) -> list[str
             f"{' with the diet' if diet else ''} (the currency a new wallet takes)"]
 
 
+def choose_plan(currency: str, *, diet: bool = False, prefer: str | None = None):
+    """The plan `plan_for` chooses in `currency`, or None: the catalogue's `prefer` plan
+    (`catalogue_key`) when it is on sale there, else the cheapest. For an area's
+    `@needs`, to price exactly the plan its state will buy."""
+    plans = plans_on_sale(currency, diet=diet)
+    return (plans.filter(catalogue_key=prefer).first() if prefer else None) or plans.first()
+
+
 def plan_for(client, *, diet: bool = False, prefer: str | None = None):
     """A plan `client` can pay from their own wallet without an exchange rate: on sale,
     priced in the client's wallet currency (`currency_for`), with the diet if `diet`.
@@ -128,9 +136,8 @@ def plan_for(client, *, diet: bool = False, prefer: str | None = None):
     from wallet import currency_for
 
     currency = currency_for(client)
-    preferred = (plans_on_sale(currency, diet=diet).filter(catalogue_key=prefer).first()
-                 if prefer else None)
-    return preferred or cheapest_plan(currency, diet=diet)
+    return (choose_plan(currency, diet=diet, prefer=prefer)
+            or cheapest_plan(currency, diet=diet))
 
 
 def top_up(walk, agent, client, amount: str, currency: str | None = None):
