@@ -123,6 +123,14 @@ class PersonalDataSource:
     #: the user row would deadlock against a top-up in flight.
     #: Last, so no positional use shifts.
     refuse_erase: Callable | None = None
+    #: Many-to-manys among `fields` that are exported holding ONLY the exporting person's
+    #: own id: whether they are on that row, never who else is (fix for landing 2a, S-253
+    #: with S-214). `Routine.assigned_to` showed a client their program as theirs
+    #: (`[their id]`, S-214) and, on a legacy routine shared by two clients, the other
+    #: client's id too; dropping the key (S-253) lost the first to end the second. Now a
+    #: client reads `[their id]`, the trainer who wrote it `[]`, nobody another id.
+    #: Last, so no positional use shifts.
+    links_to_self: tuple[str, ...] = ()
 
     def get_model(self):
         from django.apps import apps
@@ -260,7 +268,11 @@ def section_pages(source, user, *, size: int | None = None):
                 pairs = (link.related_model._default_manager
                          .filter(**{f"{back}__in": page_ids})
                          .values_list(back, "pk"))
+            own_only = link.name in source.links_to_self
+            me = getattr(user, "pk", user)
             for owner, target in pairs:
+                if own_only and target != me:
+                    continue
                 found.setdefault(owner, []).append(target)
             for key, row in by_pk.items():
                 row[link.name] = found.get(key, [])
