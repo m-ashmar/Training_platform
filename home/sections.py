@@ -180,16 +180,71 @@ def week_context(person, routine, on_date) -> dict:
     day, the one the streak counts). Read in the view and handed to both builders, so
     the screen asks each question once.
     """
-    from routine.models import RoutineExercise
+    from routine.models import DayOutcome, RoutineExercise
     from routine.outcomes import complete_dates
 
     start = week_start(on_date)
     working_days = set()
+    sessions = closed = None
     if routine is not None:
         working_days = set(RoutineExercise.objects.filter(routine=routine)
                            .values_list('day', flat=True).distinct())
+        if getattr(routine, 'purchase_id', None) is not None:
+            # A buyer's copy numbers sessions, not dates (S-262): two more queries,
+            # only for one.
+            sessions = bought_sessions([routine], start, {routine.pk: working_days}
+                                       ).get(routine.pk)
+            # One date per session closed this week (two on one day are two).
+            closed = list(DayOutcome.objects
+                          .filter(user=person, routine=routine,
+                                  date__range=(start, on_date))
+                          .values_list('date', flat=True))
     return {'start': start, 'working_days': working_days,
-            'finished': complete_dates(person, since=start)}
+            'finished': complete_dates(person, since=start),
+            'sessions': sessions, 'closed': closed}
+
+
+def bought_sessions(routines, start, working) -> dict:
+    """`{routine_id: (per_week, left)}` for the buyers' copies among `routines`
+    (SIDE_BUGS S-262, the phase 0 review of 2026-11-23).
+
+    A buyer's copy of a routine product numbers SESSIONS (`template.days` a week for
+    `template.weeks` weeks, no end date), so mapping its days onto dates by the
+    calendar cycle planned all seven days of a 3-a-week programme. `per_week` is the
+    template's days that have exercises — the copy repeats the template's days in
+    order (`routine/assignment.py routine_from_template`), so they are the copy's
+    working days among its first `template.days`. `left` is its working days not yet
+    closed (any `DayOutcome`, short ones included, as the schedule counts them) before
+    `start`: the programme's last week plans no more than remain in it. `working` is
+    `{routine_id: set of days with exercises}`, already read by the caller. Two
+    queries for any number of routines; none when there is no buyer's copy.
+    """
+    from routine.models import DayOutcome
+    from routine.product_models import RoutinePurchase
+
+    bought = {r.pk: r for r in routines
+              if r is not None and getattr(r, 'purchase_id', None) is not None}
+    if not bought:
+        return {}
+    template_days = dict(RoutinePurchase.objects
+                         .filter(pk__in={r.purchase_id for r in bought.values()})
+                         .values_list('pk', 'product__source_template__days'))
+    closed: dict = {}
+    for routine_id, day in (DayOutcome.objects
+                            .filter(routine_id__in=bought, date__lt=start)
+                            .values_list('routine_id', 'day').distinct()):
+        closed.setdefault(routine_id, set()).add(day)
+    answer = {}
+    for routine_id, routine in bought.items():
+        days = template_days.get(routine.purchase_id)
+        if not days:
+            continue
+        days_with_work = {d for d in working.get(routine_id, set())
+                          if 1 <= d <= max(routine.days or 1, 1)}
+        per_week = len({d for d in days_with_work if d <= days})
+        left = len(days_with_work - closed.get(routine_id, set()))
+        answer[routine_id] = (per_week, left)
+    return answer
 
 
 def active_diet_plan(person, on_date):
@@ -301,10 +356,16 @@ def _in_program(routine, date) -> bool:
     return True
 
 
-def planned_training_days(routine, start, working_days) -> int:
+def planned_training_days(routine, start, working_days, sessions=None) -> int:
     """How many days of the week that begins on `start` the routine asks for work: days
     inside its window (`_in_program`) whose day of the cycle has exercises
     (`working_days`, from `week_context`). 0 without a routine.
+
+    A buyer's copy (`sessions`, `(per_week, left)` from `bought_sessions`) numbers
+    sessions, not dates: it plans its sessions a week — never more than the days of this
+    week inside its window, nor than the sessions left in it (SIDE_BUGS S-262). It
+    planned all seven days of a 3-a-week programme. Dated programmes and a trainer's
+    cycles are counted by the calendar, as before.
 
     The home's `week_stats.workouts.planned`, and — the owner's decision 5, 2026-09-24 —
     the target of a weekly workout goal (`analytics/goals.py weekly_targets`), so the
@@ -312,9 +373,12 @@ def planned_training_days(routine, start, working_days) -> int:
     """
     if routine is None:
         return 0
-    return sum(1 for offset in range(7)
-               if _in_program(routine, start + timedelta(days=offset))
-               and day_of(routine, start + timedelta(days=offset)) in working_days)
+    dates = [start + timedelta(days=offset) for offset in range(7)]
+    if sessions is not None:
+        per_week, left = sessions
+        return min(per_week, left, sum(1 for date in dates if _in_program(routine, date)))
+    return sum(1 for date in dates
+               if _in_program(routine, date) and day_of(routine, date) in working_days)
 
 
 def _week_strip(person, routine, on_date, week) -> list:
@@ -326,8 +390,16 @@ def _week_strip(person, routine, on_date, week) -> list:
     `done` is a day finished with nothing missing — the platform's own definition of a
     training day (`routine/outcomes.complete_dates`), the one the streak counts. The
     rows come from `week_context`, read once for the hero and the tiles together.
+
+    A buyer's copy (`week['sessions']`, SIDE_BUGS S-262) has no dates for its sessions:
+    `done` and `today` are drawn the same way, `planned` only on the next dates still
+    owed this week — the week's planned sessions (`planned_training_days`) less those
+    closed this week, today taking one when nothing is closed today — and `rest`
+    everywhere else, a missed date included (the session waits, the owner's D15).
     """
     start, working_days, finished = week['start'], week['working_days'], week['finished']
+    if week.get('sessions') is not None:
+        return _bought_strip(routine, on_date, week)
     strip = []
     for offset in range(7):
         date = start + timedelta(days=offset)
@@ -339,6 +411,29 @@ def _week_strip(person, routine, on_date, week) -> list:
             state = 'rest'
         else:
             state = 'planned'
+        strip.append({'date': date.isoformat(), 'weekday': date.isoweekday(),
+                      'state': state})
+    return strip
+
+
+def _bought_strip(routine, on_date, week) -> list:
+    """`_week_strip` for a buyer's copy (see there)."""
+    start, finished, closed = week['start'], week['finished'], week.get('closed') or []
+    owed = planned_training_days(routine, start, week['working_days'], week['sessions'])
+    owed -= len(closed)
+    if on_date not in closed:
+        owed -= 1           # today is one of them: the person may train today
+    strip = []
+    for offset in range(7):
+        date = start + timedelta(days=offset)
+        if date == on_date:
+            state = 'today'
+        elif date in finished:
+            state = 'done'
+        elif date > on_date and owed > 0 and _in_program(routine, date):
+            state, owed = 'planned', owed - 1
+        else:
+            state = 'rest'
         strip.append({'date': date.isoformat(), 'weekday': date.isoweekday(),
                       'state': state})
     return strip
@@ -419,7 +514,8 @@ def week_stats(person, routine, week, week_payload, *, on_date) -> dict | None:
 
     planned_days = None
     if routine is not None:
-        planned_days = planned_training_days(routine, start, week['working_days'])
+        planned_days = planned_training_days(routine, start, week['working_days'],
+                                             week.get('sessions'))
     done_days = len([date for date in week['finished'] if start <= date <= on_date])
 
     # The window the cached payload measures: the seven days ending today. The week

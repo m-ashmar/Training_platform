@@ -250,18 +250,26 @@ def test_an_unverified_trainer_is_not_offered_to_clients(api, make_user):
     from users.models import CustomUser
     coach = CustomUser.objects.get(username="c9_unverified_coach")
     coach.trainer_is_available = True
+    # Deliberate contract change (Road to 10 phase 0 review, 2026-11-23, commit 2ccad4c
+    # and the available-trainers commit after it): both lists now choose trainers by the
+    # directory's rule, so a trainer is listed only with a first name (S0.3, B-198), and
+    # `trainers/public/` no longer shows a stranger the username nor matches a search on
+    # it. So both coaches get a first name the search finds, and the rows are told apart
+    # by id. The rule this test holds is unchanged: verified is offered, unverified not.
+    coach.first_name = "c9 Unverified"
     coach.save()
-    make_user("c9_verified_coach", user_type="trainer", trainer_is_available=True)
+    verified = make_user("c9_verified_coach", user_type="trainer",
+                         trainer_is_available=True, first_name="c9 Verified")
     shopper = make_user("c9_coach_shopper")
 
     for path, caller in (("/api/auth/trainers/public/", api()),
                          ("/api/auth/client/available-trainers/", api(shopper))):
-        r = caller.get(f"{path}?search=c9_")
+        r = caller.get(f"{path}?search=c9")
         assert r.status_code == 200, (path, r.content)
         body = r.json().get("results", r.json())
-        names = {t["username"] for t in body["available_trainers"]}
-        assert "c9_verified_coach" in names, (path, names)
-        assert "c9_unverified_coach" not in names, (path, names)
+        ids = {t["id"] for t in body["available_trainers"]}
+        assert verified.pk in ids, (path, ids)
+        assert coach.pk not in ids, (path, ids)
 
 
 # ------------------------------------------------ erasure of a bond holding money

@@ -65,11 +65,17 @@ Only the two weeks of history are written as rows: nothing but a phone logs a se
 there is no service to call. They are written as the app would have written them on
 each day, `created_at` included, so the challenge's anti-cheat counts them.
 
-**Idempotent.** Each piece is found before it is made; a second run writes nothing. Two
+**Idempotent.** Each piece is found before it is made; a second run writes nothing. Four
 things are kept current when the command runs again later, because a reviewer may look
-weeks after the first run: the Premium grant is extended when fewer than
-`GRANT_TOP_UP_DAYS` remain, and a new 7-day meal plan is generated when none covers
-today. Run it again shortly before each submission.
+weeks after the first run (ROAD_TO_10 R5: the accounts "exist and stay alive"): the
+Premium grant is extended when fewer than `GRANT_TOP_UP_DAYS` remain; a new 7-day meal
+plan is generated when none covers today; each coached client's programme has its end
+date moved on when fewer than `PROGRAMME_TOP_UP_DAYS` remain (since the owner's D15 a
+programme past its dates is `finished`, and Home offers nothing to start); and a coached
+client whose month has run out, or ends within the renewal reminder's days, with a
+wallet that cannot cover the next one, is topped up by the review agent as on the first
+run and the month renewed (`users/coaching.py renew`, what the hourly run does) — so the
+coaching is paid, not frozen. Run it again shortly before each submission.
 
 Safe on production: no setting it needs is development-only, no secret is printed, and
 it moves no money it did not first put in through an agent top-up.
@@ -101,6 +107,12 @@ PASSWORD_ENV = "REVIEW_ACCOUNTS_PASSWORD"
 #: extends it.
 GRANT_DAYS = 90
 GRANT_TOP_UP_DAYS = 30
+
+#: How many weeks each coached client's programme runs (its template's `weeks`), and how
+#: few days of it may be left before a later run moves its end date on (Road to 10 R5:
+#: since the owner's D15 a programme past its dates is `finished`).
+PROGRAMME_WEEKS = 6
+PROGRAMME_TOP_UP_DAYS = 14
 
 #: What each account is. Names are invented; `date_of_birth` puts every one well above
 #: the platform's minimum age.
@@ -234,6 +246,7 @@ class Command(BaseCommand):
             self._retire_agent()
             self._coaching()
             self._routines()
+            self._keep_coaching_paid()
             self._premium()
             self._history()
             self._meal_plan()
@@ -440,35 +453,45 @@ class Command(BaseCommand):
     def _top_ups(self):
         """The agent tops each client up once, as an agent top-up writes it: the
         ledger row, and the receivable entry for the cash the agent now holds."""
-        from policy.money import MoneyType
-        from wallet import agents
-        from wallet.models import AgentProfile, Transaction, move_funds_atomic, wallet_for
+        from wallet.models import Transaction, wallet_for
 
         currency, money = self._money()
         agent = self.users["agent"]
         for role, amount in money["topups"].items():
-            client = self.users[role]
-            wallet = wallet_for(client, "client")
+            wallet = wallet_for(self.users[role], "client")
             if Transaction.objects.filter(actor_id=agent.id, tx_type="topup",
                                           destination_wallet=wallet).exists():
                 self._note(f"top-up {role}", "found")
                 continue
-            with transaction.atomic():
-                profile = agents.lock_profile(AgentProfile.objects.get(user=agent))
-                refusal = agents.usage_of(profile, currency).refusal(amount)
-                if refusal is not None:
-                    raise CommandError(
-                        f"The review agent cannot top up {amount} {currency}: "
-                        f"{refusal.code} (limit {refusal.limit}, remaining "
-                        f"{refusal.remaining}). Raise the agent's caps in the console or "
-                        f"the AGENT_DEFAULT_* settings.")
-                tx = move_funds_atomic(None, wallet, amount, actor_id=agent.id,
-                                       tx_type="topup", currency=currency,
-                                       money_type=MoneyType.WALLET_MOVE,
-                                       metadata={"agent_id": agent.id})
-                agents.post_topup(profile, tx)
-                agents.notify_client_on_commit(tx, client, profile)
+            self._top_up(role, amount)
             self._note(f"top-up {role}", f"{amount} {currency}")
+
+    def _top_up(self, role, amount):
+        """One agent top-up of `role`'s wallet, as the agent's top-up route writes it:
+        the ledger row, the receivable entry for the cash the agent now holds, and the
+        client's notice. Refused, before anything is written, past the agent's caps."""
+        from policy.money import MoneyType
+        from wallet import agents
+        from wallet.models import AgentProfile, move_funds_atomic, wallet_for
+
+        currency, _money = self._money()
+        agent, client = self.users["agent"], self.users[role]
+        wallet = wallet_for(client, "client")
+        with transaction.atomic():
+            profile = agents.lock_profile(AgentProfile.objects.get(user=agent))
+            refusal = agents.usage_of(profile, currency).refusal(amount)
+            if refusal is not None:
+                raise CommandError(
+                    f"The review agent cannot top up {amount} {currency}: "
+                    f"{refusal.code} (limit {refusal.limit}, remaining "
+                    f"{refusal.remaining}). Raise the agent's caps in the console or "
+                    f"the AGENT_DEFAULT_* settings.")
+            tx = move_funds_atomic(None, wallet, amount, actor_id=agent.id,
+                                   tx_type="topup", currency=currency,
+                                   money_type=MoneyType.WALLET_MOVE,
+                                   metadata={"agent_id": agent.id})
+            agents.post_topup(profile, tx)
+            agents.notify_client_on_commit(tx, client, profile)
 
     def _coaching(self):
         """`client`, `client2`, `client3` ask the trainer and the trainer accepts — the
@@ -528,7 +551,8 @@ class Command(BaseCommand):
         exercises = {e.catalogue_key: e for e in Exercise.objects.filter(
             catalogue_key__in=[key for day in PROGRAM.values() for key, *_r in day])}
         with transaction.atomic():
-            template = RoutineTemplate(created_by=trainer, days=len(PROGRAM), weeks=6,
+            template = RoutineTemplate(created_by=trainer, days=len(PROGRAM),
+                                       weeks=PROGRAMME_WEEKS,
                                        name=TEMPLATE["name_en"],
                                        description=TEMPLATE["description_en"], **TEMPLATE)
             template.save()
@@ -552,18 +576,72 @@ class Command(BaseCommand):
         today = timezone.localdate()
         for role in COACHED:
             client = self.users[role]
-            if Routine.objects.filter(source_template=template, assigned_to=client).exists():
-                self._note(f"routine {role}", "found")
+            found = (Routine.objects.filter(source_template=template, assigned_to=client)
+                     .order_by("id").first())
+            if found is not None:
+                self._keep_running(role, found, today)
                 continue
             # `client` has trained it for two weeks (`_history`); the others started
             # this week.
             start = today - timedelta(days=14 if role == "client" else 3)
             routine = routine_from_template(template, created_by=trainer, days=len(PROGRAM),
-                                            start_date=start, end_date=start + timedelta(weeks=6))
+                                            start_date=start, end_date=_last_day(start))
             Routine.objects.filter(pk=routine.pk).update(day_names=DAY_NAMES)
             assign_routine(routine, client, trainer)
             transaction.on_commit(lambda c=client, r=routine: notify_assignment(c, r))
             self._note(f"routine {role}", "assigned; month 1 paid out")
+
+    def _keep_running(self, role, routine, today):
+        """A programme found on a later run is kept running: the trainer moves its end
+        date on when fewer than `PROGRAMME_TOP_UP_DAYS` remain — the edit any trainer
+        makes to a client's programme (`end_date`). Since the owner's D15 (Road to 10
+        S0.1) a programme past its dates is `finished` and Home offers nothing to start,
+        so a reviewer who opened the app a month after the first run found it over. The
+        start date, and the history dated from it, are kept."""
+        if routine.end_date is not None and (
+                routine.end_date - today).days >= PROGRAMME_TOP_UP_DAYS:
+            return self._note(f"routine {role}", "found")
+        end = _last_day(today)
+        routine.end_date = end
+        # Through `save()`, as the trainer's edit is (its row checks run).
+        routine.save(update_fields=["end_date", "updated_at"])
+        self._note(f"routine {role}", f"runs to {end.isoformat()}")
+
+    def _keep_coaching_paid(self):
+        """Each coached client's month stays paid. The demo wallets hold one or two
+        months, and a month the wallet cannot cover freezes the coaching like anybody's
+        (the owner's rule of 2026-09-19): the routine is then readable and cannot be
+        started, which is not what a reviewer should find weeks after the first run.
+
+        So, on a later run: when a client's month has ended, or ends within the
+        renewal reminder's days (`COACHING_RENEWAL_REMINDER_DAYS`), and their wallet
+        cannot cover the next one, the agent tops it up as on the first run (an agent
+        top-up, its receivable booked; the agent stays suspended). A month that has
+        ended is then renewed by `users/coaching.py renew` — what the hourly run does,
+        called here so the result is there when the command returns. Nothing is
+        written while a month is paid and not ending."""
+        from users.coaching import reminder_lead, renew
+        from users.models import TrainerClientRelation
+        from wallet.models import wallet_for
+
+        _currency, money = self._money()
+        trainer, now = self.users["trainer"], timezone.now()
+        for role in COACHED:
+            client = self.users[role]
+            relation = TrainerClientRelation.objects.filter(
+                trainer=trainer, client=client, status="approved").first()
+            last = relation.periods.order_by("-number").first() if relation else None
+            if last is None or last.status != "settled" or last.ends_at is None:
+                continue
+            if last.frozen_at is None and last.ends_at - now > reminder_lead():
+                continue
+            balance = wallet_for(client, "client").balance
+            if balance < last.price:
+                amount = max(money["topups"][role], last.price - balance)
+                self._top_up(role, amount)
+                self._note(f"top-up {role}", f"{amount} {_currency} (next month)")
+            if last.ends_at <= now:
+                self._note(f"coaching {role}", renew(relation.pk))
 
     def _premium(self):
         """The Premium entitlement, granted by the operator (`source=operator_grant`),
@@ -700,6 +778,13 @@ class Command(BaseCommand):
             recount(challenge, joined)
             standing.write_places(challenge)
             self._note("challenge joined", f"{len(joined)} participant(s)")
+
+
+def _last_day(start):
+    """The last day of a programme of `PROGRAMME_WEEKS` weeks that starts on `start`:
+    the end date is a day of the programme, so six weeks end the day before the seventh
+    begins (the schedule reads `weeks_total` from the two dates, `routine/schedule.py`)."""
+    return start + timedelta(weeks=PROGRAMME_WEEKS) - timedelta(days=1)
 
 
 def _end_sessions(user):
