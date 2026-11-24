@@ -486,9 +486,27 @@ example a backup bucket with a retention lock), never next to the keys.
    UPDATE and DELETE, never the restore itself.
 3. Point `DB_*` at the new database (`fly secrets set …`). The keys must be the SAME ones
    in use when the dump was taken.
-4. `fly deploy` (the release command's `migrate` is a no-op on a current dump), then
+4. Clear the query cache BEFORE the app serves the restored database:
+   `fly ssh console -C "python manage.py invalidate_cachalot"`. On one server (section
+   12) stop the app first and run it while it is stopped:
+   ```bash
+   docker compose stop web worker beat          # before the restore
+   # ... the restore ...
+   docker compose run --rm --no-deps web python manage.py invalidate_cachalot
+   docker compose up -d                         # migrate, then web, worker, beat
+   ```
+   Why: Redis is not part of the backup, and django-cachalot keeps query results there
+   for up to 24 hours (`CACHALOT_TIMEOUT`). It drops them on every write made through
+   Django, but a restore is a write from outside Django, so without this step the app
+   can go on reading the rows of BEFORE the restore. The one that matters most is the
+   policy table: the old build flags would stay in force for up to a day — what each
+   build may sell, and the Google Play coaching switch (section 13). The command marks
+   every table's cached results stale and touches nothing else. Do NOT flush the
+   cache's Redis database instead: the same database (DB0, the `default` cache) holds
+   the console's sessions (SIDE_BUGS S-292).
+5. `fly deploy` (the release command's `migrate` is a no-op on a current dump), then
    `bootstrap_platform` (fills anything missing, changes nothing that exists).
-5. Section 7, then compare the row counts of the ledger and the payments with the
+6. Section 7, then compare the row counts of the ledger and the payments with the
    dump's.
 
 Never repair a ledger or payment-event row by disabling its trigger: a correction is a
@@ -710,6 +728,20 @@ containers still serving; the dump is the way back. Then run the update's own co
     show 0.
   - `create_starter_challenge` opens the community's starter challenge (section 6). It
     creates nothing while one is upcoming or running.
+  - Then the store reviewers' accounts, as 12.3 says ("The store reviewers' accounts":
+    the password at a hidden prompt, the same address pattern every time), and again
+    shortly before each store submission:
+    `docker compose exec -u appuser -e REVIEW_ACCOUNTS_EMAIL -e REVIEW_ACCOUNTS_PASSWORD web python manage.py seed_review_accounts`.
+- Not for the server: `manage.py seed_walk_states` (Road to 10) is a DEVELOPMENT tool
+  for the app's walk-throughs. It refuses any settings but `settings_local`, so under
+  this server's `settings_production` it writes nothing; never run it here.
+- If this server's database is ever RESTORED (from the update's dump above, or section
+  9's), clear the query cache before the app serves again, as section 9's step 4 says:
+  stop `web`, `worker` and `beat`, restore, run
+  `docker compose run --rm --no-deps web python manage.py invalidate_cachalot`, then
+  `docker compose up -d`. A restore is a write from outside Django, which the query
+  cache does not see; without it the old build flags (what each build may sell, the
+  Google Play coaching switch) can stay in force for up to 24 hours (SIDE_BUGS S-292).
 
 ## 13. Coaching off on Google Play (Road to 10 R8)
 The `play` build sells one thing: a month with a personal trainer, paid from the wallet,
