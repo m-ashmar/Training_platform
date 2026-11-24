@@ -135,6 +135,46 @@ def coaching_in_the_way_message(relation):
             'name': trainer.full_name or trainer.username}
 
 
+def no_coaching_to_point_at(client, trainer_id, relations=None):
+    """The trainer a change of `assigned_trainer` names when the client has NO approved
+    coaching with them, or None.
+
+    The owner (2026-11-24): the console must not be able to approve a coaching with no
+    consent and no charge. The pointer's sync used to `update_or_create` the relation as
+    `approved` — a pending request, a rejected one, or none at all — so an operator's
+    pick started a coaching the client never agreed to and no month was ever taken for.
+    A coaching starts only in the app (`client/request-trainer/`, then the trainer's
+    `respond-to-request/`, which takes month 1 when the trainer charges: users/
+    trainer_relations.py). The console only puts the pointer back in step with one that
+    is running. `relations` is the client's rows keyed by trainer id, when the caller
+    has them locked; otherwise they are read.
+    """
+    from .models import CustomUser, TrainerClientRelation
+
+    if not trainer_id:
+        return None
+    if relations is not None:
+        row = relations.get(trainer_id)
+        running = row is not None and row.status == 'approved'
+    else:
+        running = TrainerClientRelation.objects.filter(
+            client=client, trainer_id=trainer_id, status='approved').exists()
+    if running:
+        return None
+    return CustomUser.objects.filter(pk=trainer_id).first()
+
+
+def no_coaching_message(trainer):
+    from django.utils.translation import gettext
+
+    return gettext(
+        "This client has no running coaching with %(name)s, and the console cannot "
+        "start one: a coaching begins in the app, when the client asks and the trainer "
+        "accepts, which takes the first month if the trainer charges. Here you can only "
+        "choose the trainer of the client's running coaching, or leave the field "
+        "empty.") % {'name': (trainer.full_name or trainer.username) if trainer else '-'}
+
+
 class CustomUserChangeForm(UserChangeForm):
     """Custom form for changing user data in admin"""
     class Meta(UserChangeForm.Meta):
@@ -142,15 +182,19 @@ class CustomUserChangeForm(UserChangeForm):
         fields = '__all__'
 
     def clean(self):
-        """A change of `assigned_trainer` that would end another approved coaching is a
-        field error on `assigned_trainer`, so the operator is told and nothing is
-        written (`coaching_in_the_way`). `save_model` checks again under the lock."""
+        """A change of `assigned_trainer` that would end another approved coaching, or
+        that names a trainer the client has no approved coaching with, is a field error
+        on `assigned_trainer`, so the operator is told and nothing is written
+        (`coaching_in_the_way`, `no_coaching_to_point_at`). `save_model` checks again
+        under the lock."""
         cleaned = super().clean()
         if self.instance.pk and 'assigned_trainer' in self.changed_data:
             new = cleaned.get('assigned_trainer')
             other = coaching_in_the_way(self.instance, new.pk if new else None)
             if other is not None:
                 self.add_error('assigned_trainer', coaching_in_the_way_message(other))
+            elif no_coaching_to_point_at(self.instance, new.pk if new else None):
+                self.add_error('assigned_trainer', no_coaching_message(new))
         return cleaned
 
 class CustomUserCreationForm(UserCreationForm):
@@ -215,10 +259,10 @@ class CustomUserAdmin(UserAdmin):
             'fields': ('assigned_trainer', 'client_goals', 'client_preferences',
                        'training_goal', 'training_place', 'training_days_per_week',
                        'injury_areas'),
-            'description': ('Setting a trainer here writes the pointer only. The '
-                            'relationship, the client\'s consent and the escrow hold '
-                            'live on TrainerClientRelation, and save() below keeps '
-                            'them in step.'),
+            'description': ('The trainer here can only be the trainer of the client\'s '
+                            'running coaching, or empty. A coaching starts in the app '
+                            '(the client asks, the trainer accepts and month 1 is '
+                            'taken); the console never starts or ends one.'),
             'classes': ('collapse',)
         }),
         ('Permissions', {
@@ -278,22 +322,28 @@ class CustomUserAdmin(UserAdmin):
                 end_every_session(obj)
 
     def _save_model(self, request, obj, form, change):
-        """Hash a changed password, and keep the pointer and the relationship in step.
-
-        There were TWO `save_model` definitions in this class body. The second replaced
-        the first, so only the password half ever ran and the consent sync below was
-        dead code — an admin setting `assigned_trainer` wrote the pointer with no
-        relation, no consent and no charge.
+        """Hash a changed password, and keep the pointer in step with the coaching.
 
         `assigned_trainer` is editable here, and every authorization check in the diet
-        app requires BOTH the pointer and an approved `TrainerClientRelation`. Setting
-        the pointer alone produced a client whose app showed a trainer who could not
-        actually do anything, and clearing it left an approved relation behind.
+        app requires BOTH the pointer and an approved `TrainerClientRelation`. The
+        console may only put a stale pointer back in step with the coaching that is
+        running, or clear a pointer no coaching stands behind. It writes no relation:
 
-        A change that would END another approved coaching (a second trainer, or the
-        pointer cleared) is refused and nothing is written: the console cannot settle
-        that coaching's money (`coaching_in_the_way`). Setting the trainer of a coaching
-        already running only puts the pointer back in step.
+        * A change that would END another approved coaching (a second trainer, or the
+          pointer cleared) is refused: the console cannot settle that coaching's money
+          (`coaching_in_the_way`).
+        * A trainer the client has NO approved coaching with — a pending request, a
+          rejected one, or none — is refused (`no_coaching_to_point_at`; the owner,
+          2026-11-24). This saved the relation as `approved`, so an operator's pick
+          started a coaching with no consent from the client and no month taken.
+        * The trainer of the coaching already running: only the pointer is written. The
+          relation is left exactly as it is — its author, its note, the client's «do not
+          renew» and the trainer's «end when this month ends» (S2.7, SIDE_BUGS S-264)
+          are the coaching's, not the console's.
+
+        Refused means `ValidationError` and nothing written; the form refuses the same
+        changes first (`CustomUserChangeForm.clean`), this is the re-check under the
+        lock for a coaching that started or ended since.
         """
         from django.core.exceptions import ValidationError
         from django.db import transaction
@@ -324,28 +374,16 @@ class CustomUserAdmin(UserAdmin):
                 raise ValidationError(coaching_in_the_way_message(
                     TrainerClientRelation.objects.select_related('trainer')
                     .get(pk=in_the_way.pk)))
+            nobody_agreed = no_coaching_to_point_at(obj, obj.assigned_trainer_id,
+                                                    relations=rows)
+            if nobody_agreed is not None:
+                # No consent and no charge: the console never starts a coaching (the
+                # owner, 2026-11-24). Read from the locked rows, so a coaching that
+                # ended since the form was checked is refused too.
+                raise ValidationError(no_coaching_message(nobody_agreed))
+            # The pointer only: cleared with no coaching behind it, or put back in step
+            # with the one running. The relation is not written.
             super().save_model(request, obj, form, change)
-            if not obj.assigned_trainer_id:
-                # Cleared, with no approved coaching: nothing to end.
-                return
-            # An operator's assignment carries nobody's note: `client_note` is read as
-            # the words of whoever `initiated_by` names, so rewriting the author and
-            # keeping the text served the client's own note back to them as the
-            # trainer's (the review of B-093).
-            defaults = {'status': 'approved', 'initiated_by': 'trainer',
-                        'client_note': ''}
-            # Both ends of a coaching belong to the coaching, not to the row: the
-            # client's «do not renew» (S2.7) and the trainer's «end when this month
-            # ends». Cleared when this makes a NEW coaching, kept on one already
-            # running: an operator re-pointing a stale pointer reset the trainer's
-            # scheduled end, the coaching renewed and the client was charged a month
-            # neither side wanted (SIDE_BUGS S-264). Read from the locked row.
-            current = rows.get(obj.assigned_trainer_id)
-            if current is None or current.status != 'approved':
-                defaults['client_stops_renewal'] = False
-                defaults['ends_at_period_end'] = False
-            TrainerClientRelation.objects.update_or_create(
-                trainer_id=obj.assigned_trainer_id, client=obj, defaults=defaults)
 
     def get_queryset(self, request):
         """Optimize queryset with select_related"""
@@ -406,10 +444,11 @@ try:
         with nothing to return it from (`CoachingPeriod.relation` is SET_NULL). A
         relation's money moves only through users/trainer_relations.py and
         users/coaching.py: the request, the answers, the first programme, the monthly
-        run and the two leaving routes. The one console path left that writes a
-        relation is the user form's `assigned_trainer` (`CustomUserAdmin.save_model`):
-        it puts a stale pointer back in step, and refuses anything that would end
-        another coaching (the phase-3 review, round 4, 2026-11-24).
+        run and the two leaving routes. No console path writes a relation: the user
+        form's `assigned_trainer` (`CustomUserAdmin.save_model`) only puts a stale
+        pointer back in step with a running coaching, and refuses anything that would
+        end one (the phase-3 review, round 4) or start one with no consent and no
+        charge (the owner, 2026-11-24).
         """
         list_display = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
                         'hold_reference', 'created_at')

@@ -89,11 +89,37 @@ class OneClientRoutineForm(forms.ModelForm):
     and with no settlement of any coaching month.
 
     Only a client being ADDED is checked: removing clients, renaming or retiring a
-    routine (a legacy shared one included) always saves."""
+    routine (a legacy shared one included) always saves.
+
+    Adding a client is refused, on `assigned_to`, for a routine with no exercise rows (a
+    new routine has none) or one saved as retired: putting a coached client on their
+    first programme pays the trainer month 1, and an empty or retired routine paid it
+    from here as it did from the API (the backlog's G5). The rule and its words are
+    `routine.assignment.refuse_undeliverable`, the API's; the save asks it again under
+    the routine's lock (`OneClientRoutineAdminMixin.save_related`)."""
 
     class Meta:
         model = Routine
         fields = '__all__'
+
+    def _added(self, chosen):
+        current = (set(self.instance.assigned_to.values_list('pk', flat=True))
+                   if self.instance.pk else set())
+        return [c for c in chosen if c.pk not in current]
+
+    def clean(self):
+        from .assignment import RoutineNotDeliverable, refuse_undeliverable
+
+        cleaned = super().clean()
+        chosen = cleaned.get('assigned_to')
+        if chosen is None or not self._added(chosen):
+            return cleaned
+        try:
+            refuse_undeliverable(self.instance.pk,
+                                 is_active=cleaned.get('is_active', self.instance.is_active))
+        except RoutineNotDeliverable as exc:
+            self.add_error('assigned_to', forms.ValidationError(exc.message, code=exc.code))
+        return cleaned
 
     def clean_assigned_to(self):
         from .assignment import trained_by_someone_else
@@ -101,9 +127,7 @@ class OneClientRoutineForm(forms.ModelForm):
         chosen = self.cleaned_data.get('assigned_to')
         if chosen is None:
             return chosen
-        current = (set(self.instance.assigned_to.values_list('pk', flat=True))
-                   if self.instance.pk else set())
-        added = [c for c in chosen if c.pk not in current]
+        added = self._added(chosen)
         if not added:
             return chosen
         if len(chosen) > 1:
@@ -123,7 +147,8 @@ class OneClientRoutineAdminMixin:
     """The console's side of `routine/assignment.py`, for both admin sites: one client
     per routine; an edited name or description clears its stale translation; and a
     client added here settles the coaching's first month, as the API's assignment does —
-    a first program assigned by staff left the trainer unpaid."""
+    a first program assigned by staff left the trainer unpaid — and only for a routine
+    the API would assign: one with exercises, not retired (G5)."""
     form = OneClientRoutineForm
 
     def save_model(self, request, obj, form, change):
@@ -133,12 +158,24 @@ class OneClientRoutineAdminMixin:
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
-        from .assignment import settle_first_month
+        """Settle month 1 for each client this save added — after `lock_deliverable`
+        has applied the API's G5 rule to the routine under its lock. The form refuses an
+        empty or retired routine on `assigned_to`; a routine emptied or retired after the
+        form was checked raises here, and the admin's transaction undoes the whole save
+        (no client added, no ledger row, month 1 still held)."""
+        from django.db import transaction
+
+        from .assignment import lock_deliverable, settle_first_month
 
         routine = form.instance
         before = set(routine.assigned_to.values_list('pk', flat=True))
         super().save_related(request, form, formsets, change)
-        for client in routine.assigned_to.exclude(pk__in=before):
+        added = list(routine.assigned_to.exclude(pk__in=before))
+        if not added:
+            return
+        with transaction.atomic():
+            lock_deliverable(routine)
+        for client in added:
             settle_first_month(routine.created_by, client)
 
 

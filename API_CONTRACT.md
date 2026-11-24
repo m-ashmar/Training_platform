@@ -1893,7 +1893,7 @@ The flags are enforced by the server, not only rendered by the app:
 | `code` | Status | When |
 |---|---|---|
 | `app_channel_required` | 400 | The capabilities endpoint, or any endpoint that opens a checkout or moves wallet money, called without a known `X-App-Channel` |
-| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/subscriptions/{id}/pay-from-wallet/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
+| `not_available_on_channel` | 403 | `POST v1/subscriptions/` (paid plan), `POST v1/subscriptions/{id}/change-plan/` (paid plan), `GET`/`POST v1/subscriptions/{id}/upgrade/`, `POST v1/subscriptions/{id}/renew/`, `POST v1/subscriptions/{id}/pay-from-wallet/`, `POST v1/subscriptions/{id}/upgrade/pay-from-wallet/`, `POST v1/gateways/`, `POST wallet/client/transfer/`, `POST wallet/agent/topup/proxy`, and asking or accepting a trainer who charges, from a build whose flag for that kind of money is off |
 
 On a build with `can_show_prices: false` the plan endpoints omit `price`, `subscriptions/current/`
 omits `plan_price` and the four conversion keys beside it (`price_converted`,
@@ -1912,7 +1912,7 @@ from `kind`.
 **A plan paid from the wallet** (Road to 10 S2.13, the owner's D19 of 2026-11-22). On a
 build that may sell a plan (`apk`, `web`) `GET v1/gateways/` also answers
 `can_pay_from_wallet: true` and `wallet: {name: "wallet", display_name, available: true,
-kind: "wallet", balance, currency, pay_path}` (the caller's balance, in their currency),
+kind: "wallet", balance, currency, pay_path, upgrade_path}` (the caller's balance, in their currency),
 beside the gateways — never in `gateways`, and `can_pay`/`reason` still speak of the
 gateways only; on the others `can_pay_from_wallet: false`, `wallet: null`. Sell a plan
 when `can_pay` or `can_pay_from_wallet`. `POST v1/subscriptions/{id}/pay-from-wallet/`
@@ -1930,7 +1930,30 @@ minutes of a wallet payment of that subscription is 409 `already_paid` (`payment
 running), `checkout_open` (a ShamCash checkout is open), `already_paid`, `exchange_rate_stale` /
 `exchange_rate_missing`, `price_changed` (`expected_amount`, `expected_currency`), 402
 `insufficient_balance` (`required`, `balance`, `currency`), `purchase_refused`,
-`throttled`. A refund puts the amount back in the wallet.
+`throttled`, 422 `idempotency_key_reused` (`payment_id`: the key already paid an upgrade
+from the wallet). `already_paid` counts a wallet upgrade too. A refund puts the amount
+back in the wallet.
+
+**An upgrade paid from the wallet** (the owner, 2026-11-24; `apk` and `web` only, like
+every plan purchase). `GET v1/subscriptions/{id}/upgrade/?plan_id=&gateway=wallet` quotes
+it by the upgrade rule below, with no gateway minimum (anything above nothing is
+payable). `POST v1/subscriptions/{id}/upgrade/pay-from-wallet/` (the wallet's
+`upgrade_path`) `{plan_id, idempotency_key, amount, currency}` (all required: the key made
+once per Review screen, and the exact `to_pay` the person saw) takes that difference out
+of the wallet for the platform (100%) and completes the payment at once: the new plan
+starts now for its full length, method `wallet`, `kind: "upgrade"`, an invoice, the
+receipt, `payment_confirmed`. It answers what `pay-from-wallet/` answers plus `upgrade`
+(the quote it was struck at). The same key again answers the same payment (`replayed:
+true`); a key that paid something else is 422 `idempotency_key_reused` (`payment_id`);
+a second tap with a fresh key finds the plan switched (`not_an_upgrade` /
+`price_changed`); a retry with the key of an upgrade already paid is answered with it even
+once the plan is off sale. While a ShamCash upgrade to the same plan is open, the wallet
+quote answers that checkout's figure with its `payment_id` and the POST answers
+`checkout_open`. Other codes: `invalid_plan`, `no_running_cover`,
+`upgrade_not_payable`, `checkout_open`, `exchange_rate_stale` / `exchange_rate_missing`,
+402 `insufficient_balance`, `purchase_refused`, `throttled`; `play`/`ios`: 403
+`not_available_on_channel`. A refund puts exactly the amount paid back in the wallet and
+takes back the part of the new plan's period that money bought.
 
 Additive fields:
 `money_type` on payments and wallet transactions (`PLATFORM_SUB`, `COACHING_1TO1`,
@@ -2550,6 +2573,9 @@ field and code; in short:
   payment at what it cost × its share of the WHOLE days left ÷ the period it bought (the
   day under way is used), so `to_pay` holds for a day at a time. While an upgrade to the
   same plan is open, `GET` answers ITS quote with `payment_id`.
+- `GET ...upgrade/?plan_id=&gateway=wallet` is the same quote for paying from the wallet
+  (no gateway minimum), paid at `POST ...upgrade/pay-from-wallet/` (see "An upgrade paid
+  from the wallet"); `"gateway": "wallet"` on this POST is `503 gateway_unavailable`.
 - `POST` the same path `{plan_id, gateway?, amount?, currency?}` opens the checkout for
   `to_pay` and answers what `POST v1/gateways/` answers plus `upgrade` (the quote it was
   struck at). When it clears the credit is re-read and the new plan starts, running for
@@ -3986,6 +4012,7 @@ delivered, and is handed back.
 | `POST` | `/api/subscription/v1/subscriptions/{id}/change-plan/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/pay-from-wallet/` | auth | `SubscriptionViewSet` |
 | `GET, POST` | `/api/subscription/v1/subscriptions/{id}/upgrade/` | auth | `SubscriptionViewSet` |
+| `POST` | `/api/subscription/v1/subscriptions/{id}/upgrade/pay-from-wallet/` | auth | `SubscriptionViewSet` |
 | `POST` | `/api/subscription/v1/subscriptions/{id}/renew/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/subscriptions/{id}/usage/` | auth | `SubscriptionViewSet` |
 | `GET` | `/api/subscription/v1/usage/` | auth | `SubscriptionUsageViewSet` |

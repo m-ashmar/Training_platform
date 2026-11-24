@@ -25,6 +25,7 @@ from django.utils import timezone
 from tests.test_backend_bugs_app_0923b import _plan
 from tests.test_fx_subs import WEBHOOK_SECRET, _checkout, _paid, _person, _post, _subscribe, shamcash  # noqa: F401
 from tests.test_payment_review import _account, _open_checkout, _poll, _txn
+from tests.routine_rows import deliverable_routine
 
 pytestmark = pytest.mark.django_db
 
@@ -524,7 +525,9 @@ def test_month_one_held_then_paid_out_tells_both_people(
     _states_the_fact_only(to_client)
     assert not _fee(client, "coaching_fee_released")
 
-    routine = Routine.objects.create(name="Month one", created_by=trainer, days=3)
+    # G5 (2026-11-24): an empty routine no longer pays month 1, so the first
+    # programme has an exercise, as a real one does (tests/routine_rows.py).
+    routine = deliverable_routine(trainer)
     with django_capture_on_commit_callbacks(execute=True):
         sent = api(trainer).post(f"/api/routine/routines/{routine.pk}/assign_to_client/",
                                  {"client_id": client.pk}, content_type=JSON)

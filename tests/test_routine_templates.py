@@ -231,7 +231,10 @@ def test_a_routine_someone_trained_on_is_not_handed_to_the_next_client(make_user
     from routine.models import Routine, WorkoutSession
 
     trainer, first, _r = _accepted(make_user, api, "rt_hand_a")
-    routine = Routine.objects.create(name="Handed", created_by=trainer, days=1)
+    # G5 (2026-11-24): an empty routine is refused before this test's question
+    # (routine_empty), so the handed-on routine has an exercise.
+    from tests.routine_rows import deliverable_routine
+    routine = deliverable_routine(trainer, "Handed", days=1)
     routine.assigned_to.add(first)
     WorkoutSession.objects.create(user=first, routine=routine, day=1)
     routine.assigned_to.remove(first)

@@ -2577,6 +2577,11 @@ msgstr "اجعل هذا في حدود %(n)s حرفاً."
 msgid "This routine has been retired."
 msgstr "تم إيقاف هذا البرنامج."
 
+#. `routine_empty` (G5): a routine with no exercises cannot be assigned, and so cannot
+#. pay the trainer the coaching's first month.
+msgid "This routine has no exercises yet. Add exercises before assigning it."
+msgstr "لا يحتوي هذا البرنامج على تمارين بعد. أضف تمارين قبل إسناده."
+
 #: routine/serializers.py
 #, python-format
 msgid "Day %(day)s has no exercises."
@@ -6246,6 +6251,19 @@ msgstr ""
 "لدى هذا العميل تدريب جارٍ مع %(name)s. لتغيير المدرب أنهِه أولاً: ينهيه المدرب "
 "أو العميل من التطبيق، فيُعاد أي مبلغ محجوز له. ولإعادة حقل المدرب إلى ما "
 "يطابقه، اختر %(name)s."
+
+#. The operator console refuses to start a coaching (the owner, 2026-11-24): no
+#. client consent and no charge happen there.
+msgid ""
+"This client has no running coaching with %(name)s, and the console cannot "
+"start one: a coaching begins in the app, when the client asks and the trainer "
+"accepts, which takes the first month if the trainer charges. Here you can only "
+"choose the trainer of the client's running coaching, or leave the field empty."
+msgstr ""
+"ليس لدى هذا العميل تدريب جارٍ مع %(name)s، ولا تستطيع لوحة التحكم بدء تدريب: "
+"يبدأ التدريب من التطبيق عندما يطلبه العميل ويقبله المدرب، فيُخصم الشهر الأول "
+"إن كان المدرب يتقاضى أجراً. يمكنك هنا فقط اختيار مدرب التدريب الجاري لهذا "
+"العميل، أو ترك الحقل فارغاً."
 
 #. `subscription_expired` on a build that may not sell the plan (Road to 10 R1).
 #: notifications/domain/subscription_events.py

@@ -22,11 +22,14 @@ def _each_subscription_under_lock(request, queryset, message, change):
     """
     from django.db import transaction
 
+    from .services.payment_service import lock_subscription
+
     count = 0
     for pk in queryset.values_list('pk', flat=True):
         with transaction.atomic():
-            subscription = (Subscription.objects.select_for_update(of=('self',))
-                            .select_related('plan').get(pk=pk))
+            # The row alone (`lock_subscription`): joined to its plan, a lock that
+            # waited on an upgrade lost the row when the plan switched.
+            subscription = lock_subscription(pk)
             fields = change(subscription)
             subscription.save(update_fields=[*fields, 'updated_at'])
         log_admin_action(request, subscription, message)

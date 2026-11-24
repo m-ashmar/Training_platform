@@ -186,6 +186,16 @@ def _upgrade_payload_from_record(payment, record):
     }
 
 
+def _key_reused(exc):
+    """422 `idempotency_key_reused`: the caller's own key already paid something else
+    (`payment_id`). The code and status the wallet and the program sales answer for the
+    same fact (wallet/views.py); nothing moved, and a new key is the way on."""
+    return Response({'error': _("This idempotency key was already used for a different "
+                                "request."),
+                     'code': 'idempotency_key_reused', 'payment_id': str(exc.payment.id)},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
 def _checkout_open(payment):
     """409 `checkout_open`: another checkout of this subscription is open — an upgrade,
     or a payment a person is checking — and it is not this button's to hand back.
@@ -212,7 +222,38 @@ def _wallet_way_to_pay(user) -> dict:
             'kind': 'wallet',
             'balance': str(wallet.balance) if wallet is not None else '0.00',
             'currency': currency,
-            'pay_path': '/api/subscription/v1/subscriptions/{id}/pay-from-wallet/'}
+            'pay_path': '/api/subscription/v1/subscriptions/{id}/pay-from-wallet/',
+            'upgrade_path': '/api/subscription/v1/subscriptions/{id}/upgrade/pay-from-wallet/'}
+
+
+def _wallet_payment_body(request, payment) -> dict:
+    """What a payment paid from the wallet answers (`pay-from-wallet/`,
+    `upgrade/pay-from-wallet/`): the payment, its receipt, the ledger row, the wallet
+    now and the subscription it paid for."""
+    from wallet.models import Wallet
+
+    sub = payment.subscription
+    wallet = Wallet.objects.filter(owner=request.user).first()
+    return {
+        'payment_id': str(payment.id), 'status': payment.status,
+        'replayed': bool(getattr(payment, 'replayed', False)),
+        'kind': (payment.metadata or {}).get('kind') or 'initial',
+        'payment_method': payment.payment_method, 'money_type': payment.money_type,
+        'amount': str(payment.amount), 'currency': payment.currency,
+        'price_of_record': (str(payment.price_amount)
+                            if payment.exchange_rate_id else None),
+        'price_of_record_currency': (payment.price_currency
+                                     if payment.exchange_rate_id else None),
+        'exchange_rate': (str(payment.exchange_rate_value)
+                          if payment.exchange_rate_id else None),
+        'invoice_number': payment.invoice_number, 'completed_at': payment.completed_at,
+        'receipt_url': f"/api/subscription/v1/payments/{payment.id}/receipt/",
+        'wallet_reference': (payment.metadata or {}).get('wallet_reference'),
+        'balance': str(wallet.balance) if wallet is not None else '0.00',
+        'subscription': {'id': str(sub.id), 'status': sub.status,
+                         'plan_id': sub.plan_id, 'start_date': sub.start_date,
+                         'end_date': sub.end_date},
+    }
 
 
 def gateway_state(gateway_name):
@@ -241,13 +282,13 @@ def review_of(payment):
 
 
 def _locked_subscription(pk):
-    """The subscription row under `SELECT ... FOR UPDATE`, for a write that must not race.
+    """The subscription row under `SELECT ... FOR UPDATE`, for a write that must not race:
+    the row alone, as every lock of a subscription takes it
+    (`services.payment_service.lock_subscription`: a lock with the plan joined lost its
+    row when it waited on an upgrade that switched the plan)."""
+    from .services.payment_service import lock_subscription
 
-    `of=('self',)`: without it the lock reaches through `select_related` to the plan row,
-    and every subscriber on a plan would queue behind every other one.
-    """
-    return (Subscription.objects.select_for_update(of=('self',))
-            .select_related('plan').get(pk=pk))
+    return lock_subscription(pk)
 
 
 def move_plan_while_idle(subscription_pk, plan):
@@ -745,18 +786,17 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         | 400 | `payment_not_required` | the plan is free |
         | 409 | `subscription_active` | a trial is running (as `POST v1/gateways/` answers it) |
         | 409 | `checkout_open` | a ShamCash checkout of this subscription is open — the caller may be paying it now; `payment_id`, `status`, `expires_at` |
-        | 409 | `already_paid` | this subscription was paid from the wallet within the last 10 minutes under another key; `payment_id` (its receipt), `end_date` (the cover it bought) |
+        | 409 | `already_paid` | this subscription was paid from the wallet within the last 10 minutes under another key — an upgrade from the wallet included; `payment_id` (its receipt), `end_date` (the cover it bought) |
+        | 422 | `idempotency_key_reused` | the key already paid an upgrade of this subscription (`upgrade/pay-from-wallet/`); `payment_id` (that payment). Nothing moved; make a new key |
         | 409 | `exchange_rate_stale` / `exchange_rate_missing` | the plan is priced in the other currency and the operator's rate is too old / was never set |
         | 409 | `price_changed` | the quoted `amount`/`currency` is not what this would charge; `expected_amount`, `expected_currency` |
         | 402 | `insufficient_balance` | the wallet holds less than the price: `required` (the price), `balance` (the wallet), `currency` (both are in it). Nothing was written; top up and try again with the same key |
         | 400 | `purchase_refused` | the ledger refused the movement for another reason; nothing moved |
         | 429 | `throttled` | the rate limiter (`Retry-After`) |
         """
-        from wallet.models import Wallet
-
         from .serializers import WalletPaySerializer
-        from .services.payment_service import (AlreadyPaid, NothingToPay, QuoteMismatch,
-                                               WalletShort)
+        from .services.payment_service import (AlreadyPaid, IdempotencyKeyReused,
+                                               NothingToPay, QuoteMismatch, WalletShort)
 
         # FIRST: a build that may not sell plans is told so whatever it sent.
         require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
@@ -789,6 +829,8 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                              'code': 'already_paid', 'payment_id': str(exc.payment.id),
                              'end_date': exc.payment.subscription.end_date},
                             status=status.HTTP_409_CONFLICT)
+        except IdempotencyKeyReused as exc:
+            return _key_reused(exc)
         except SubscriptionAlreadyActive:
             return Response({'error': _('Your trial is still running.'),
                              'code': 'subscription_active'},
@@ -806,28 +848,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                              'code': 'purchase_refused'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        sub = payment.subscription
-        wallet = Wallet.objects.filter(owner=request.user).first()
-        return Response({
-            'payment_id': str(payment.id), 'status': payment.status,
-            'replayed': bool(getattr(payment, 'replayed', False)),
-            'kind': (payment.metadata or {}).get('kind') or 'initial',
-            'payment_method': payment.payment_method, 'money_type': payment.money_type,
-            'amount': str(payment.amount), 'currency': payment.currency,
-            'price_of_record': (str(payment.price_amount)
-                                if payment.exchange_rate_id else None),
-            'price_of_record_currency': (payment.price_currency
-                                         if payment.exchange_rate_id else None),
-            'exchange_rate': (str(payment.exchange_rate_value)
-                              if payment.exchange_rate_id else None),
-            'invoice_number': payment.invoice_number, 'completed_at': payment.completed_at,
-            'receipt_url': f"/api/subscription/v1/payments/{payment.id}/receipt/",
-            'wallet_reference': (payment.metadata or {}).get('wallet_reference'),
-            'balance': str(wallet.balance) if wallet is not None else '0.00',
-            'subscription': {'id': str(sub.id), 'status': sub.status,
-                             'plan_id': sub.plan_id, 'start_date': sub.start_date,
-                             'end_date': sub.end_date},
-        })
+        return Response(_wallet_payment_body(request, payment))
 
     @action(detail=True, methods=['post'], url_path='change-plan')
     def change_plan(self, request, pk=None):
@@ -944,6 +965,15 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         Every amount is in the caller's currency. `days_left` counts whole days (the
         day under way is used), so `to_pay` holds for a day at a time.
 
+        `GET ?plan_id=<int>&gateway=wallet` — the same quote for paying FROM THE WALLET
+        (the owner, 2026-11-24): no gateway, so no gateway minimum — any difference above
+        nothing is payable. Pay it at `POST upgrade/pay-from-wallet/` (the wallet's
+        `upgrade_path` in `GET v1/gateways/`), never through this POST: `"gateway":
+        "wallet"` here is `503 gateway_unavailable`. While a ShamCash upgrade to the same
+        plan is open, this GET answers THAT checkout's quote with its `payment_id`, as
+        below, and the wallet's POST answers `409 checkout_open`: the customer may be
+        transferring against it.
+
         `POST {"plan_id": <int>, "gateway": "shamcash", "amount": "14000.00",
         "currency": "SYP"}` — opens the checkout for `to_pay`. `gateway` defaults to
         `shamcash`. `amount`/`currency` are optional: the figure the app showed, held to
@@ -994,7 +1024,10 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
                             status=status.HTTP_400_BAD_REQUEST)
         gateway_name = params.get('gateway') or 'shamcash'
-        if not _gateway_known(gateway_name):
+        # The wallet's quote (GET only): priced by the same rule, with no gateway and so
+        # no gateway minimum. It is paid at `upgrade/pay-from-wallet/`.
+        wallet_quote = request.method == 'GET' and gateway_name == 'wallet'
+        if not wallet_quote and not _gateway_known(gateway_name):
             # Before anything is priced: the quote reads this gateway's minimum, and an
             # unknown name raised there and answered 500 (the review, U9).
             return Response({'error': _('That payment method is not available right now.'),
@@ -1017,7 +1050,7 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         else:
             try:
                 quote = quote_upgrade(subscription, plan, buyer_currency=buyer_currency,
-                                      gateway_name=gateway_name)
+                                      gateway_name=None if wallet_quote else gateway_name)
             except UpgradeRefused as exc:
                 return _upgrade_refusal(exc)
             except ExchangeRateUnavailable as exc:
@@ -1116,6 +1149,148 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
             # What this checkout was struck at: the quote as it was when it opened.
             'upgrade': (payment.quote.as_payload() if getattr(payment, 'quote', None)
                         else _upgrade_payload_from_record(payment, record)),
+        })
+
+    @action(detail=True, methods=['post'], url_path='upgrade/pay-from-wallet',
+            throttle_classes=[ChargingRateThrottle])
+    def upgrade_from_wallet(self, request, pk=None):
+        """Pay an upgrade's difference from the caller's own wallet, at once (the owner,
+        2026-11-24) — the Upgrade screen's «ادفع من محفظتك».
+
+        `POST`, authenticated, the subscription's owner only. Headers: `X-App-Channel`
+        (required — it moves money), `X-App-Version`. Body (JSON), every field required:
+        `{"plan_id": <int>, "idempotency_key": "<1-64 chars, made once per Review
+        screen>", "amount": "13333.33", "currency": "SYP"}` — `amount`/`currency` are the
+        `to_pay` the Review screen showed, from `GET upgrade/?plan_id=&gateway=wallet`
+        (the money is taken at once, so the person must have seen the exact figure); a
+        mismatch is a 409, never a charge at either figure.
+
+        The SAME upgrade as `upgrade/` sells through ShamCash: only a dearer plan, while a
+        plan runs; the whole days left credited and taken off the new plan's price; the
+        new plan starting now and running its full length; a refund taking back exactly
+        what this money bought. The difference — the new plan's price of record in the
+        caller's currency (converted at the operator's rate when the two differ, the rate
+        snapshotted), minus the credit — leaves the wallet for the platform (100% of a
+        plan stays with the platform), and the payment is `completed` in the same step:
+        invoiced, a receipt like any plan payment (`GET payments/{payment_id}/receipt/`,
+        method `wallet`), the receipt email and the `payment_confirmed` push. A refund puts
+        the same amount back in the wallet. Unlike a checkout there is no gateway
+        minimum.
+
+        The same `idempotency_key` again answers the SAME payment (200, `replayed: true`)
+        and moves nothing. A second tap with a FRESH key finds the plan already switched
+        and is refused (`not_an_upgrade` or `price_changed`), so it cannot take the
+        difference twice.
+
+        200: what `pay-from-wallet/` answers (`payment_id`, `status: "completed"`,
+        `replayed`, `kind: "upgrade"`, `payment_method: "wallet"`, `money_type`,
+        `amount`, `currency`, `price_of_record`, `price_of_record_currency`,
+        `exchange_rate`, `invoice_number`, `completed_at`, `receipt_url`,
+        `wallet_reference`, `balance`, `subscription`), plus `upgrade`: the quote it was
+        struck at, as `GET upgrade/` draws it (`from_plan`, `to_plan`, `currency`,
+        `new_price`, `credit`, `to_pay`, `days_left`, `starts`).
+
+        **Differs by build, and by nothing else.** Only a build that may sell a plan
+        (`apk`, `web`) gets past the first line: `play` and `ios` are refused by the check
+        that locks every plan purchase there (`require_purchase_allowed(PLATFORM_SUB)`).
+
+        | Status | `code` | When |
+        |---|---|---|
+        | 400 | `app_channel_required` | no known `X-App-Channel` |
+        | 403 | `not_available_on_channel` | this build may not sell plans (`play`, `ios`) |
+        | 400 | `validation_error` | `plan_id`, `idempotency_key`, `amount` or `currency` missing or malformed (`field_errors`) |
+        | 404 | `not_found` | not the caller's subscription |
+        | 400 | `invalid_plan` | `plan_id` names no active plan (a retry with the key of an upgrade already paid is still answered with that payment) |
+        | 409 | `no_running_cover` | nothing is running: use `change-plan/`, then Pay |
+        | 409 | `not_an_upgrade` | the plan does not cost more than the running one (or a tap just switched to it) |
+        | 409 | `upgrade_not_payable` | the credit covers the new price; `to_pay` (`0.00`) and `minimum` (null) |
+        | 409 | `checkout_open` | a ShamCash checkout of this subscription is open — the caller may be paying it now; `payment_id`, `status`, `expires_at` |
+        | 409 | `price_changed` | the quoted `amount`/`currency` is not what this would charge, or the plan moved; `expected_amount`, `expected_currency` |
+        | 422 | `idempotency_key_reused` | the key already paid something else on this subscription; `payment_id` (that payment). Nothing moved; make a new key |
+        | 409 | `exchange_rate_stale` / `exchange_rate_missing` | a price has to cross currencies and the operator's rate is too old / was never set |
+        | 402 | `insufficient_balance` | the wallet holds less than `to_pay`: `required`, `balance`, `currency`. Nothing was written; top up and try again with the same key |
+        | 400 | `purchase_refused` | the ledger refused the movement for another reason; nothing moved |
+        | 429 | `throttled` | the rate limiter (`Retry-After`) |
+        """
+        from .serializers import WalletUpgradeSerializer
+        from .services.payment_service import (IdempotencyKeyReused, PlanNotOnSale,
+                                               WalletShort)
+
+        # FIRST: a build that may not sell plans is told so whatever it sent.
+        require_purchase_allowed(request, MoneyType.PLATFORM_SUB)
+        body = WalletUpgradeSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+        subscription = self.get_object()
+        # Whether it is on sale is the service's question, AFTER the replay: a retry of
+        # an upgrade already paid is answered with its payment even once the plan is
+        # off sale (`PlanNotOnSale` otherwise).
+        plan = SubscriptionPlan.objects.filter(pk=data['plan_id']).first()
+        if plan is None:
+            return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        def _price_changed(amount, currency):
+            return Response(
+                {'error': _('The price has changed. Please refresh and try again.'),
+                 'code': 'price_changed',
+                 'expected_amount': str(amount), 'expected_currency': currency},
+                status=status.HTTP_409_CONFLICT)
+
+        try:
+            payment = PaymentService.pay_upgrade_from_wallet(
+                subscription, plan, idempotency_key=data['idempotency_key'],
+                quote=(data['amount'], data['currency']),
+                # Read above without the lock: the plan the screen's quote was struck on.
+                expected_from_plan_id=subscription.plan_id,
+                by=By.CUSTOMER, actor=request.user, evidence=_opened_from(request))
+        except WalletShort as exc:
+            return Response({'error': _('Your wallet balance is not enough for this plan.'),
+                             'code': 'insufficient_balance',
+                             'required': str(exc.required), 'balance': str(exc.balance),
+                             'currency': exc.currency},
+                            status=status.HTTP_402_PAYMENT_REQUIRED)
+        except UpgradePriceMoved as exc:
+            return _price_changed(exc.quote.to_pay, exc.quote.currency)
+        except PlanChanged:
+            # The row moved under this call (another tap or device upgraded it). The
+            # figure to show is what THIS upgrade costs from where it is now, or why it
+            # cannot be had — as `upgrade/` answers it.
+            fresh = Subscription.objects.select_related('plan').get(pk=subscription.pk)
+            try:
+                again = quote_upgrade(fresh, plan, buyer_currency=wallet_currency_for(
+                    request.user))
+            except UpgradeRefused as exc:
+                return _upgrade_refusal(exc)
+            except ExchangeRateUnavailable as exc:
+                return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+            return _price_changed(again.to_pay, again.currency)
+        except CheckoutOpen as exc:
+            return _checkout_open(exc.payment)
+        except IdempotencyKeyReused as exc:
+            return _key_reused(exc)
+        except PlanNotOnSale:
+            return Response({'error': _('Invalid or inactive plan'), 'code': 'invalid_plan'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except UpgradeRefused as exc:
+            return _upgrade_refusal(exc)
+        except ExchangeRateUnavailable as exc:
+            return Response(refusal_body(exc), status=status.HTTP_409_CONFLICT)
+        except ValueError as exc:
+            # The ledger's own refusals (a currency it will not cross). Logged, never
+            # shown: nothing moved.
+            logger.warning("Wallet upgrade for subscription %s refused by the ledger: %s",
+                           subscription.id, exc)
+            return Response({'error': _('The payment could not be made. Nothing was taken.'),
+                             'code': 'purchase_refused'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        quote = getattr(payment, 'quote', None)
+        return Response({
+            **_wallet_payment_body(request, payment),
+            'upgrade': (quote.as_payload() if quote is not None
+                        else _upgrade_payload_from_record(
+                            payment, (payment.metadata or {}).get('upgrade') or {})),
         })
 
     @action(detail=False, methods=['get'])

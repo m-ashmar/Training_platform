@@ -437,6 +437,13 @@ class WalletPaySerializer(serializers.Serializer):
     currency = serializers.CharField(max_length=3, min_length=3)
 
 
+class WalletUpgradeSerializer(WalletPaySerializer):
+    """`POST subscriptions/{id}/upgrade/pay-from-wallet/` (the owner, 2026-11-24): the
+    same three fields, `amount` / `currency` being the upgrade's `to_pay` the Review
+    screen showed, and `plan_id`, the dearer plan."""
+    plan_id = serializers.IntegerField(min_value=1)
+
+
 class SubscriptionCancelSerializer(serializers.Serializer):
     """Serializer for cancelling subscriptions"""
     reason = serializers.CharField(max_length=500, required=False)
