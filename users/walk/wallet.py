@@ -237,3 +237,19 @@ def agent_key_paired_elsewhere(walk):
                  {"device_name": "Samsung A54"})
     walk.ids(key=paired["key_id"], paired_device="Samsung A54")
 
+
+# ------------------------------------------------------------------ 8. 9. client wallets
+@state("client_wallet_short_of_coach", area="wallet", role="client",
+       summary="A client whose wallet holds less than a trainer's month: asking that "
+               "trainer is refused for the balance.")
+def client_wallet_short_of_coach(walk):
+    trainer = coach(walk)
+    funded_client(walk, amount="10000")
+    walk.ids(trainer=trainer.pk, rate=f"{COACH_RATE:.2f}")
+
+
+@state("client_wallet_untouched", area="wallet", role="client",
+       summary="A new client whose wallet was never topped up: nothing in it and no "
+               "currency chosen yet.")
+def client_wallet_untouched(walk):
+    walk.account(role="client")

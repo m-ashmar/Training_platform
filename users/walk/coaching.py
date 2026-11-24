@@ -245,3 +245,45 @@ def plan_renewal_due(walk):
     send_renewal_reminders()
     walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id)
 
+
+# ------------------------------------------------------------------ 6. before a coaching
+@state("client_request_waiting", area="coaching", role="client",
+       summary="A client whose request to a trainer is waiting for the trainer's answer "
+               "(the quote shown; the fee is held only once the trainer accepts).")
+def client_request_waiting(walk):
+    trainer = coach(walk)
+    client = funded_client(walk, amount=COACH_RATE + 5000)
+    relation = ask_for(client, trainer)
+    walk.ids(trainer=trainer.pk, request=relation.pk)
+
+
+@state("client_awaiting_first_program", area="coaching", role="client",
+       summary="A client the trainer accepted: month 1 held, the first programme not "
+               "sent yet.")
+def client_awaiting_first_program(walk):
+    trainer, client, relation, _routine = coached(walk, funds=COACH_RATE + 5000,
+                                                  deliver=False)
+    walk.ids(trainer=trainer.pk, relation=relation.pk)
+
+
+@state("client_invited_by_coach", area="coaching", role="client",
+       summary="A client a trainer invited, at the trainer's price; the wallet covers it.")
+def client_invited_by_coach(walk):
+    from users.models import TrainerClientRelation
+
+    trainer = coach(walk)
+    client = funded_client(walk, amount=COACH_RATE + 5000)
+    api(trainer, "post", "/api/auth/trainer/assign-client/",
+        {"client_id": client.pk, "message": "أهلاً! أنا مدرّبك المقترح لبرنامج القوة."})
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client)
+    walk.ids(trainer=trainer.pk, request=relation.pk)
+
+
+# ------------------------------------------------------------------ 7. a plan in reach
+@state("client_wallet_covers_plan", area="coaching", role="client",
+       summary="A client with no plan whose wallet covers the cheapest plan exactly.")
+def client_wallet_covers_plan(walk):
+    plan = cheapest_plan()
+    client = walk.account(role="client")
+    top_up(agent(walk), client, plan_price(plan, client).amount)
+    walk.ids(plan=plan.pk)

@@ -183,3 +183,65 @@ def test_agent_key_paired_elsewhere(api, django_capture_on_commit_callbacks):
     assert _code(here) == (409, "key_paired_elsewhere"), here.content
     assert here.json()["device_name"] == "Samsung A54"
 
+
+# ------------------------------------------------------------------ 6. before a coaching
+def _balance(api, me):
+    return api(me).get("/api/wallet/balance/").json()
+
+
+def test_client_request_waiting(api, django_capture_on_commit_callbacks):
+    entry, me = _build("client_request_waiting", django_capture_on_commit_callbacks)
+    status = api(me).get("/api/auth/client/request-status/").json()
+    [row] = [r for r in status["requests"] if r["trainer_id"] == entry["ids"]["trainer"]]
+    assert row["status"] == "pending" and Decimal(str(row["agreed_rate"])) == Decimal("40000")
+    wallet = _balance(api, me)
+    assert Decimal(str(wallet["balance"])) == Decimal("45000.00")   # nothing held yet
+    assert Decimal(str(wallet["held"] or 0)) == 0
+
+
+def test_client_awaiting_first_program(api, django_capture_on_commit_callbacks):
+    entry, me = _build("client_awaiting_first_program", django_capture_on_commit_callbacks)
+    coaching = api(me).get("/api/v1/coaching/current/").json()["coaching"]
+    assert coaching["status"] == "awaiting_first_program"
+    assert coaching["trainer_id"] == entry["ids"]["trainer"]
+    wallet = _balance(api, me)
+    assert Decimal(str(wallet["balance"])) == Decimal("5000.00")
+    assert Decimal(str(wallet["held"])) == Decimal("40000.00")
+
+
+def test_client_invited_by_coach(api, django_capture_on_commit_callbacks):
+    entry, me = _build("client_invited_by_coach", django_capture_on_commit_callbacks)
+    invites = api(me).get("/api/auth/client/trainer-invites/").json()["invitations"]
+    [row] = invites
+    assert (row["request_id"], row["trainer_id"]) == (entry["ids"]["request"],
+                                                      entry["ids"]["trainer"])
+    assert Decimal(str(row["agreed_rate"])) == Decimal("40000") and row["note"]
+
+
+# ------------------------------------------------------------------ 7. 8. 9. wallets
+def test_client_wallet_covers_plan(api, django_capture_on_commit_callbacks, platform):
+    _entry, me = _build("client_wallet_covers_plan", django_capture_on_commit_callbacks)
+    current = api(me).get("/api/subscription/v1/subscriptions/current/")
+    assert current.status_code == 404 or not current.json().get("id"), current.content
+    gateways = api(me).get("/api/subscription/v1/gateways/").json()
+    assert gateways["can_pay_from_wallet"] is True
+    assert Decimal(gateways["wallet"]["balance"]) == platform.price
+
+
+def test_client_wallet_short_of_coach(api, django_capture_on_commit_callbacks):
+    entry, me = _build("client_wallet_short_of_coach", django_capture_on_commit_callbacks)
+    assert Decimal(str(_balance(api, me)["balance"])) == Decimal("10000.00")
+    asked = api(me).post("/api/auth/client/request-trainer/",
+                         {"trainer_id": entry["ids"]["trainer"]}, content_type=JSON)
+    assert _code(asked) == (402, "insufficient_balance"), asked.content
+    assert Decimal(str(asked.json()["required"])) == Decimal("40000")
+
+
+def test_client_wallet_untouched(api, django_capture_on_commit_callbacks):
+    from wallet.models import Wallet
+
+    _entry, me = _build("client_wallet_untouched", django_capture_on_commit_callbacks)
+    wallet = _balance(api, me)
+    assert Decimal(str(wallet["balance"])) == 0 and wallet["currency_locked"] is False
+    assert wallet["currency_options"]
+    assert not Wallet.objects.filter(owner=me, currency_chosen_at__isnull=False).exists()
