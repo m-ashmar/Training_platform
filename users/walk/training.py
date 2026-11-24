@@ -186,11 +186,19 @@ def programme(trainer, client, *, start, weeks=9, name_ar="برنامج القو
     return routine
 
 
-def train(client, routine, day, on_date, *, every_set=True):
+def train(client, routine, day, on_date, *, every_set=True, finished_now=False):
     """One workout of `routine`'s `day` on `on_date`, logged as the phone logs it (a
     session, its sets, the day's progress), then the day closed from the session
     (`record_day_quietly`, `via="session"`). `every_set=False` leaves the last set of
-    each exercise out: the day closes `short`."""
+    each exercise out: the day closes `short`.
+
+    `finished_now=True` finishes it through the session route's own completion
+    (`WorkoutSessionViewSet._completed`, what the PATCH that finishes a workout runs):
+    the client's and the coach's `session_completed` notices, the day closed, the
+    records. History is not finished that way: thirty old workouts would be thirty
+    notices dated today."""
+    from types import SimpleNamespace
+
     from django.utils import timezone
 
     from routine.models import ExerciseSetLog, UserExerciseProgress, WorkoutSession
@@ -216,7 +224,12 @@ def train(client, routine, day, on_date, *, every_set=True):
         progress.total_weight = sum((s.weight or 0) * s.reps for s in logged)
         progress.save(update_fields=["completed_sets", "total_repetitions", "total_weight",
                                      "updated_at"])
-    record_day_quietly(client, routine, day, on_date, via="session", session=session)
+    if finished_now:
+        from routine.views import WorkoutSessionViewSet
+
+        WorkoutSessionViewSet()._completed(session, SimpleNamespace(data={}))
+    else:
+        record_day_quietly(client, routine, day, on_date, via="session", session=session)
     return session
 
 
@@ -370,3 +383,74 @@ def the_operator(walk):
     if "operator" in walk.accounts:
         return CustomUser.objects.get(pk=walk.accounts["operator"]["id"])
     return walk.account("operator", role="admin", is_staff=True)
+
+
+# ------------------------------------------------------------------ 5, 6: new clients
+def platform_ready():
+    """The platform's own rows a state reads — the starter exercises, the platform's
+    workouts and templates, the default plans — by `bootstrap_platform`'s own steps.
+    Each finds its rows by key and writes nothing when they are there, which they are on
+    any server the owner has bootstrapped; on a bare database they are written exactly
+    as `manage.py bootstrap_platform` writes them. No account is touched."""
+    import io
+
+    from users.management.commands.bootstrap_platform import Command
+
+    command = Command(stdout=io.StringIO())
+    command.starter_exercises()
+    command.platform_templates()
+    command.plans()
+
+
+@state("client_brand_new", area="training", role="client",
+       summary="A client who has just signed up: no name, no birth date, no body or goal "
+               "answers, no coach, no programme, nothing logged.")
+def client_brand_new(walk):
+    walk.account(onboarded=False)
+
+
+@state("client_trial_only", area="training", role="client",
+       summary="A client with no coach and no programme whose only history is the free "
+               "first workout, done yesterday (at home).")
+def client_trial_only(walk):
+    from django.utils import timezone
+
+    from routine import trial
+
+    platform_ready()
+    me = walk.account(training_place="home")
+    try:
+        answer, _created = trial.start(me)
+    except trial.NotOffered as refused:
+        raise RuntimeError(
+            f"the free first workout is not offered here ({refused.reason}): run "
+            f"`manage.py bootstrap_platform`, which writes the platform's workouts") from None
+    from routine.models import Routine
+
+    copy = Routine.objects.get(pk=answer["routine_id"])
+    train(me, copy, 1, timezone.localdate() - timedelta(days=1))
+    walk.ids(routine=copy.pk, template=answer["template_id"])
+
+
+@state("premium_no_diet_plan", area="training", role="client",
+       summary="A Premium client (an operator's grant) with no diet plan yet and no "
+               "allergies written.")
+def premium_no_diet_plan(walk):
+    from django.utils import timezone
+
+    from subscription.default_plans import PREMIUM_PLAN_KEY
+    from subscription.models import Subscription, SubscriptionPlan
+
+    platform_ready()
+    me = walk.account()
+    plan = SubscriptionPlan.objects.filter(catalogue_key=PREMIUM_PLAN_KEY).first()
+    if plan is None:
+        raise RuntimeError("there is no Premium plan here: run `manage.py bootstrap_platform`")
+    # The operator's grant, as the console's "activate" and `seed_review_accounts` write
+    # it: access with no payment behind it, because no money moved
+    # (`policy.money.EntitlementSource`). No `DietPreference` row: nothing written yet.
+    subscription = Subscription(user=me, plan=plan, status="active", source="operator_grant",
+                                auto_renew=False,
+                                end_date=timezone.now() + timedelta(days=90))
+    subscription.save()
+    walk.ids(subscription=str(subscription.pk), plan=plan.pk)

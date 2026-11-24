@@ -138,3 +138,93 @@ def test_a_trainers_products_in_review_on_sale_and_returned(api, walk_media):
     catalogue = client.get("/api/v1/products/", HTTP_X_APP_CHANNEL="apk").json()
     catalogue = catalogue["results"] if isinstance(catalogue, dict) else catalogue
     assert ids["product_on_sale"] in [row["id"] for row in catalogue]
+
+
+# ------------------------------------------------------------------ 5. new clients
+def test_a_brand_new_client(api, walk_media):
+    entry, people = _build("client_brand_new")
+    me = people["main"]
+    _signs_in(api, entry["email"])
+    profile = api(me).get("/api/auth/user/update/").json()
+    assert {"first_name", "date_of_birth", "gender", "training_goal"} <= set(
+        profile["onboarding_missing"])
+    sections = _home(api, me)
+    assert "workout_hero" not in sections and "trial_workout" not in sections
+    assert api(me).get("/api/v1/coaching/current/").json() == {"coaching": None}
+
+
+def test_a_client_whose_only_history_is_the_free_first_workout(api, walk_media):
+    from django.utils import timezone
+
+    entry, people = _build("client_trial_only")
+    me = people["main"]
+    trial = _home(api, me)["trial_workout"]
+    assert (trial["routine_id"], trial["times_done"]) == (entry["ids"]["routine"], 1)
+    assert trial["place"] == "home"
+    assert trial["last_done_on"] == (timezone.localdate()
+                                     - __import__("datetime").timedelta(days=1)).isoformat()
+    listed = api(me).get("/api/routine/routines/").json()
+    listed = listed["results"] if isinstance(listed, dict) else listed
+    assert listed == []                                  # the trial copy is no programme
+    sessions = api(me).get("/api/routine/workout-sessions/").json()
+    sessions = sessions["results"] if isinstance(sessions, dict) else sessions
+    assert [s["routine"] for s in sessions] == [entry["ids"]["routine"]]
+
+
+# ------------------------------------------------------------------ 6. Premium, no plan
+def test_a_premium_client_with_no_diet_plan_and_no_allergies(api, walk_media):
+    entry, people = _build("premium_no_diet_plan")
+    me = people["main"]
+    preferences = api(me).get("/api/diet/v1/preferences/")
+    assert preferences.status_code == 200, preferences.content
+    assert not preferences.json().get("allergies")
+    sections = _home(api, me)
+    assert "nutrition_today" not in sections
+    from subscription.models import Subscription
+
+    subscription = Subscription.objects.get(user=me)
+    assert subscription.is_active and subscription.plan.catalogue_key == "premium"
+    from diet.models import DietPlan
+
+    assert not DietPlan.objects.filter(user=me).exists()
+
+
+# ------------------------------------------------------------------ 7, 8. trainers
+def test_a_brand_new_trainer(api, walk_media):
+    entry, people = _build("trainer_brand_new")
+    me = people["main"]
+    _signs_in(api, entry["email"])
+    profile = api(me).get("/api/auth/user/update/").json()
+    assert "first_name" in profile["onboarding_missing"]
+    assert api(me).get("/api/v1/trainer/verification/").json()["status"] == "not_started"
+    roster = api().get("/api/v1/trainers/?page_size=100").json()["results"]
+    assert me.pk not in [row["id"] for row in roster]
+    mine = api(me).get("/api/routine/templates/my_templates/").json()
+    mine = mine["results"] if isinstance(mine, dict) else mine
+    assert mine == []
+    me.refresh_from_db()
+    assert me.trainer_is_available is False
+    from users.models import TrainerClientRelation
+
+    assert not TrainerClientRelation.objects.filter(trainer=me).exists()
+
+
+def test_a_verified_trainers_busy_day(api, walk_media, django_capture_on_commit_callbacks):
+    # The notices are sent once the state's transaction commits, as the command's do.
+    with django_capture_on_commit_callbacks(execute=True):
+        entry, people = _build("trainer_busy_day")
+    me, ids = people["main"], entry["ids"]
+    assert api(me).get("/api/v1/trainer/verification/").json()["status"] == "verified"
+    queue = api(me).get("/api/v1/trainer/attention/").json()
+    items = queue["results"] if isinstance(queue, dict) and "results" in queue else \
+        queue.get("items", queue)
+    kinds = {item["kind"] for item in items}
+    assert {"new_request", "unanswered_message", "awaiting_first_program"} <= kinds, kinds
+    # The finished session: the trainer is told, and opens it to review.
+    inbox = api(me).get("/api/social/notifications/?page_size=50").json()
+    inbox = inbox["results"] if isinstance(inbox, dict) else inbox
+    told = [row for row in inbox if row["notification_type"] == "session_completed"]
+    assert told, [row["notification_type"] for row in inbox]
+    review = api(me).get(f"/api/routine/workout-sessions/{ids['session']}/?expand=sets")
+    assert review.status_code == 200, review.content
+    assert review.json()["status"] == "completed"
