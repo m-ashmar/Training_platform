@@ -156,3 +156,23 @@ def test_client_progress(walk_run, api):
     goals = _rows(api(me).get("/api/analytics/goals/").json())
     goal = next(g for g in goals if g["id"] == entry["ids"]["goal"])
     assert goal["progress_percentage"] == 50.0
+    # Latin digits, as the app writes them everywhere (the manager, 2026-11-24).
+    assert goal["title"] == "الوصول إلى 76 كغ"
+
+    # The month trend counts the twelve weeks: each finished workout's day was closed,
+    # as the app closes it (the app's walk found `completed: 0` in every month).
+    from collections import Counter
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from users.walk.progress import SESSION_DAYS_BACK
+
+    today = timezone.localdate()
+    expected = Counter((today - timedelta(days=back)).replace(day=1).isoformat()
+                       for back in SESSION_DAYS_BACK)
+    body = api(me).get("/api/routine/analytics/trends/", {"period": "month"}).json()
+    completed = {row["period"][:10]: row["completed"] for row in body["completion_trend"]
+                 if row["completed"]}
+    assert completed == dict(expected), (completed, dict(expected))
+    assert completed.get(today.replace(day=1).isoformat()), "nothing this month"
