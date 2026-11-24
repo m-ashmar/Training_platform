@@ -312,6 +312,22 @@ routine products): `git archive <base> | tar -x -C <scratchpad>/<unique dir>`, s
   names its `money_type`; lock order is subscription → payment, user rows → wallets by
   ascending id.
 
+- **An app test reads the push registry and the push data keys from disk.** The
+  app's gate test reads `notifications/channels/fcm.py` `EVENT_CLASS_REGISTRY` and
+  API_CONTRACT.md's table «`data.type` | additional `data` keys», and fails when the
+  app's table (a push's `data.type` -> the page it opens, with the keys it reads)
+  differs, as its store-safety test reads `policy/defaults.py`. If you add, rename or
+  remove an event type, or a push data key in that table, or move or rename either,
+  SAY SO IN YOUR REPORT: the integrator lists every such change in the hand-off
+  (2026-11-24, the manager and the app manager; the app covers all 48 types as of
+  `9b286e7`).
+- **A test run over about 2 minutes goes through the one lock.** `sh
+  /Users/mac/Desktop/Git/t2/Training_platform/.claude/worktrees/.locks/with_lock.sh suite
+  backend-<who> -- <command>`, the command the script starts. A list of files is ONE run.
+  Only a single file that finishes in under 2 minutes runs unlocked, and never two backend
+  runs at once outside the lock: the Mac (8 GB) reached load 256 with swap nearly full when
+  two unlocked backend runs went beside a simulator build (2026-11-24).
+
 ## Where the product is decided
 
 - `CLAUDE.md` — the rules, and which file to start from.

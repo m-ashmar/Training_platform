@@ -657,14 +657,14 @@ Product gaps: a trainer cannot
 retire an exercise (`is_active` not writable) though the 409 says to; deleting an unlogged
 exercise cascades it out of every routine and template; no "save routine as template";
 template rows cannot hold weight, notes or duration; `assign_to_client` accepts an empty
-or retired routine and pays month 1 for it; `Routine.days` has no upper bound; the three
-assign 400s share one code; clients are not told when a routine is unassigned or edited,
+or retired routine and pays month 1 for it; `Routine.days` has no upper bound; ~~the three
+assign 400s share one code~~ (G7, closed by `22c6a8e`: each of the three 400s names its own code, `client_id_required`, `not_your_client`, `already_assigned`; re-verified 2026-11-24 against `9b286e7`, the fix-run backlog note); clients are not told when a routine is unassigned or edited,
 or when a diet plan is written for them; the trainer cannot see a client's freeze, diet
 adherence, or whether the activity level was answered; `my_clients_progress` is a stub
 and `trainer/clients/` follows the pointer, not the relation; a diet plan never settles
 month 1; a coached client needs their own diet subscription to open the trainer's plan;
 a client who generates a plan silently retires the trainer's plan; unverified trainers
-are refused on diet but not on routines; routine days are ordinal, not weekdays.
+are refused on diet but not on routines; ~~routine days are ordinal, not weekdays~~ (G15, settled by the owner's D15 of 2026-11-22: ordinal by design, today is the next day not done; `routine/schedule.py` never maps a day to a date). The gaps' state, one by one, and which wave 3 batch holds each: the plan's fix-run section; the HIGH ones are SIDE_BUGS S-299 (G5) and S-300 (G11).
 
 ## Migration-safe order
 
