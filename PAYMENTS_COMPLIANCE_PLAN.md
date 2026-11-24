@@ -28,7 +28,9 @@ branches (its section).
 ## PAUSED 2026-11-25 for two days (the owner) — resume here FIRST
 
 The owner paused all work on 2026-11-25 for two days ("make everyone finish their current work
-and commit"). Nothing was pushed: a push waits for the owner's word in the manager's chat. This
+and commit"). The MAIN LINE was pushed to GitHub on 2026-11-25 on the owner's word in the
+manager's chat ("push as recommended": the main line only). The worker branches of landings 4,
+4b and 5 and the backups branch were NOT pushed: they exist only on the owner's Mac. This
 section is the whole state a fresh session needs. The sections below are history. The live
 table of the app side is `ROAD_TO_10_STATUS.md` (project root, not in git).
 
@@ -40,7 +42,8 @@ table of the app side is `ROAD_TO_10_STATUS.md` (project root, not in git).
 | 2a | `707b19f` | `0c61013`: 3580 passed, 0 failed | the owner's decisions 2, 4, 5, 8, 9, 10, 12; ACC-1, ACC-2, SOC-2, G5, B-201, `fx/w2-chat` |
 | 3 | `2044b20` (fast-forwarded 2026-11-25 01:29 +04, under the app manager's «go»; `2044b20` is the gated `454c6af` plus one docs commit) | `454c6af`: 3692 passed, 2 xfailed (`afe4a32`'s strict xfails, S-417), 0 failed | RTN-1 (G1, G2, G6, G9 and eleven SIDE rows), PAY-1 to PAY-3, ShamCash as kind "reviewed"; routine 0038 |
 
-origin (GitHub) is at `9b286e7`. The live server runs `f77b3e1`, and updating it is the owner's
+origin (GitHub) holds the main line as of the pause (pushed 2026-11-25 with this section; it
+was at `9b286e7` before). The live server runs `f77b3e1`, and updating it is the owner's
 step (DEPLOY_CHECKLIST §12.5 lists what each landing's update needs).
 
 ### Built on a branch, NOT landed (the next landings, in this order)
@@ -92,8 +95,10 @@ What each landing's integrator must check at its merge, written down so it is no
 5. Landing 5: batch B at `7f2101c`, then its EXC commits.
 6. The backups branch when it is green and reviewed.
 
-Nothing is pushed: origin is at `9b286e7` and the main line 121 commits ahead (103 without
-merges). The push waits for the owner's word in the manager's chat.
+The main line is on GitHub (pushed 2026-11-25, the owner's word). Check with
+`git status -sb` and `git log origin/spec/payments-compliance -1` before anything else: if the
+main line is ahead of origin again, those commits are unpushed and each later push needs the
+owner's word. The four branches above are local only.
 
 Where the workers' final reports are: each worker's last message in its own chat (phase 3,
 money, batch B); anything the manager receives goes into its memory file
@@ -106,8 +111,12 @@ writing" is filled from there.
    reads kiwi as safe). With the phase 3 worker: one parser for every path that reads the
    text for safety, measured on `tests/diet_quality.py`; review the numbers before and after,
    `test_allergen_safety` untouched, and no path left with a parser of its own.
-2. BACKEND_BUGS B-203's 2-meal caps (the per-goal cap on counted snacks, measured, then the
-   manager's ruling); B-203 stays open until then.
+2. BACKEND_BUGS B-203's 2-meal caps. MEASURED AND RULED on 2026-11-25, not built: at 2 meals the
+   gate counts at most lose 2, maintain 1, gain 1 snacks, and a refusal's suggestion walks up to
+   3 meals; at 3 meals nothing changes (all goals keep 4, so the pinned large adult keeps his
+   plan). The table is `road10-b203-step2b-table.md` in the notes folder. B-203 closes with that
+   commit. A new MEDIUM row goes with it: muscle-gain plans for large, very active people build
+   2 to 9% short at 3 meals (an engine feature, not built).
 3. The LOW rows of EXC-6 and EXC-7 (about 50 sentences); `000e2b6` built the HIGH and MEDIUM ones.
 4. B-204 (filed by the app manager, MEDIUM, ours): `wallet/views.py` `ClientTransferView` calls
    `idempotency.complete` after `_pay_trainer`'s own transaction has committed, so a crash
@@ -117,14 +126,35 @@ writing" is filled from there.
 
 ### The owner's open decisions (one list)
 
-1. The push: nothing since `9b286e7` is on GitHub, and the server update after it.
+1. The server update (his step; the main line is on GitHub since 2026-11-25), and whether later
+   tested landings are pushed without asking each time.
+   At the pause the owner wrote in the manager's chat: "do as recommended and push as
+   recommended". The manager read that as the wind-down and the push ONLY, and built nothing
+   on the decisions below. FIRST QUESTION TO THE OWNER ON RESUME: did it also mean every
+   decision below as recommended? Until he says yes, none of them is built. The manager's
+   recommendation is written after each.
 2. The AI coach's reply is not checked on its way out on store builds (SIDE_BUGS S-413, HIGH).
-3. The AI code that names the provider.
-4. A "something else" allergy input in the app.
-5. Whether the 10-minute `already_paid` window counts any payment method.
-6. The five backlog money questions: G11 (S-300), G12, S-263, S-251, S-181.
-7. A console action to end a coaching at once (S-309).
-8. The statement import as the ShamCash launch road.
+   Recommended: on `play` and `ios` only, hold the reply, check it for payment talk and answer
+   the store-safe reply instead when it has any; the direct build keeps streaming.
+3. The AI code that names the provider (`rate_limit_openai` on the AI socket). Recommended:
+   rename it to a neutral value now, before launch; the app does not read it (the app manager's
+   check), so nothing breaks.
+4. A "something else" allergy input in the app (the app's page is chips for the 14 allergens
+   only, so an allergy outside them cannot be declared). Recommended: yes, before launch, one
+   bare food name per entry; it is the app side's design question.
+5. Whether the 10-minute `already_paid` window counts any payment method (today wallet
+   payments only). Recommended: yes, any completed payment of the subscription.
+6. The five backlog money questions. Recommended: G11 (S-300) yes, a diet plan the coach sends
+   counts as the first program and pays month 1; G12 yes, a coached client reads the coach's
+   plan without a platform plan, frozen with the coaching; S-263 yes, a person on a trial may
+   pay now and the paid period starts when the trial ends; S-251 a client's wallet transfer goes
+   only to their own approved coach; S-181 a trainer still owed a share may delete the account
+   and support returns the share.
+7. A console action to end a coaching at once (S-309). Recommended: yes, with a required reason
+   and an audit row; the operator chooses on the spot whether the trainer keeps the month or
+   the client gets the unused days back.
+8. The statement import as the ShamCash launch road (the standalone `payin` package). Recommended:
+   wire it in now, while ShamCash answers the owner's request for official access.
 9. "and trainers" in CLAUDE.md's rate-limit line (the owner's numbers say clients; decision 12
    gave trainers the same 1,500).
 10. The badge wording.
