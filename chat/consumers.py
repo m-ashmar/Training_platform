@@ -57,8 +57,9 @@ with `trainer_id` ...), or one of this socket's own:
                       listens closes too, at the first event after its token expired.
       rate_limited    the same hourly allowance the REST routes share
                       (`training_platform.middleware.RateLimitMiddleware`, 1500 an hour
-                      for a client): every `message.send` and `message.read` frame
-                      counts against it exactly as one HTTP request would. Carries
+                      for a client and for a trainer): every `message.send` and
+                      `message.read` frame counts against it exactly as one HTTP
+                      request would. Carries
                       `retry_after` (seconds). Nothing was written.
       server_error    an unhandled fault; the socket stays open
 
@@ -280,9 +281,9 @@ def _rate_limited(user):
     The HTTP limiter's own bucket and numbers, not a copy of them: the key is
     `rate_limit:user_<id>` in the rate-limit cache, the tier is the account's type, and
     the allowance is whatever `RateLimitMiddleware` holds for it (1500 an hour for a
-    client, the owner's number). A socket and the REST routes therefore spend ONE
-    allowance, so opening a socket is not a way around it. Fails open on a cache
-    outage, as the middleware does.
+    client and for a trainer, the owner's number). A socket and the REST routes
+    therefore spend ONE allowance, so opening a socket is not a way around it. Fails
+    open on a cache outage, as the middleware does.
     """
     from training_platform.middleware import RateLimitMiddleware
 

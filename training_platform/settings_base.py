@@ -1266,6 +1266,12 @@ CACHALOT_UNCACHABLE_TABLES = frozenset([
     # Withdrawals: "one open request" and the daily cap are read to decide whether money
     # may move, so a cached read is a second withdrawal (payouts/services.py).
     'payouts_withdrawal', 'payouts_withdrawalevent', 'payouts_payoutmethod',
+    # A build's flags: what it may show and sell, and the Google Play coaching switch
+    # (policy/services.py flags_for). Read fresh: cachalot drops a cached read only on a
+    # write made through Django, so a restore, psql or another program would leave the
+    # old flags in force for up to CACHALOT_TIMEOUT (SIDE_BUGS S-292; the owner,
+    # 2026-11-24).
+    'policy_channelcapabilities',
 ])
 
 # Multipart bodies over FILE_UPLOAD_MAX_MEMORY_SIZE are spooled here before a view ever
