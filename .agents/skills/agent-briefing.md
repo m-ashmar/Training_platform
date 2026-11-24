@@ -341,6 +341,14 @@ raises ImportError, so the old-code run "fails" without ever reaching the bug. P
   Only a single file that finishes in under 2 minutes runs unlocked, and never two backend
   runs at once outside the lock: the Mac (8 GB) reached load 256 with swap nearly full when
   two unlocked backend runs went beside a simulator build (2026-11-24).
+  ONE ticket per run and one hold of at most about 30 minutes: a longer list is cut into
+  pieces that each take their own place in the queue (the manager, 2026-11-24).
+- **A `-k` subset of the regression gate is not the gate file.** Before a commit is
+  reported as ready (a "merge" line), the WHOLE `tests/test_regression_gate.py` runs on it,
+  through the queue as a short piece: several of its tests read SOURCE text and fail on a
+  refactor that keeps behaviour (2026-11-24: `test_one_renewal_at_a_time_holds_under_concurrency`
+  reads `start_renewal` for `select_for_update`, and a lock moved into a helper failed it; a
+  worker's `-k` subset had left it out).
 
 ## Where the product is decided
 

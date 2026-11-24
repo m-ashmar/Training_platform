@@ -15,7 +15,9 @@ and order live in `BACKEND_DELTA.md`, not here.
 S2.7, batch B, S2.13, the review round of every landed batch, Part 4's R4, R5, R8 and R1,
 round 3 (B-199, the console and password fixes), round 4's fixes, the dev-only walk
 seed, round 5 (the inbox's language, B-200) and the fix run's first resumed landing
-(`fx/w2-diet`, `fx/w2-small`, `fx/w2-ci`: the fix-run section) are on this branch (full gate at `bd8016a` on a fresh database: 3425 passed, 0 failed, 0 skipped); next
+(`fx/w2-diet`, `fx/w2-small`, `fx/w2-ci`: the fix-run section) and landing 2a (the owner's
+decisions 2, 4, 5, 8, 9, 10, 12, wave 3's ACC-1, ACC-2, SOC-2 and G5, B-201, `fx/w2-chat`) are
+on this branch (full gate at `0c61013` on a fresh database: 3580 passed, 0 failed, 0 skipped); next
 are the later Road to 10 phases as the owner
 orders (the Road to 10 section below has the table per batch). The fix run
 resumed on 2026-11-24 (the owner's order): `fx/w2-chat` and `fx/w2-backups` are still on their
@@ -275,7 +277,10 @@ backup bucket (hours away: `fx/w2-backups` needs it for its first drill); the Fi
 credentials on the live server (`FIREBASE_CREDENTIALS_JSON` in `deploy/.env`, his step;
 the app needs its own client files); the support WhatsApp number (it comes last); a review
 of the CONTENT the batch B worker wrote, the two free first workouts and the eight starter
-templates (`routine/data/platform_templates.py`). The server update (S3.3) is
+templates (`routine/data/platform_templates.py`); whether support may END a coaching at
+once from the console, and whose money the rest of a paid month is then (SIDE_BUGS S-309:
+today only the trainer or the client ends it, or a deactivation at the month's end). The
+server update (S3.3) is
 DEPLOY_CHECKLIST §12.5, "The Road to 10 update": migrate through the compose `migrate`
 service, then `bootstrap_platform` (writes the ten platform templates) and
 `create_starter_challenge`; after it, and again before each store submission,
@@ -335,6 +340,25 @@ each state declares; the money states use the shared `plan_for` and `top_up`, S-
 closed). BACKEND_BUGS B-142, B-143, B-195, B-168 and B-190 filled. Still on their branches:
 `fx/w2-chat` (the phase 3 worker fuzzes B-177's readers first) and `fx/w2-backups` (the
 batch B worker is finishing it; the owner's bucket is hours away).
+
+**Landing 2a, 2026-11-24** (the integrator, LANDED with the full gate at `0c61013` on a fresh database: 3580 passed, 0 failed, 0 skipped). The cuts: the phase 3
+branch at `e9aabd4` (decision 2: an agent holding the platform's cash cannot delete the
+account; decision 8: a password change signs every device out at once, with the review's
+follow-up `34b265b`; decision 11: the e-mail on a password change; decision 9: the stock
+`/admin/` for console operators only; ACC-1, ACC-2 with the `person_erased` flag, SOC-2,
+B-201, two walk states), the batch B branch at `9a2651c` (decisions 10 and 12), the money
+branch at `7e2f374` (G5 in full, decision 4: an upgrade paid from the wallet, decision 5:
+the console starts no coaching) and `fx/w2-chat` at `e8a2c41` (B-149, B-150, B-177, with
+the phase 3 worker's review and fuzz). Two fixes went in before the gate started, each one
+commit: `7f1b43c` (cherry-picked as `4157d38`: the routine export carries the reader's own
+id, S-253 with S-214) and `049fa80` (`start_renewal` writes its row lock where a
+source-reading gate test looks for it). THE MANAGER'S RULING on the chat (2026-11-24): a
+recording whose length the worker measures past 90 s AFTER it was sent is stored as
+measured and stays, because a delivered message is not taken back, the upload's size cap
+bounds abuse, and the declared-length refusal stops the honest case at upload (the media
+route's and `chat.fill_media_duration`'s docstrings say it; not the owner's question any
+more). Known limit until landing 5: an account made outside sign-up has English saved, so
+B-202's refusals read in English for it.
 
 To resume: the briefs and the three finished reports are in the backend session's directory
 (`~/.claude/projects/-Users-mac-Desktop-Git-t2-Training-platform/741ec8b2-f2c0-4b8b-a55f-bdc282a3d595/fx-w2/`,
