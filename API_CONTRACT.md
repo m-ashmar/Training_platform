@@ -306,8 +306,8 @@ Some notices also send an email; which ones, and how preferences stop it, is und
 | caller | limit |
 |---|---|
 | anonymous (per IP) | 2000 / hour |
-| client | 500 / hour |
-| trainer | 1000 / hour |
+| client | 1500 / hour |
+| trainer | 1500 / hour, exactly as a client's (the owner, 2026-11-24) |
 | admin | 5000 / hour |
 
 Endpoint-specific, identity-scoped limits sit on top and are the ones users actually hit:
@@ -739,7 +739,7 @@ the account was suspended since connect — re-checked on every frame; the token
 also before every frame the server sends, so a socket that only listens closes too; the
 socket then closes with 4001) and `rate_limited` (with `retry_after` seconds: `message.send` and
 `message.read` frames spend the same hourly allowance as the REST routes — 1500 an hour
-for a client). Close codes: 4001 no usable token (at connect, or after `auth`), 4004 not
+for a client and for a trainer). Close codes: 4001 no usable token (at connect, or after `auth`), 4004 not
 your conversation.
 
 Push: `chat_message`, keyed on the conversation, sent only when the recipient has opened

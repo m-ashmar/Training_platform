@@ -98,7 +98,10 @@ class RateLimitMiddleware(MiddlewareMixin):
                 # 1500, the owner's number (2026-09-19): a workout session with set
                 # logging, home and chat outruns 500 an hour.
                 'client': {'requests': 1500, 'window': 3600},
-                'trainer': {'requests': 1000, 'window': 3600},
+                # The same 1500 (the owner, 2026-11-24; SIDE_BUGS S-284): a trainer uses
+                # the client's routes too (the community, Road to 10 S3.8) on top of the
+                # coach's own, so a trainer is limited exactly as a client is.
+                'trainer': {'requests': 1500, 'window': 3600},
                 'admin': {'requests': 5000, 'window': 3600},
             }
     
