@@ -3942,8 +3942,9 @@ class AnalyticsViewSet(viewsets.ViewSet):
     def admin_dashboard(self, request):
         """
         Admin/trainer dashboard: summary stats for the caller's clients (a trainer's
-        approved clients; every client for an admin). 403 `not_a_trainer` for anyone
-        else (the owner, 2026-09-24; it was the generic `permission_denied`).
+        approved clients; every client for an admin; never the caller — a trainer was a
+        row of their own list, S-172). 403 `not_a_trainer` for anyone else (the owner,
+        2026-09-24; it was the generic `permission_denied`).
 
         Output: `{dashboard: [{client_id, username, total_volume, completion_rate,
         max_streak}], count, next, previous}` — PAGINATED over clients, by id, 25 a page,
@@ -3962,12 +3963,15 @@ class AnalyticsViewSet(viewsets.ViewSet):
             return Response({'error': _('Permission denied.'), 'code': 'not_a_trainer'},
                             status=403)
 
-        # Get all clients for this trainer/admin with optimized queries
-        if request.user.is_trainer:
-            ids = accessible_user_ids(request.user)
-            clients = CustomUser.objects.filter(id__in=ids or [])
-        else:
-            clients = CustomUser.objects.filter(user_type='client')
+        # The CLIENTS: a trainer's approved ones, every one for an admin. Never the
+        # caller: `accessible_user_ids` always holds the caller's own id (it answers
+        # "whose training data may I read"), so a trainer was a row of their own client
+        # list (the fix run's S-172). And an admin who is also a trainer got None from
+        # it, read as "nobody", and saw an empty list.
+        ids = accessible_user_ids(request.user)
+        clients = CustomUser.objects.filter(user_type='client')
+        if ids is not None:
+            clients = clients.filter(id__in=ids)
 
         # Nothing is prefetched: every figure below is an aggregate with its own query.
         # `exercise_progress__set_logs` was prefetched here and never read (~36k
