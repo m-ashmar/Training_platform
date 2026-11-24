@@ -67,11 +67,19 @@ def test_t1_what_the_row_shows_is_what_approving_charges(make_user, api):
 
 
 def test_t2_an_operator_assignment_carries_no_ones_note(make_user, api, rf):
-    """The console path: `CustomUserAdmin.save_model` with `assigned_trainer` changed."""
+    """The console path: `CustomUserAdmin.save_model` with `assigned_trainer` changed.
+
+    CONTRACT CHANGE (the owner, 2026-11-24): the console no longer approves a pending
+    request — it started a coaching with no consent and no charge — so there is no
+    operator assignment left to carry a note. What this test guarded still holds and is
+    still asserted: the client's own words are never served back as the trainer's. The
+    save is refused and the request stays the client's, as they wrote it
+    (tests/test_console_cannot_start_coaching.py)."""
     from django.contrib.admin.sites import AdminSite
+    from django.core.exceptions import ValidationError
 
     from users.admin import CustomUserAdmin
-    from users.models import CustomUser
+    from users.models import CustomUser, TrainerClientRelation
 
     trainer = make_user("t2_t", user_type="trainer")
     client = make_user("t2_c")
@@ -87,11 +95,14 @@ def test_t2_an_operator_assignment_carries_no_ones_note(make_user, api, rf):
     request = rf.post("/admin/")
     request.user = operator
     client.assigned_trainer = trainer
-    CustomUserAdmin(CustomUser, AdminSite()).save_model(request, client, _Form(), True)
+    with pytest.raises(ValidationError):
+        CustomUserAdmin(CustomUser, AdminSite()).save_model(request, client, _Form(), True)
+    relation = TrainerClientRelation.objects.get(trainer=trainer, client=client)
+    assert (relation.status, relation.initiated_by, relation.client_note) == \
+        ("pending", "client", "my own words about my knee")
 
     status = api(client).get(f"{AUTH}/client/request-status/").json()
     rows = status if isinstance(status, list) else [status]
     for row in rows:
         payload = row.get("request", row) if isinstance(row, dict) else {}
         assert payload.get("trainer_note") in (None, ""), status
-    assert "my own words about my knee" not in str(status)

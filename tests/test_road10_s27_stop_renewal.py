@@ -360,15 +360,21 @@ def test_an_operator_repointing_a_running_coaching_keeps_the_clients_choice(make
     row = TrainerClientRelation.objects.get(pk=relation.pk)
     assert (row.status, row.client_stops_renewal) == ("approved", True)
 
-    # A NEW coaching the operator makes starts renewing.
+    # CONTRACT CHANGE (the owner, 2026-11-24): the operator can no longer make a NEW
+    # coaching — it had no consent and no charge — so there is no new coaching whose
+    # flags to reset. The console refuses, and the rejected row keeps what it holds
+    # (tests/test_console_cannot_start_coaching.py).
+    from django.core.exceptions import ValidationError
+
     other = make_user("s27_adm_t2", user_type="trainer", first_name="Lina")
     TrainerClientRelation.objects.create(trainer=other, client=client, status="rejected",
                                          initiated_by="client", client_stops_renewal=True)
     TrainerClientRelation.objects.filter(pk=relation.pk).update(status="rejected")
     client.assigned_trainer = other
-    CustomUserAdmin(CustomUser, site).save_model(mock.Mock(), client, form, True)
+    with pytest.raises(ValidationError):
+        CustomUserAdmin(CustomUser, site).save_model(mock.Mock(), client, form, True)
     new = TrainerClientRelation.objects.get(trainer=other, client=client)
-    assert (new.status, new.client_stops_renewal) == ("approved", False)
+    assert (new.status, new.client_stops_renewal) == ("rejected", True)
 
 
 def test_both_sides_stopping_end_it_once(make_user, api):
