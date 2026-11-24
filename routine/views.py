@@ -3999,25 +3999,27 @@ class AnalyticsViewSet(viewsets.ViewSet):
         # Create volume lookup dictionary
         volume_lookup = {item['user_exercise_progress__user']: item['total_volume'] for item in volume_data}
         
-        # Bulk aggregate completion data for all clients
-        completion_data = RoutineProgress.objects.filter(
-            user_id__in=client_ids
-        ).values('user').annotate(
-            total_days=Count('id'),
-            completed_days=Count('id', filter=Q(status='completed'))
-        )
-        
-        # Create completion lookup dictionary
+        # Completion over the DAYS of each routine, the way `analytics/completion`
+        # counts it (the fix run's S-173): distinct days per (client, routine), then
+        # summed per client. Counting ROWS put every stranded `not_started` scaffold
+        # (stamped with the routine's start date, while a completed day is written at
+        # its training date) in the denominator, so a client who trained every day of
+        # their routine never reached 100% here, while the analytics screen said 100.
         completion_lookup = {}
-        for item in completion_data:
-            user_id = item['user']
-            total_days = item['total_days']
-            completed_days = item['completed_days']
-            completion_lookup[user_id] = {
-                'total_days': total_days,
-                'completed_days': completed_days,
-                'completion_rate': round(100 * completed_days / total_days, 2) if total_days else 0
-            }
+        for item in (RoutineProgress.objects.filter(user_id__in=client_ids)
+                     .values('user', 'routine')
+                     .annotate(days=Count('day', distinct=True),
+                               completed=Count('day', distinct=True,
+                                               filter=Q(status='completed')))
+                     .order_by()):
+            totals = completion_lookup.setdefault(item['user'],
+                                                  {'total_days': 0, 'completed_days': 0})
+            totals['total_days'] += item['days']
+            totals['completed_days'] += item['completed']
+        for totals in completion_lookup.values():
+            totals['completion_rate'] = (
+                round(100 * totals['completed_days'] / totals['total_days'], 2)
+                if totals['total_days'] else 0)
         
         # Streaks are CONSECUTIVE CALENDAR DAYS. This grouped by `day`, which is the
         # ordinal position inside a routine (1..N), not a date: `day` repeats every
