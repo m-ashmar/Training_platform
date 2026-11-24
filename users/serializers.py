@@ -472,13 +472,11 @@ class UserDetailsSerializer(BannedTermsFilter, OnboardingFieldsMixin,
         read_only_fields = ['user_type', 'trainer_is_verified', 'is_active', 'onboarding_completed', 'assigned_trainer']
 
     def get_profile_picture(self, obj):
-        request = self.context.get('request')
-        if obj.profile_picture:
-            url = obj.profile_picture.url
-            if request is not None:
-                return request.build_absolute_uri(url)
-            return url
-        return None
+        # `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS
+        # S-246): signed where the backend signs, absolute with the request.
+        from training_platform.media_storage import media_url
+
+        return media_url(obj.profile_picture, self.context.get('request')) or None
 
     def get_verification_status(self, obj):
         if not obj.is_trainer:
@@ -559,13 +557,11 @@ class TrainerProfileSerializer(BannedTermsFilter, TrainerMatchingFieldsMixin,
         return status_for(obj)
 
     def get_profile_picture(self, obj):
-        request = self.context.get('request')
-        if obj.profile_picture:
-            url = obj.profile_picture.url
-            if request is not None:
-                return request.build_absolute_uri(url)
-            return url
-        return None
+        # `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS
+        # S-246): signed where the backend signs, absolute with the request.
+        from training_platform.media_storage import media_url
+
+        return media_url(obj.profile_picture, self.context.get('request')) or None
 
     # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
     # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).
@@ -613,13 +609,11 @@ class ClientProfileSerializer(BannedTermsFilter, OnboardingFieldsMixin,
         return None
 
     def get_profile_picture(self, obj):
-        request = self.context.get('request')
-        if obj.profile_picture:
-            url = obj.profile_picture.url
-            if request is not None:
-                return request.build_absolute_uri(url)
-            return url
-        return None
+        # `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS
+        # S-246): signed where the backend signs, absolute with the request.
+        from training_platform.media_storage import media_url
+
+        return media_url(obj.profile_picture, self.context.get('request')) or None
 
     # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
     # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).
@@ -646,13 +640,11 @@ class CustomUserSerializer(serializers.ModelSerializer):
         ]    
 
     def get_profile_picture(self, obj):
-        request = self.context.get('request')
-        if obj.profile_picture:
-            url = obj.profile_picture.url
-            if request is not None:
-                return request.build_absolute_uri(url)
-            return url
-        return None
+        # `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS
+        # S-246): signed where the backend signs, absolute with the request.
+        from training_platform.media_storage import media_url
+
+        return media_url(obj.profile_picture, self.context.get('request')) or None
 
     # No `validate_profile_picture`: `profile_picture` is a read-only method field, so
     # one here never ran (SIDE_BUGS S-150, as B-026 for UserDetailsSerializer).

@@ -39,6 +39,7 @@ from notifications.domain.trainer_client_events import (
     ClientUnassignedTrainerEvent,
 )
 from training_platform.i18n import LanguageContext, CACHE_VERSION
+from training_platform.media_storage import media_url
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -158,7 +159,7 @@ class CustomLoginView(LoginView):
                 'first_name': user.first_name,
                 'last_name': user.last_name,
                 'user_type': user.user_type,
-                'profile_picture': user.profile_picture.url if user.profile_picture else None,
+                'profile_picture': (media_url(user.profile_picture, self.request) or None),
             },
         })
         return original_response
@@ -343,14 +344,9 @@ class UserDetailsView(APIView):
 
 
 def _absolute_picture_url(user, request):
-    """The person's profile picture as an absolute url, or None without one."""
-    picture = getattr(user, 'profile_picture', None)
-    if not picture:
-        return None
-    url = picture.url
-    if request is not None and url.startswith('/'):
-        return request.build_absolute_uri(url)
-    return url
+    """The person's profile picture as an absolute url, or None without one — through
+    `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS S-246)."""
+    return media_url(getattr(user, 'profile_picture', None), request) or None
 
 class CustomRegisterView(RegisterView):
     """POST /api/auth/register/ — the body and every field code are in
@@ -399,7 +395,7 @@ class CustomRegisterView(RegisterView):
             'first_name': user.first_name,
             'last_name': user.last_name,
             'user_type': user.user_type,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'profile_picture': (media_url(user.profile_picture, request) or None),
             # Additive (2026-09-27): the language saved for this person's emails and
             # pushes — the field, else Accept-Language, else Arabic.
             'preferred_language': user.preferred_language,
@@ -482,7 +478,7 @@ class OTPVerificationView(APIView):
             'first_name': user.first_name,
             'last_name': user.last_name,
             'user_type': user.user_type,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'profile_picture': (media_url(user.profile_picture, request) or None),
             'is_active': user.is_active,
             'onboarding_completed': user.is_onboarding_completed,
         }
@@ -651,7 +647,7 @@ class TrainerProfileView(APIView):
         if not request.user.is_trainer:
             return _not_a_trainer()
 
-        serializer = TrainerProfileSerializer(request.user)
+        serializer = TrainerProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -662,14 +658,15 @@ class TrainerProfileView(APIView):
         if refused is not None:
             return refused
 
-        serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
+        serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True,
+                                              context={'request': request})
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
         # Read back what was stored and answer it as GET does, so the app needs no
         # second request to see it (BACKEND_BUGS B-173, as `user/update/` does, B-057).
         request.user.refresh_from_db()
-        saved = TrainerProfileSerializer(request.user).data
+        saved = TrainerProfileSerializer(request.user, context={'request': request}).data
         return Response({**saved, 'message': _('Trainer profile updated successfully!')},
                         status=status.HTTP_200_OK)
 
@@ -712,8 +709,6 @@ class TrainerClientsView(APIView):
         """The clients this trainer coaches (an approved relation)."""
         if not request.user.is_trainer:
             return _not_a_trainer()
-
-        from training_platform.media_storage import media_url
 
         from .coaching import refusals_for
         from .models import TrainerClientRelation
@@ -1115,7 +1110,7 @@ class ClientProfileView(APIView):
         if not request.user.is_client:
             return _clients_only()
 
-        serializer = ClientProfileSerializer(request.user)
+        serializer = ClientProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -1126,7 +1121,8 @@ class ClientProfileView(APIView):
         if refused is not None:
             return refused
 
-        serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
+        serializer = ClientProfileSerializer(request.user, data=request.data, partial=True,
+                                             context={'request': request})
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -1201,7 +1197,7 @@ class PublicTrainersListView(APIView):
                 'username': None,
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
-                'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                'profile_picture': (media_url(trainer.profile_picture, request) or None),
                 'trainer_bio': trainer.trainer_bio,
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
@@ -1328,7 +1324,7 @@ class AvailableTrainersView(APIView):
                     'email': None,
                     'first_name': trainer.first_name,
                     'last_name': trainer.last_name,
-                    'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'profile_picture': (media_url(trainer.profile_picture, request) or None),
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
@@ -1354,7 +1350,7 @@ class AvailableTrainersView(APIView):
                 'email': None,   # never the address; see the class docstring
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
-                'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                'profile_picture': (media_url(trainer.profile_picture, request) or None),
                 'trainer_bio': trainer.trainer_bio,
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
@@ -2839,7 +2835,7 @@ class ClientRequestStatusView(APIView):
                     # Never the address (SIDE_BUGS S-152), also for a declined
                     # request: the key stays, null, for builds that read it.
                     'trainer_email': None,
-                    'trainer_profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'trainer_profile_picture': (media_url(trainer.profile_picture, request) or None),
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_experience_years': trainer.trainer_experience_years,
@@ -2949,7 +2945,7 @@ class ProfilePictureUploadView(APIView):
             # Return the updated user info
             return Response({
                 'message': _('Profile picture uploaded successfully'),
-                'profile_picture_url': user.profile_picture.url if user.profile_picture else None,
+                'profile_picture_url': (media_url(user.profile_picture, request) or None),
                 'user': {
                     'id': user.id,
                     'username': user.username,
@@ -2957,7 +2953,7 @@ class ProfilePictureUploadView(APIView):
                     'first_name': user.first_name,
                     'last_name': user.last_name,
                     'user_type': user.user_type,
-                    'profile_picture': user.profile_picture.url if user.profile_picture else None,
+                    'profile_picture': (media_url(user.profile_picture, request) or None),
                 }
             }, status=status.HTTP_200_OK)
 

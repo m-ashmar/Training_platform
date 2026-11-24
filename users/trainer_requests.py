@@ -85,6 +85,7 @@ def pending_request_row(relation, request) -> dict:
     the two shapes and what never appears.
     """
     from moderation.services import blocked_ids
+    from training_platform.media_storage import media_url
 
     client = relation.client
     blocked = _cached(request, ('blocked', request.user.pk),
@@ -110,7 +111,8 @@ def pending_request_row(relation, request) -> dict:
         return row
     row.update({
         'client_email': client.email,
-        'client_profile_picture': client.profile_picture.url if client.profile_picture else None,
+        # `media_url`, the one function for a stored file's URL (SIDE_BUGS S-246).
+        'client_profile_picture': media_url(client.profile_picture, request) or None,
         'client_age': client.age,
         'client_gender': client.gender,
         'client_goals': client.client_goals,
