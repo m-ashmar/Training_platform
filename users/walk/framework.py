@@ -46,6 +46,31 @@ def on_retire(hook):
     return hook
 
 
+#: What states need of THIS database beyond bootstrap's own steps, declared by their area
+#: modules with `@needs(...)`: `(check, state names, area)`. A check answers what is
+#: missing, one sentence per gap (`[]` when nothing is), and must only READ.
+NEEDS: list[tuple[Callable, frozenset, str | None]] = []
+
+
+def needs(*state_names: str, area: str | None = None):
+    """Declare what some states need of the database, checked ONCE before any state is
+    built (`refuse_unless_ready`), with every other gap, so a run names everything
+    missing at once and writes nothing::
+
+        @needs("premium_no_diet_plan")
+        def _a_diet_plan_a_new_wallet_can_pay():
+            return [] if ... else ["a plan on sale with the diet, priced in SYP"]
+
+    Names: the check applies when one of these states is run. `area`: when any state of
+    that area is. Neither: always. A gap is said as what is missing, in the words an
+    operator would act on: "a plan on sale with the diet, priced in SYP (the currency a
+    new wallet takes)", never "plan lookup failed"."""
+    def register(check):
+        NEEDS.append((check, frozenset(state_names), area))
+        return check
+    return register
+
+
 class WalkRefused(Exception):
     """The command must not run; the message says why."""
 
@@ -104,8 +129,8 @@ def password_from_environment() -> str:
 def bootstrap_gaps() -> list[str]:
     """What `bootstrap_platform` writes and is missing here, one entry per step the
     states rely on (its own steps, read from its own sources). Empty on a dev server
-    that ran it. The command refuses ONCE, before any state, when this is not empty:
-    a state never creates platform data (a sellable plan, a catalogue row) itself."""
+    that ran it. A state never creates platform data (a sellable plan, a catalogue row)
+    itself."""
     from achievements.models import Achievement
     from diet.models import DietPlanTemplate, FoodItem
     from policy.models import ChannelCapabilities
@@ -137,13 +162,42 @@ def bootstrap_gaps() -> list[str]:
     return [name for name, present in checks if not present]
 
 
-def refuse_unless_bootstrapped() -> None:
-    gaps = bootstrap_gaps()
-    if gaps:
-        raise WalkRefused(
-            f"Refusing to run: this database has not been bootstrapped (missing: "
-            f"{', '.join(gaps)}). Run `manage.py bootstrap_platform` first; the walk "
-            f"states use what it writes and never create it themselves.")
+def state_needs(names=None) -> list[str]:
+    """What the states named (every registered state when None) need of this database
+    and is missing (`@needs`), in registration order, each gap once."""
+    from . import load_states
+
+    states = load_states()
+    chosen = set(states) if names is None else set(names)
+    areas = {states[name].area for name in chosen if name in states}
+    gaps: list[str] = []
+    for check, for_states, for_area in NEEDS:
+        applies = ((not for_states and for_area is None) or bool(for_states & chosen)
+                   or (for_area is not None and for_area in areas))
+        if applies:
+            gaps.extend(gap for gap in check() if gap not in gaps)
+    return gaps
+
+
+def refuse_unless_ready(names=None) -> None:
+    """ONCE, before any state: what `bootstrap_platform` writes, and what the states to
+    be run need of this database (`@needs`). Every gap is named in one refusal, and
+    nothing is written."""
+    missing = bootstrap_gaps()
+    wanted = state_needs(names)
+    if not missing and not wanted:
+        return
+    parts = []
+    if missing:
+        parts.append(
+            f"this database has not been bootstrapped (missing: {', '.join(missing)}). "
+            f"Run `manage.py bootstrap_platform` first; the walk states use what it writes "
+            f"and never create it themselves")
+    if wanted:
+        parts.append(
+            f"the walk states need what this database does not have: {'; '.join(wanted)}. "
+            f"The states never create platform data or a rate themselves")
+    raise WalkRefused("Refusing to run, nothing was written: " + ". And ".join(parts) + ".")
 
 
 # ------------------------------------------------------------------ addresses

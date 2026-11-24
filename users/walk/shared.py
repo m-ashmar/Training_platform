@@ -20,12 +20,15 @@ def coach_client(walk, client, coach):
 
 
 def starter_exercise(walk, offset: int = 0):
-    """A global catalogue exercise (`bootstrap_platform`), the `offset`-th by id."""
+    """The `offset`-th exercise of the starter catalogue (`routine/data/
+    exercise_catalogue.py STARTER_EXERCISES`, in its own order), which `bootstrap_platform`
+    writes and the command checks before any state. Not "the n-th global exercise by
+    id": a developer's database holds other catalogue rows, and which one came n-th
+    would change from one database to the next."""
+    from routine.data.exercise_catalogue import STARTER_EXERCISES
     from routine.models import Exercise
 
-    return (Exercise.objects.filter(is_global=True, is_active=True)
-            .exclude(catalogue_key__isnull=True).exclude(catalogue_key="")
-            .order_by("id")[offset])
+    return Exercise.objects.get(catalogue_key=STARTER_EXERCISES[offset].key)
 
 
 def sync_sets(walk, user, exercise, day, count: int, *, reps=10, weight=40,
@@ -66,12 +69,68 @@ def open_agent(walk, part="agent"):
     return agent
 
 
-def top_up(walk, agent, client, amount: str, currency: str = "SYP"):
+def new_wallet_currency() -> str:
+    """The currency a wallet takes when nothing has said otherwise: the platform's base
+    currency (`wallet.models.currency_for`; settings `PLATFORM_CURRENCY`). A walk account
+    is new, so it trades in this one until a state tops it up in another."""
+    from django.conf import settings
+
+    return getattr(settings, "PLATFORM_CURRENCY", "SYP")
+
+
+def plans_on_sale(currency: str, *, diet: bool = False):
+    """The paid plans on sale PRICED IN `currency`, cheapest first (ties by id). A price
+    is only ever compared with another in the same currency: 12 dollars is not cheaper
+    than 1000 pounds, and pricing one in the other needs an operator's rate, which a
+    state never sets."""
+    from subscription.models import SubscriptionPlan
+
+    plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0, currency=currency)
+    if diet:
+        plans = plans.filter(has_diet_access=True)
+    return plans.order_by("price", "id")
+
+
+def missing_plan(currency: str | None = None, *, diet: bool = False) -> list[str]:
+    """For an area's `@needs`: `[]` when a plan is on sale priced in `currency` (a new
+    wallet's when None), with the diet if `diet`; else the one gap, in the same words
+    for every area that needs it (the refusal names each gap once)."""
+    currency = currency or new_wallet_currency()
+    if plans_on_sale(currency, diet=diet).exists():
+        return []
+    return [f"a plan on sale{' with the diet' if diet else ''}, priced in {currency} "
+            f"(the currency a new wallet takes)"]
+
+
+def plan_for(client, *, diet: bool = False, prefer: str | None = None):
+    """A plan `client` can pay from their own wallet without an exchange rate: on sale,
+    priced in the client's wallet currency (`currency_for`), with the diet if `diet`.
+    The catalogue's `prefer` plan (`catalogue_key`) when it is one of those, else the
+    cheapest of them. Raises `WalkRefused` naming what is missing; the command's
+    pre-flight check (`@needs`) names it before any state runs."""
+    from wallet import currency_for
+
+    from .framework import WalkRefused
+
+    currency = currency_for(client)
+    plans = plans_on_sale(currency, diet=diet)
+    plan = (plans.filter(catalogue_key=prefer).first() if prefer else None) or plans.first()
+    if plan is None:
+        raise WalkRefused(f"no plan on sale{' with the diet' if diet else ''} priced in "
+                          f"{currency} (the client's wallet currency)")
+    return plan
+
+
+def top_up(walk, agent, client, amount: str, currency: str | None = None):
     """Cash taken by `agent`, credited to `client`'s wallet through the agent's own route
-    (`POST wallet/agent/topup/proxy/`, money type `wallet_move`, the receivable booked).
-    Answers the route's body."""
+    (`POST wallet/agent/topup/proxy/`, money type `wallet_move`, the receivable booked),
+    in the client's own currency unless `currency` says otherwise (`currency_for`: a new
+    wallet's is the platform's base currency). Answers the route's body."""
     import uuid
 
+    from wallet import currency_for
+
+    currency = currency or currency_for(client)
     _status, body = walk.api(agent, "post", "/api/wallet/agent/topup/proxy/", {
         "client_identifier": str(client.pk), "amount": amount, "currency": currency,
         "idempotency_key": f"walk-{uuid.uuid4().hex}"})
