@@ -4902,6 +4902,9 @@ class UserExerciseProgressViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
                         date=date,
                         defaults={
                             'completed_sets': completed_sets,
+                            # The claim itself, kept apart from the logged sets so the
+                            # next set logged that day cannot erase it (S-175).
+                            'claimed_sets': completed_sets,
                             # The prescription, never a number the caller sent. Taking it
                             # from the request made `completed >= target` true by
                             # construction, so a day could be marked complete by claiming
