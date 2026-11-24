@@ -16,7 +16,8 @@ from .tasks import send_async_notification
 REPEATABLE_TYPES = frozenset({"routine_assignment", "custom"})
 
 
-def send_notification(user, notif_type, message, related_object=None, data=None):
+def send_notification(user, notif_type, message, related_object=None, data=None,
+                      context=None):
     """
     Service function to create a notification for a user asynchronously.
     Args:
@@ -28,6 +29,10 @@ def send_notification(user, notif_type, message, related_object=None, data=None)
         data: Optional `{key: id}` added to the push's `data` beside `related_object_id`
             and `related_object_type`: the ids the app's page opens with, by name
             (Road to 10 S3.1). Values are sent as strings, as FCM requires.
+        context: Optional `{"variant": key, <params>}`: the sentence `message` says, by
+            its key on the event's template (`notifications/domain/routine_events.py`
+            `variants`), so the inbox renders it in the reader's language and a push in
+            the saved one. Stored beside `message`, which stays the fallback.
     Returns:
         None (Async execution)
 
@@ -49,6 +54,7 @@ def send_notification(user, notif_type, message, related_object=None, data=None)
         related_object_type,
         event_id=event_id,
         extra_data={k: str(v) for k, v in (data or {}).items()} or None,
+        context=dict(context) if context else None,
     ))
     return None
 
@@ -82,9 +88,10 @@ def notify_assignment(client, routine):
     """"A new routine has been assigned" for `client`, in their language."""
     from django.utils.translation import gettext as _
 
+    params = {'routine': routine_name_for(routine, client)}
     message = in_recipients_language(client, lambda: _(
-        "A new routine, %(routine)s, has been assigned to you.")
-        % {'routine': routine_name_for(routine, client)})
+        "A new routine, %(routine)s, has been assigned to you.") % params)
     send_notification(user=client, notif_type="routine_assignment", message=message,
-                      related_object=routine, data={'routine_id': routine.pk})
+                      related_object=routine, data={'routine_id': routine.pk},
+                      context={'variant': 'assigned', **params})
 

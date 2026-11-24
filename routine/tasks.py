@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
     max_retries=3,
 )
 def send_async_notification(user_id, notif_type, message, related_object_id=None,
-                            related_object_type=None, event_id=None, extra_data=None):
+                            related_object_type=None, event_id=None, extra_data=None,
+                            context=None):
     """
     Asynchronously create a routine notification.
 
@@ -50,8 +51,11 @@ def send_async_notification(user_id, notif_type, message, related_object_id=None
         return
     metadata = {
         # Pre-rendered message kept under context so the FCM template resolver
-        # can fall back to it when no template exists for this event type.
-        'context': {'message': message},
+        # can fall back to it when no template exists for this event type. `context`
+        # adds the variant and its params (`routine.services.send_notification`), which
+        # the inbox and the push render in their own language; `message` stays the
+        # fallback. A task queued before this argument existed has none.
+        'context': {**(context or {}), 'message': message},
         'data': {
             'type': notif_type,
             'related_object_id': str(related_object_id) if related_object_id is not None else None,

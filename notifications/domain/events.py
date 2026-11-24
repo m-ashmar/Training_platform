@@ -15,9 +15,16 @@ class NotificationTemplate:
     Templates use %(key)s placeholders for context interpolation.
     They are evaluated at the FCM delivery boundary inside
     LanguageContext.for_user_id().
+
+    `variants` are the bodies of an event whose sentence depends on the case
+    (`notifications/domain/routine_events.py`): {key: lazy body}. A row whose context
+    names one (`context["variant"]`) is rendered from it, in the active language, by
+    `NotificationTemplateResolver.render`; a row that names none, or one no longer
+    here, is rendered from `body` (Road to 10, notification language P1).
     """
     title: str  # gettext_lazy string
     body: str   # gettext_lazy string with %(key)s placeholders
+    variants: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -1902,6 +1902,15 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     Every record of money that already moved — a receipt, a fee held or paid out, a top-up
     with its amount, a sale, a withdrawal — and every reminder of state reads the same on
     every build. `mark_all_read` marks what this build lists.
+
+    **Which language** (Road to 10, 2026-11-24). `title` and `message` are rendered in the
+    request's language (`Accept-Language`, else the account's saved `preferred_language`)
+    whatever language the row was written in: the build chooses the text, the language
+    renders it (`notifications/template_resolver.py`, the rows' `variants`). `custom` (the
+    trainer's own words) reads as written, as does a `routine_assignment`,
+    `session_completed`, `progress_milestone` or `session_reminder` row written before
+    this change. Names inside a sentence are as they were written. A push is in the
+    saved language.
     """
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
