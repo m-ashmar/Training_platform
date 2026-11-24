@@ -1061,10 +1061,7 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
             except RoutineNotDeliverable as exc:
                 # Before the client is added and before month 1 is paid out: an empty
                 # or retired routine is not the programme that pays it (G5).
-                message = (_("This routine has no exercises yet. Add exercises before "
-                             "assigning it.") if exc.code == 'routine_empty'
-                           else _("This routine has been retired."))
-                return Response({"error": message, "code": exc.code,
+                return Response({"error": exc.message, "code": exc.code,
                                  "routine_id": routine.id},
                                 status=status.HTTP_400_BAD_REQUEST)
             except RoutineTaken:

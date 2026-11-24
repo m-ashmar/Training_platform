@@ -49,9 +49,14 @@ class RoutineTaken(Exception):
 
 class RoutineNotDeliverable(Exception):
     """The routine is not a programme a client can be given, so it cannot be the first
-    programme that pays the trainer month 1 (the backlog's G5). `code` says why."""
+    programme that pays the trainer month 1 (the backlog's G5). `code` says why and
+    `message` says it in the active language, for the API and the console alike."""
 
     code = 'routine_not_deliverable'
+
+    @property
+    def message(self):
+        return str(self)
 
 
 class RoutineEmpty(RoutineNotDeliverable):
@@ -59,11 +64,44 @@ class RoutineEmpty(RoutineNotDeliverable):
 
     code = 'routine_empty'
 
+    @property
+    def message(self):
+        return _("This routine has no exercises yet. Add exercises before assigning it.")
+
 
 class RoutineInactive(RoutineNotDeliverable):
     """The routine was retired, `is_active=false` (400 `routine_inactive`)."""
 
     code = 'routine_inactive'
+
+    @property
+    def message(self):
+        return _("This routine has been retired.")
+
+
+def refuse_undeliverable(routine_id, *, is_active):
+    """G5's one rule, for every way a client is put on a routine: raise `RoutineInactive`
+    for a retired routine and `RoutineEmpty` for one with no exercise rows (a routine not
+    saved yet has none). `assign_routine` asks it under the routine's lock
+    (`lock_deliverable`); the console's form asks it first, to answer on the form."""
+    from .models import RoutineExercise
+
+    if not is_active:
+        raise RoutineInactive(routine_id)
+    if routine_id is None or not RoutineExercise.objects.filter(routine_id=routine_id).exists():
+        raise RoutineEmpty(routine_id)
+
+
+def lock_deliverable(routine):
+    """Lock the routine row FOR UPDATE and apply `refuse_undeliverable` to it as it is
+    now, so a routine retired or emptied while this waited is refused too. Call it inside
+    a transaction, before the client is added and before anything is settled."""
+    from .models import Routine
+
+    locked = (Routine.objects.select_for_update(of=('self',)).only('pk', 'is_active')
+              .get(pk=routine.pk))
+    refuse_undeliverable(locked.pk, is_active=locked.is_active)
+    return locked
 
 
 class BadCustomization(ValueError):
@@ -108,17 +146,11 @@ def assign_routine(routine, client, actor):
     an empty or retired routine paid it: only `templates/{id}/generate/` refused an
     empty one (`template_empty`), and `routines/{id}/assign_to_client/` refused
     neither. Read under the same lock, so a routine retired while this waited is
-    refused too.
+    refused too. The console's assignment applies the same rule (`lock_deliverable`,
+    routine/admin.py).
     """
-    from .models import Routine, RoutineExercise
-
     with transaction.atomic():
-        locked = (Routine.objects.select_for_update(of=('self',)).only('pk', 'is_active')
-                  .get(pk=routine.pk))
-        if not locked.is_active:
-            raise RoutineInactive(routine.pk)
-        if not RoutineExercise.objects.filter(routine_id=routine.pk).exists():
-            raise RoutineEmpty(routine.pk)
+        lock_deliverable(routine)
         if trained_by_someone_else(routine, client):
             raise RoutineTaken(routine.pk)
         routine.assigned_to.add(client)
