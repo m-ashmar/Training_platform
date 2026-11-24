@@ -960,6 +960,20 @@ def refusals_for(trainer_id, client_ids, at=None) -> dict:
     return answers
 
 
+def coaching_refusals(viewer, client_ids) -> dict:
+    """`{client_id: refusal | None}` for a TRAINER reading their clients: the one rule
+    every trainer read of a client's personal data applies (BACKEND_BUGS B-201, the
+    manager's ruling, 2026-11-24) — `refusals_for`, `coaching_frozen` /
+    `coaching_unpaid` / `coaching_ended` while the coaching may not be used, else None.
+    Two queries for any number of clients. An admin is nobody's trainer and reads in
+    full: every answer None. Used by `trainer/clients/`'s neighbours: the client's file
+    (`trainer/client-profile/`), the roster's detail (`trainer/client-progress/{id}/`)."""
+    ids = list(client_ids)
+    if not getattr(viewer, 'is_trainer', False):
+        return {pk: None for pk in ids}
+    return refusals_for(viewer.pk, ids)
+
+
 def require_can_train(user, routine, at=None):
     """Raise the refusal `training_refusal` finds (403 `coaching_frozen` /
     `coaching_unpaid` / `coaching_ended`, naming the trainer; or 403 `product_refunded`

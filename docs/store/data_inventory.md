@@ -653,7 +653,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **On erasure.** Deleted.
 
-**Also on erasure.** `_chat_notices_sent` also deletes rows about the person that other people hold, which are not exported.
+**Also on erasure.** before any row goes, `_scrub_their_name_elsewhere` runs (`sources.py`); `_notices_that_go_with_them` also deletes rows about the person that other people hold, which are not exported.
 
 **Retention.** Purged nightly: 90 days after `created_at`.
 
@@ -1065,7 +1065,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Fields stored.** `id`, `name`, `description`, `translations`, `created_by`, `is_active`, `days`, `created_at`, `updated_at`, `source_template`, `purchase`, `trial`, `start_date`, `end_date`, `day_names`, `difficulty_level`, `estimated_duration`, `assigned_to`, `exercises`.
 
-**In the export.** Every field.
+**In the export.** `id`, `name`, `description`, `translations`, `created_by`, `is_active`, `days`, `created_at`, `updated_at`, `source_template`, `purchase`, `trial`, `start_date`, `end_date`, `day_names`, `difficulty_level`, `estimated_duration`, `exercises`. Not exported: `assigned_to`.
 
 **On erasure.** Kept.
 

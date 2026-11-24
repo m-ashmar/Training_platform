@@ -192,7 +192,15 @@ class UserSessionSerializer(serializers.ModelSerializer):
         #: `ended_at` and `duration_seconds` are computed by `end_session()` from the
         #: server's own clock. Writable, a client posted a 30-day session and a billion
         #: page views, and the owner's engagement numbers were whatever it typed.
-        read_only_fields = ['id', 'user', 'started_at', 'ended_at', 'duration_seconds']
+        #:
+        #: `ip_address` and `user_agent` are the request's, set by the view on create
+        #: (`UserSessionViewSet.perform_create`); writable, an update rewrote them.
+        #: `country`, `region` and `city` are never accepted: the server derives no
+        #: location, and a stored one would be location data the store forms do not
+        #: declare (SIDE_BUGS S-221, the fix run's ACC-2; `docs/store/privacy_labels.md`).
+        #: Sent anyway, they are ignored and stay empty.
+        read_only_fields = ['id', 'user', 'started_at', 'ended_at', 'duration_seconds',
+                            'ip_address', 'user_agent', 'country', 'region', 'city']
 
     def _counter(self, value, name):
         if value is not None and not (0 <= value <= 100000):

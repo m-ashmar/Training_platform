@@ -26,6 +26,21 @@ RS256 JWT. Send `Authorization: Bearer <access>` on every authenticated request.
 Reusing the previous one fails with `token_not_valid` — rotation with blacklisting means
 the old token is dead the moment it is exchanged.
 
+**A password change ends every session AT ONCE (the owner, 2026-11-24; additive).** The
+password change, the forgot-password reset, and an operator's reset or deactivation of
+the account sign every device out on its next request, not when its access token
+expires: an access token made before a change or reset of the password answers **401
+`password_changed`** (a new code) on every route, a cached one included (a deactivated
+account's answers 401 `user_inactive`, as before); the refresh token was blacklisted by the
+same change (401 `token_not_valid`, or `password_changed`), so the person signs in again.
+An open socket (chat, AI coach, the legacy social socket) closes at the change, 4001,
+after an `error` frame with `code: "auth"`. After a password change, the device that made
+it uses the pair the change returns, its old access token included in "every device".
+Each token carries a digest of the password it was made under (simplejwt's
+`hash_password` claim; `training_platform/jwt_sessions.py`). Tokens issued before this
+deploy carry none and keep working; their first refresh adds it. Nobody is signed out by
+the deploy itself.
+
 ### Registration flow
 
 ```
@@ -86,14 +101,17 @@ POST /api/auth/forgot-password/         {email}                       -> 200 (al
 POST /api/auth/forgot-password/verify/  {email, otp_code}             -> 200 {reset_token}
                                         | 400 otp_invalid | otp_expired | too_many_attempts
 POST /api/auth/password/change/  {current_password, new_password}  (signed in; S2.8)
-                                        -> 200 {message, access, refresh}: every other
-                                           session ends, store the new pair
+                                        -> 200 {message, access, refresh}: every session
+                                           ends at once (other devices' access tokens
+                                           answer 401 password_changed, open sockets
+                                           close), store the new pair and use it
                                         | 400 current_password_wrong | password_unchanged
                                           | password_not_set (no password yet: use
                                             forgot-password; never a guess)
                                           | field_errors.new_password (as at sign-up)
                                         | 429 throttled (5 wrong in 15 min)
-POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200
+POST /api/auth/forgot-password/confirm/ {reset_token, new_password}   -> 200: every
+                                           session ends at once, as on a change
                                         | 400 field_errors.new_password: password_too_short |
                                           password_too_common | password_entirely_numeric (as at sign-up)
 ```
@@ -268,6 +286,22 @@ so parse ids client-side.
 | `personal_record` | `exercise_id`, `set_log_id` — the set that beat the previous best |
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
+
+**`person_erased` (additive, 2026-11-24): a `data` key that can appear on these kinds after
+an erasure.** When the person a notice names erases their account, the notice stays in the
+reader's inbox with its date, the name reads "Deleted account" in the reader's language,
+`actor` is null, and `data` gains `person_erased: "true"` (a string, like every value
+here). The kinds: `trainer_assignment_request`, `trainer_unassignment`,
+`client_request_received`, `client_request_approved`, `client_request_rejected`,
+`client_request_cancelled`, `client_unassigned_trainer`, `coaching_renewed`,
+`coaching_renewal_soon`, `coaching_ending_soon`, `coaching_payment_due`, `coaching_ended`,
+`coaching_finished`, `coaching_fee_held`, `coaching_fee_released`, `coaching_fee_refunded`,
+and a trainer's `session_completed` about the erased client. The other `data` keys stay as
+they were (an erased account's id reads nothing: its session answers 404, its file
+`trainer/client-profile/{id}/` 403 `not_your_client`). Branch on `person_erased`, never on a null sender: `session_completed` has no
+`actor` even while the client lives. It is on the inbox row (`GET
+/api/social/notifications/`); a push already delivered does not change. A suspended
+account's notices never carry it.
 
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
@@ -604,6 +638,12 @@ names, and a trainer's bio, specialisations and certifications) answer 400
 `content_not_allowed` when the text holds a term on the banned-terms list, with the
 field in `field_errors` and nothing saved; see "The banned-terms filter" under Safety
 (2026-09-27).
+
+`user/update/`, `trainer/profile/` and `client/profile/` answer 400
+`profile_picture_read_only` (with `field`) for a FILE sent as `profile_picture`, and save
+nothing; the picture has its own route, `POST /api/auth/user/profile-picture/` (the owner,
+2026-09-20: refused, not dropped). The two profile routes dropped the file with 200 until
+the fix run's S-200 (2026-11-24). The picture's URL echoed back as text is not refused.
 
 **`user/details/` names the role** (BACKEND_BUGS B-121, 2026-09-24; additive). The answer
 gains `user_type` (`client` | `trainer` | `agent` | `admin`) and `media` — the person's
@@ -1117,6 +1157,7 @@ anything to buy, on any build:
 | `subscription_expiring` | once per cover, when its end comes within 7 days. The 3-day push is unchanged and sends no email |
 | `subscription_expired` | once per cover, with its first lapsed notice (not on each reminder step) |
 | `withdrawal_requested`, `withdrawal_paid`, `withdrawal_failed` | with each push; the number and the amount |
+| none — a security notice, never switched off | `password_changed` (the owner, 2026-11-24): "your password was changed; if this wasn't you, reset it with Forgot password and contact support" (the support address as text), when and how (signed in, or with an emailed code). On a change while signed in (`POST auth/password/change/`) and on a forgot-password reset (`POST auth/forgot-password/confirm/`); not on an operator's reset. No inbox row and no push. Like the account emails (the sign-up and reset codes), no preference stops it, and it is not among `email_event_types` |
 
 Preferences govern the email as they govern the push: `channels.email: false` on a type's
 row (or on `all`) stops its email, `is_enabled: false` stops push and email, and the
@@ -1743,6 +1784,28 @@ reads 1, 2, 4. Nor does a block end or hide an approved coaching: a client who b
 their current trainer is still in that trainer's `trainer/clients/` list until the
 coaching ends.
 
+**`GET /api/auth/trainer/clients/` (the fix run's G10, 2026-11-24; additive).** The list is
+the clients of an APPROVED relation with the trainer, ordered by id — the record every
+other read of a client uses — never the `assigned_trainer` pointer, which could still name
+a dismissed trainer. Each row adds `coaching_refusal`: null while the coaching may be used,
+else `coaching_frozen`, `coaching_unpaid` or `coaching_ended`; the client is still listed,
+by name, and `email`, `height`, `weight`, `age`, `gender`, `activity_level`,
+`client_goals` and `client_preferences` are null meanwhile (the rule of the trainer's
+diet reads). `profile_picture` is a signed URL that expires, or null.
+
+**One rule for every trainer read of a client's personal data (BACKEND_BUGS B-201, the
+manager's ruling, 2026-11-24; additive).** While the coaching may not be used, the same
+`coaching_refusal` key (null while it may) is on `trainer/client-profile/` (the list and
+`{id}/`), on each row of `routine/trainer/client-progress/recent/`, and on
+`routine/trainer/client-progress/{id}/`. The file then answers 200 with `email`, `height`,
+`weight`, `age`, `gender`, `specific_injury`, `activity_level`, `client_goals`,
+`client_preferences`, `training_goal`, `training_place`, `training_days_per_week`,
+`injury_areas`, `bmi`, `bmr` and `tdee` null; the names, the picture, the dates and
+`coaching` stay, `coaching.status` saying `frozen` or `unpaid`. The progress detail holds
+back `client.goal`; its training record stays. The three values: `coaching_frozen` and
+`coaching_unpaid` keep the relation approved; `coaching_ended` means it is gone (the file
+answers 403 `not_your_client`, the lists leave the client out). No new code.
+
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
 `likes_count` and `comments_count` on a post and a comment, all exclude the rows a
@@ -2028,17 +2091,35 @@ them depends on who is looking. `?lang=ar|en`; Arabic (right-to-left) when absen
 | `DELETE, GET` | `/api/privacy/erase/` | auth | `PersonalDataEraseView` |
 | `GET` | `/api/privacy/export/` | auth | `PersonalDataExportView` |
 
-**Deleting an account, every role (Road to 10 R4, 2026-11-23).** A client, an agent and a
-trainer who coaches nobody are deleted (`DELETE privacy/erase/?confirm=ERASE`, 200); a
-trainer still coaching anyone is refused, 409 `trainer_has_active_clients` with
-`active_clients`. Additive: `GET`, the 400 `confirmation_required` and the 200 each carry
-`money` — `{wallet: [{currency, amount}], held_coaching_months, agent_cash: [{currency,
-amount}], contact_support}`, non-zero amounts only. Money never refuses a deletion; while
-`contact_support` is true the app says, before the person confirms, that the balance
-cannot be spent after deletion and support returns it on request (the privacy policy).
-On the 200 it is what remains (a held month is already back in `wallet`). An agent's
-`agent_cash` is the platform's cash they still hold; deleting does not settle it, and a
-deleted agent leaves the cash directory (`GET /api/wallet/agents/`).
+**Deleting an account, every role (Road to 10 R4, 2026-11-23).** A client, an agent who
+holds none of the platform's cash and a trainer who coaches nobody are deleted (`DELETE
+privacy/erase/?confirm=ERASE`, 200); a trainer still coaching anyone is refused, 409
+`trainer_has_active_clients` with `active_clients`. Additive: `GET`, the 400
+`confirmation_required` and the 200 each carry `money` — `{wallet: [{currency, amount}],
+held_coaching_months, agent_cash: [{currency, amount}], contact_support}`, non-zero
+amounts only. The person's own money never refuses a deletion; while `contact_support`
+is true the app says, before the person confirms, that the balance cannot be spent after
+deletion and support returns it on request (the privacy policy). On the 200 it is what
+remains (a held month is already back in `wallet`). A deleted agent leaves the cash
+directory (`GET /api/wallet/agents/`) and takes no more top-ups.
+
+**An agent holding the platform's cash is refused (the owner, 2026-11-24; additive).**
+`agent_cash` is the cash an agent collected for the platform and has not settled. While
+it lists anything, `DELETE privacy/erase/?confirm=ERASE` answers 409
+`agent_holds_platform_cash` with `agent_cash: [{currency, amount}]` (the same list as
+`money.agent_cash`, decimal strings, per currency) and nothing is changed. It deletes once
+an operator has recorded the settlement of every currency. The same refusal holds for a
+web request (`/legal/delete-account/`): the operator's erase leaves the request open and
+says how much is held. Before, R4 deleted the account and only reported `agent_cash`.
+
+**What an erasure does to OTHER people's inboxes (the fix run's ACC-2, 2026-11-24).** The
+notices the erased person caused in someone else's inbox: their chat notices (as since
+S-146), a trainer's own words to a client (`custom`), and the like, comment and follow
+notices (`post_liked`, `comment_created`, `user_followed`) are deleted with them. A
+coaching notice that names them (the trainer-client and coaching-month kinds, and a
+trainer's `session_completed` about the client) is KEPT, with its date: it no longer has
+an `actor`, and the name in it reads "Deleted account" in the reader's language
+(«حساب محذوف»). No new code or key; the app renders `message` as before.
 
 The export discloses nothing the API itself withholds: its `blocks` section is `{id,
 blocked, created_at}` for the blocks this person MADE, never one made against them, and

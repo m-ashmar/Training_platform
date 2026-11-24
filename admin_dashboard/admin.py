@@ -452,24 +452,56 @@ class TransferReviewAdmin(admin.ModelAdmin):
     form = TransferReviewForm
     list_select_related = ('payment', 'resolved_by')
     list_display = ('created_at', 'reason', 'status', 'amount', 'currency', 'note',
-                    'sender', 'sender_is_saved_payer', 'payment')
+                    'sender', 'sender_is_saved_payer', 'sender_address_proof', 'payment')
     list_filter = ('status', 'reason', 'currency')
     search_fields = ('transaction_id', 'note', 'sender', 'payment__id',
                      'payment__gateway_transaction_reference')
     readonly_fields = ('gateway', 'transaction_id', 'amount', 'currency', 'note', 'sender',
                        'occurred_at', 'reason', 'payment', 'candidate_payment_ids',
-                       'sender_match_payment_ids',
+                       'sender_match_payment_ids', 'sender_address_proof',
                        'status', 'resolved_by', 'resolved_at', 'raw', 'created_at')
 
-    @admin.display(boolean=True, description="Sender = saved payer address")
+    def _sender_proof(self, obj):
+        """`"proven"`, `"unproven"` or None: whether the transfer's sender is an address
+        the checkout's customer saved (the row's `sender_match_payment_ids`, the held
+        checkout's own when there is one), and whether that customer PROVED it.
+
+        `sender_match_payment_ids` is written from every saved address, proven or not
+        (`subscription/payer_address.py sender_matches`); only `likely_payment` asks for a
+        proven one (SIDE_BUGS S-241). Read here, when the page is shown, from the
+        transfer's own fields (the same digests the match used) — so an address proven
+        since the transfer was queued counts (SIDE_BUGS S-255, the fix run's SOC-2: an
+        unproven, self-declared address ticked exactly like a proven one)."""
+        ids = [str(pk) for pk in (obj.sender_match_payment_ids or [])]
+        if obj.payment_id is not None:
+            ids = [pk for pk in ids if pk == str(obj.payment_id)]
+        if not ids:
+            return None
+        from subscription.models import Payment
+        from subscription.payer_address import owners_of_sender
+
+        proven = owners_of_sender({"gateway_data": obj.raw or {}, "sender": obj.sender},
+                                  proven_only=True)
+        payers = {payment.payer_id for payment in
+                  Payment.objects.filter(pk__in=ids).select_related('subscription')}
+        return "proven" if proven & payers else "unproven"
+
+    @admin.display(boolean=True, description="Sender = saved payer address (proven)")
     def sender_is_saved_payer(self, obj):
         """The second signal (the spec, section 6): the transfer's sender is the ShamCash
-        address the held checkout's customer saved on their profile. Evidence — the
-        address is self-declared — never a reason to approve on its own. The checkouts
-        it points at are `sender_match_payment_ids` on the row."""
-        if obj.payment_id is None:
-            return bool(obj.sender_match_payment_ids)
-        return str(obj.payment_id) in (obj.sender_match_payment_ids or [])
+        address the held checkout's customer saved AND proved — a transfer from it once
+        confirmed one of their own checkouts by its exact reference (`verified_at`).
+        Evidence, never a reason to approve on its own. An address saved and not proven
+        does not tick (`sender_address_proof` says so beside it). The checkouts it
+        points at are `sender_match_payment_ids` on the row."""
+        return self._sender_proof(obj) == "proven"
+
+    @admin.display(description="Sender address")
+    def sender_address_proof(self, obj):
+        """"proven", "saved, not proven" (self-declared: anyone can type any address),
+        or "—" when the sender is no customer's saved address."""
+        return {"proven": "proven", "unproven": "saved, not proven"}.get(
+            self._sender_proof(obj), "—")
     actions = ['approve', 'reject', 'dismiss']
 
     def has_add_permission(self, request):

@@ -27,7 +27,7 @@ from training_platform.admin_utils import log_admin_action
 
 from .models import AIConsent, BannedTerm, Block, Report, ReportStatus
 from .services import open_report_count
-from .targets import console_link
+from .targets import console_link, reported_message
 
 
 def _is_operator(user) -> bool:
@@ -72,10 +72,12 @@ class ReportAdmin(OperatorOnlyMixin, admin.ModelAdmin):
     date_hierarchy = "created_at"
     # What the operator writes, and nothing else. `status` is moved by the two actions
     # or here; the rest is the reporter's account of what happened and is evidence.
-    readonly_fields = ("reporter", "target_type", "target_id", "target", "reason",
-                       "note", "handled_by", "handled_at", "created_at")
-    fields = ("created_at", "reporter", "target_type", "target_id", "target", "reason",
-              "note", "status", "resolution_note", "handled_by", "handled_at")
+    readonly_fields = ("reporter", "target_type", "target_id", "target",
+                       "reported_message", "reason", "note", "handled_by", "handled_at",
+                       "created_at")
+    fields = ("created_at", "reporter", "target_type", "target_id", "target",
+              "reported_message", "reason", "note", "status", "resolution_note",
+              "handled_by", "handled_at")
     actions = ["dismiss_reports", "mark_action_taken"]
 
     @admin.display(description="Target")
@@ -91,6 +93,22 @@ class ReportAdmin(OperatorOnlyMixin, admin.ModelAdmin):
         if not url:
             return label
         return format_html('<a href="{}">{}</a>', url, label)
+
+    @admin.display(description="Reported message")
+    def reported_message(self, obj):
+        """What a reported chat or AI coach message said (`moderation.targets.
+        reported_message`): who, when, and the text, escaped. A message has no console
+        page of its own, so without this the operator saw "Chat message #N" and nothing
+        to judge (SIDE_BUGS S-188). Empty for every other kind of target, which links
+        to its own page."""
+        said = reported_message(obj.target_type, obj.target_id)
+        if said is None:
+            return "—"
+        return format_html(
+            '<div><strong>{}</strong>, {} ({})</div>'
+            '<blockquote style="white-space: pre-wrap; margin: .5em 0">{}</blockquote>',
+            said["who"], said["when"].strftime("%Y-%m-%d %H:%M"), said["note"],
+            said["text"] or "(no text)")
 
     def changelist_view(self, request, extra_context=None):
         """Put the number of waiting complaints in the page title — the queue badge."""

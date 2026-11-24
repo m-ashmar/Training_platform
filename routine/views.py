@@ -5651,6 +5651,14 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         `effort_rating` is 1 (easy) to 5 (all I had), as the client rated that session,
         or null while unanswered.
 
+        `coaching_refusal` (additive, BACKEND_BUGS B-201, the manager's ruling of
+        2026-11-24): null while the coaching may be used, else `coaching_frozen` or
+        `coaching_unpaid` (`users.coaching.refusals_for`, the rule every trainer read of
+        a client's personal data applies). While it is set, `client.goal` (the client's
+        own goals) is null. The training record — `weekly_stats`, `strength`,
+        `recent_activity` — stays: it is what the trainer prepares the next weeks from.
+        An admin reads in full (null).
+
         Identical on every build; no price and no claim.
         """
         user = request.user
@@ -5766,13 +5774,20 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
              # contract read a key that was never sent. Additive: the promised name is
              # added, the shipped one stays (CLAUDE.md — never remove a key the app
              # may already read).
+             from users.coaching import coaching_refusals
+
+             refusal = coaching_refusals(user, [client.pk]).get(client.pk)
              client_summary = {
                  'id': client.id,
                  'name': client.full_name or client.username,
                  'joined': client.date_joined,
-                 'goal': getattr(client, 'client_goals', 'Not set')
+                 # The client's own goals: held back while the coaching may not be
+                 # used (B-201), as `trainer/clients/` and the file hold them back.
+                 'goal': (None if refusal is not None
+                          else getattr(client, 'client_goals', 'Not set'))
              }
              return Response({
+                 'coaching_refusal': refusal,
                  'client': client_summary,
                  'client_info': client_summary,
                  'strength': _client_strength(client),
@@ -5849,6 +5864,12 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
         or `steady` over the last 8 weeks. Both are absent for a client with no plan and
         no logged set; the full numbers are on `trainer/client-progress/{id}/`.
 
+        Each entry also carries `coaching_refusal` (additive, BACKEND_BUGS B-201): null
+        while that client's coaching may be used, else `coaching_frozen`,
+        `coaching_unpaid` or `coaching_ended` — the key `trainer/clients/` and the
+        client's file carry, so the roster needs no second request to show a paused
+        client. The row holds no personal record to withhold (names, picture, training).
+
         One batch of queries for the whole roster (it was ~509 on a full page).
         Identical on every build.
         """
@@ -5882,10 +5903,14 @@ class TrainerClientProgressViewSet(viewsets.ViewSet):
                       .values_list('client_id', 'unread_count'))
         # With the request: `client_info.profile_picture` is absolute here as it is
         # everywhere else (the same shape bug as BACKEND_BUGS B-032, on the picture).
+        from users.coaching import refusals_for
+
+        refusals = refusals_for(user.pk, [client.pk for client in clients])
         recent_activity = [
-            RecentActivitySerializer(
+            {**RecentActivitySerializer(
                 client, context={"activity": activity, "request": request,
-                                 "unread": unread}).data
+                                 "unread": unread}).data,
+             'coaching_refusal': refusals.get(client.pk)}
             for client in clients
         ]
         

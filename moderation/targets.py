@@ -180,6 +180,57 @@ def author_id_of(target_type: str, row) -> int | None:
     return None if spec is None else spec.author(row)
 
 
+#: The longest stretch of a reported message the console's report page quotes.
+REPORTED_TEXT_LIMIT = 2000
+
+
+def reported_message(target_type: str, target_id: int) -> dict | None:
+    """What a reported MESSAGE said, for the report's own page in the console, or None
+    for any other kind of target (each of those has its own console page) and for a
+    message that is gone.
+
+    A message has no console page, and must not get one: a page per chat message would
+    put every private conversation on the console, where moderation needs only the one
+    that was reported. So the report quotes it (SIDE_BUGS S-188, the fix run's SOC-2: a
+    `chat_message` or `coach_message` report showed only "Chat message #N", never the
+    text, and the operator could not judge it).
+
+    `{"who", "when", "text", "note"}`: for a coach message, its sender, its kind and
+    caption, and whether the sender took it back (the stored text is kept for reports);
+    for an AI coach message, whether the person or the coach wrote it. `text` is cut at
+    `REPORTED_TEXT_LIMIT` characters."""
+    if target_type == TargetType.COACH_MESSAGE:
+        from chat.models import Message
+
+        row = Message.objects.filter(pk=target_id).select_related("sender").first()
+        if row is None:
+            return None
+        note = f"a {row.get_kind_display().lower()}"
+        if row.attachment:
+            note += " with a file (not shown here)"
+        if row.deleted_at is not None:
+            note += "; its sender took it back"
+        sender = row.sender
+        who = (f"{sender.full_name} (#{sender.pk}, {sender.user_type})" if sender
+               else "a deleted account")
+        return {"who": who, "when": row.created_at,
+                "text": (row.body or "")[:REPORTED_TEXT_LIMIT], "note": note}
+    if target_type == TargetType.CHAT_MESSAGE:
+        from ai_assistant.models import ChatMessage
+
+        row = (ChatMessage.objects.filter(pk=target_id)
+               .select_related("session__user").first())
+        if row is None:
+            return None
+        person = row.session.user if row.session_id else None
+        who = ("the AI coach" if row.role != "user"
+               else f"{person.full_name} (#{person.pk})" if person else "a deleted account")
+        return {"who": who, "when": row.created_at,
+                "text": (row.content or "")[:REPORTED_TEXT_LIMIT],
+                "note": f"in the AI coach chat of #{getattr(person, 'pk', '?')}"}
+    return None
+
+
 def console_link(target_type: str, target_id: int, site_name: str = "admin") -> str | None:
     """The operator console's page for this target, so the queue can open it.
 

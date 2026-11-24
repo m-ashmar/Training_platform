@@ -90,7 +90,18 @@ def activate_users(modeladmin, request, queryset):
 
 @admin.action(description="Deactivate selected users", permissions=["change"])
 def deactivate_users(modeladmin, request, queryset):
-    count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
+    """Deactivate, and sign each account out of every device at once: its refresh
+    tokens blacklisted, its open sockets closed (`users/utils.py end_every_session`;
+    the owner, 2026-11-24). Its access tokens are refused already: `is_active`."""
+    from django.db import transaction
+
+    from .utils import end_every_session
+
+    with transaction.atomic():
+        count = bulk_apply(request, queryset, "Deactivated via bulk admin action",
+                           is_active=False)
+        for user in queryset:
+            end_every_session(user)
     messages.success(request, f"Deactivated {count} users.")
 
 def coaching_in_the_way(client, new_trainer_id):
@@ -250,6 +261,23 @@ class CustomUserAdmin(UserAdmin):
         return False
 
     def save_model(self, request, obj, form, change):
+        """`_save_model`, and then: a changed password, or the account deactivated,
+        signs it out of every device at once (`users/utils.py end_every_session`; the
+        owner, 2026-11-24), in the same transaction. The list's `is_active` column comes
+        through here too."""
+        from django.db import transaction
+
+        from .utils import end_every_session
+
+        changed = set(getattr(form, 'changed_data', None) or ())
+        ends = change and ('password' in changed
+                           or ('is_active' in changed and not obj.is_active))
+        with transaction.atomic():
+            self._save_model(request, obj, form, change)
+            if ends:
+                end_every_session(obj)
+
+    def _save_model(self, request, obj, form, change):
         """Hash a changed password, and keep the pointer and the relationship in step.
 
         There were TWO `save_model` definitions in this class body. The second replaced

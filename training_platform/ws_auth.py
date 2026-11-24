@@ -16,10 +16,17 @@ money per message.
 enforces `token_type == "access"`, so a refresh token is rejected as the wrong
 credential before the blacklist is even relevant.
 
-Access tokens themselves are not revocable in simplejwt; they expire on their own
-(ACCESS_TOKEN_LIFETIME, 60 minutes here). That is the standard bearer-token tradeoff
-and is deliberate. What is NOT acceptable is a 7-day refresh token, already revoked,
-authenticating a live connection.
+Access tokens are revoked by a password change (the owner, 2026-11-24,
+`training_platform/jwt_sessions.py`): a token made under an older password is refused
+here as on every route. What is NOT acceptable either is a 7-day refresh token, already
+revoked, authenticating a live connection.
+
+An OPEN socket ends at the change too, not at its next frame or at its token's expiry:
+every consumer joins its account's session group (`session_group`), and
+`users/utils.py end_every_session` sends `session.ended` to it when the change commits
+(`end_open_sockets`). Each socket then re-checks its own credential
+(`authenticate_scope`, one query) and closes if it no longer holds, so a socket opened
+with the fresh pair a password change returns stays open.
 """
 
 from __future__ import annotations
@@ -93,9 +100,10 @@ def authenticate_scope(scope):
     Runs database queries, so consumers must call it through
     `channels.db.database_sync_to_async`.
     """
-    from rest_framework_simplejwt.authentication import JWTAuthentication
     from rest_framework_simplejwt.exceptions import TokenError
     from rest_framework_simplejwt.tokens import AccessToken
+
+    from training_platform.jwt_sessions import SessionJWTAuthentication
 
     token = token_from_scope(scope)
     if not token:
@@ -103,9 +111,10 @@ def authenticate_scope(scope):
         return None
 
     try:
-        # AccessToken, never UntypedToken: this is what rejects a refresh token.
+        # AccessToken, never UntypedToken: this is what rejects a refresh token. The
+        # REST routes' authentication, so a password change refuses it here too.
         validated = AccessToken(token)
-        return JWTAuthentication().get_user(validated)
+        return SessionJWTAuthentication().get_user(validated)
     except TokenError as exc:
         logger.warning("websocket auth: rejected token (%s)", exc)
         return None
@@ -118,3 +127,72 @@ def authenticate_scope(scope):
     # Doing it again inside the function closed the connection on the rejection path
     # too, which breaks any caller still holding it — a test running inside a
     # transaction sees "connection already closed" on its very next query.
+
+
+# ------------------------------------------------------------- the session's end
+def session_group(user_id) -> str:
+    """The channel group every socket of one account joins (`SessionEndsMixin`)."""
+    return f"session_{user_id}"
+
+
+def end_open_sockets(user_id) -> None:
+    """Tell every open socket of the account to re-check its credential now
+    (`SessionEndsMixin.session_ended`). Best effort: a channel layer that cannot be
+    reached is logged, and those sockets end at their next frame or their token's
+    expiry, as before. Called on commit by `users/utils.py end_every_session`."""
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+
+    try:
+        layer = get_channel_layer()
+        if layer is not None:
+            async_to_sync(layer.group_send)(session_group(user_id),
+                                            {"type": "session.ended"})
+    except Exception:
+        logger.warning("could not tell user %s's open sockets that the session ended",
+                       user_id, exc_info=True)
+
+
+class SessionEndsMixin:
+    """For an `AsyncWebsocketConsumer`: close the socket when its account's session
+    ends (a password change, a reset, a deactivation), not at its next frame.
+
+    Call `join_session_group()` once the user is known, before `accept()`, and refuse
+    the socket (4001) when it answers False; `leave_session_group()` in `disconnect`.
+    `session_ended` re-checks this socket's own token, so a socket opened with a fresh
+    pair after the change stays open; when the token no longer holds,
+    `close_for_ended_session()` runs (a consumer overrides it to say why first).
+
+    THE HANDSHAKE'S GAP (the integrator's review of 7307f94, 2026-11-24): a socket
+    authenticates in `connect()`, then joins the group. A change that commits between
+    the two sends its `session.ended` to a group the socket is not in yet, and the
+    socket then listened with a dead token until the token expired. So the join asks
+    the credential once more AFTER it is in the group (`authenticate_scope`, one
+    query per connect): a change committed before that read is seen by it, and one
+    committed after it reaches the socket as `session.ended`."""
+
+    _session_group = None
+
+    async def join_session_group(self) -> bool:
+        """Join this account's session group; False when the credential no longer
+        holds once in it (the caller refuses the socket)."""
+        from channels.db import database_sync_to_async
+
+        self._session_group = session_group(self.user.pk)
+        await self.channel_layer.group_add(self._session_group, self.channel_name)
+        user = await database_sync_to_async(authenticate_scope)(self.scope)
+        return user is not None and user.pk == self.user.pk
+
+    async def leave_session_group(self):
+        if self._session_group:
+            await self.channel_layer.group_discard(self._session_group, self.channel_name)
+
+    async def session_ended(self, event):
+        from channels.db import database_sync_to_async
+
+        user = await database_sync_to_async(authenticate_scope)(self.scope)
+        if user is None or user.pk != getattr(self.user, "pk", None):
+            await self.close_for_ended_session()
+
+    async def close_for_ended_session(self):
+        await self.close(code=4001)

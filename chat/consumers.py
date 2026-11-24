@@ -77,7 +77,8 @@ from django.utils.translation import gettext as _
 from rest_framework.exceptions import APIException
 
 from training_platform.i18n import LanguageContext
-from training_platform.ws_auth import authenticate_scope, token_expires_at
+from training_platform.ws_auth import (SessionEndsMixin, authenticate_scope,
+                                       token_expires_at)
 
 from . import services
 from .events import group_name
@@ -86,7 +87,7 @@ from .models import Conversation
 logger = logging.getLogger(__name__)
 
 
-class ChatConsumer(AsyncWebsocketConsumer):
+class ChatConsumer(SessionEndsMixin, AsyncWebsocketConsumer):
     """One socket, one conversation, one group.
 
     Group per conversation rather than per user: the two people in a thread are the
@@ -117,11 +118,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.group = group_name(self.conversation.pk)
         self.expires_at = token_expires_at(self.scope)
         await self.channel_layer.group_add(self.group, self.channel_name)
+        # A password change, a reset or a deactivation closes it at once
+        # (`training_platform.ws_auth.SessionEndsMixin`; the owner, 2026-11-24).
+        if not await self.join_session_group():
+            await self.close(code=4001)
+            return
         await self.accept()
 
     async def disconnect(self, close_code):
         if self.group:
             await self.channel_layer.group_discard(self.group, self.channel_name)
+        await self.leave_session_group()
+
+    async def close_for_ended_session(self):
+        """The account's session ended while this socket was open: the same `auth`
+        error and 4001 as a sending socket whose credential no longer holds."""
+        await self._error('auth', _('Your session has expired. Please sign in again.'))
+        await self.close(code=4001)
 
     async def receive(self, text_data=None, bytes_data=None):
         if self.conversation is None:

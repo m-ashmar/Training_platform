@@ -499,13 +499,25 @@ def lockout_seconds_left(email: str) -> int:
 
 
 def end_every_session(user) -> int:
-    """Sign the account out everywhere: blacklist every refresh token it holds, and
-    answer how many were still live.
+    """Sign the account out everywhere, AT ONCE (the owner, 2026-11-24), and answer how
+    many refresh tokens were still live.
 
-    Each other device then keeps only its access token, until it expires (within the
-    hour; an open chat socket closes at its first event after that). The revocation a
-    password change makes (`users/password_views.py`) and an operator's password reset
-    in the console (`users/admin.py`, Road to 10 round 4), so the two cannot drift."""
+    * every refresh token it holds is blacklisted;
+    * its ACCESS tokens: a changed password refuses every token made under the old one
+      on its next request (`training_platform/jwt_sessions.py`), and a deactivated
+      account is refused already; the response cache's memo of the account is dropped
+      on commit so a cached route refuses it at once too
+      (`middleware.CacheMiddleware._account_is_usable`);
+    * every open socket of the account re-checks its token on commit and closes
+      (`training_platform.ws_auth.end_open_sockets`).
+
+    One revocation for every way a session must end: the password change
+    (`users/password_views.py`), the forgot-password reset (`users/views.py
+    PasswordResetConfirmView`), the console's password reset and its deactivation
+    (`users/admin.py`), the erasure (`training_platform/privacy/registry.py`), so they
+    cannot drift. Call it in the transaction that changes the password or `is_active`:
+    what it does on commit then sees the change."""
+    from django.db import transaction
     from rest_framework_simplejwt.token_blacklist.models import (BlacklistedToken,
                                                                  OutstandingToken)
 
@@ -513,7 +525,26 @@ def end_every_session(user) -> int:
     for token in OutstandingToken.objects.filter(user=user):
         _row, created = BlacklistedToken.objects.get_or_create(token=token)
         ended += int(created)
+    user_id = user.pk
+    transaction.on_commit(lambda: _after_the_session_ended(user_id))
     return ended
+
+
+def _after_the_session_ended(user_id) -> None:
+    """On the commit of `end_every_session`: a new session generation (a memo a request
+    is about to write from the row as it was is then never believed), the memo dropped,
+    the open sockets told."""
+    from training_platform.cache import private_cache
+    from training_platform.middleware import account_memo_key, bump_account_generation
+    from training_platform.ws_auth import end_open_sockets
+
+    try:
+        bump_account_generation(user_id)
+        private_cache().delete(account_memo_key(user_id))
+    except Exception:
+        # The memo lives a minute: a cached route then refuses within it.
+        logger.warning("could not drop the cache memo of user %s", user_id, exc_info=True)
+    end_open_sockets(user_id)
 
 
 def clear_login_attempts(email: str):

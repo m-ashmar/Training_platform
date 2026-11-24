@@ -514,10 +514,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     @property
     def full_name(self):
-        """Get user's full name."""
-        if self.first_name and self.last_name:
-            return f"{self.first_name} {self.last_name}"
-        return self.username
+        """The person's name as others read it: the first and last name, either alone
+        when only one is set, and the username only when neither is.
+
+        It fell back to the username unless BOTH were set (SIDE_BUGS S-223, the fix run's
+        ACC-1). A last name is optional (`blank=True`) and a trainer is listed on a first
+        name alone, so every coaching notice built from it (`users/coaching.py`) named
+        "Omar" by his username."""
+        name = " ".join(part for part in ((self.first_name or "").strip(),
+                                          (self.last_name or "").strip()) if part)
+        return name or self.username
 
     def get_client_count(self):
         """Get number of clients assigned to this trainer."""
@@ -734,7 +740,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.is_admin:
             return CustomUser.objects.filter(user_type='client')
         elif self.is_trainer:
-            return self.clients.all()
+            # The APPROVED relation, as `can_access_user_data` above: never the
+            # `assigned_trainer` pointer's reverse accessor (the fix run's G10).
+            return CustomUser.objects.filter(pk__in=TrainerClientRelation.objects.filter(
+                trainer=self, status='approved').values('client_id'))
         return CustomUser.objects.none()
 
     def retire(self, reason=""):
@@ -749,7 +758,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         deletion cannot destroy a balance in the first place.
 
         Raises `ErasureRefused` (code `trainer_has_active_clients`) for a trainer who
-        still coaches someone: the owner's rule, and nothing is changed.
+        still coaches someone, and (code `agent_holds_platform_cash`) for an agent who
+        still holds the platform's cash: the owner's rules (2026-09-19, 2026-11-24), and
+        nothing is changed.
         """
         from training_platform.privacy import erase_user_data
 

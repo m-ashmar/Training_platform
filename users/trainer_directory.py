@@ -240,14 +240,11 @@ class CoachingPriceBook:
         return self._rates.get(relation.trainer_id) or 0
 
 
-def _absolute(request, url):
-    return request.build_absolute_uri(url) if request is not None and url else url
-
-
 def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
     """Cards for `trainers`, in the order given. Two queries for the whole page."""
     from policy.money import MoneyType
     from policy.services import can_show_price
+    from training_platform.media_storage import media_url
 
     trainers = list(trainers)
     ids = [t.pk for t in trainers]
@@ -262,7 +259,8 @@ def trainer_cards(trainers, request, *, proof=None) -> list[dict]:
             'id': t.pk,
             'first_name': t.first_name,
             'last_name': t.last_name,
-            'profile_picture': _absolute(request, t.profile_picture.url) if t.profile_picture else None,
+            # `media_url`, the one function for a stored file's URL (SIDE_BUGS S-246).
+            'profile_picture': media_url(t.profile_picture, request) or None,
             'specializations': _strings(t.trainer_specializations),
             'focus': trainer_focus(t),
             'experience_years': t.trainer_experience_years,

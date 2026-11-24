@@ -367,21 +367,99 @@ register(PersonalDataSource(
     data_types=("messages", "photos_videos", "audio")))
 
 # --- notifications ------------------------------------------------------------
-# The chat notices this person SENT go with them too. Each one sits in the other side's
-# inbox holding the sender's name and the first 120 characters of what they wrote
-# (`chat/events.py`), and the conversation it points at is deleted above — so without
-# this the thread vanished and the other side's inbox kept rendering the erased
-# person's name and words for the 90 days of retention. Not exported: they are the
-# recipient's inbox, not the sender's data to download.
-def _chat_notices_sent(user):
+# Notices in OTHER people's inboxes that go with this person (`actor`), never exported:
+# they are the recipient's inbox, not the sender's data to download, and not counted.
+#
+# * `chat_message` — the chat notices they sent. Each holds the sender's name and the
+#   first 120 characters of what they wrote (`chat/events.py`), and the conversation it
+#   points at is deleted above, so the other side's inbox kept rendering the erased
+#   person's name and words for the 90 days of retention (SIDE_BUGS S-146).
+# * `custom` — a trainer's own words to a client (`notifications/trainer_message.py`),
+#   deleted as their chat notices are (S-208; the manager's ruling A, 2026-11-24).
+# * `post_liked`, `comment_created`, `user_followed` — each stores the person's username
+#   (`context.actor`) about a like, a comment or a follow erasure deletes, so the notice
+#   was an orphan that still named them (S-206, the fix run's ACC-2).
+NOTICES_ERASED_WITH_THEIR_ACTOR = ("chat_message", "custom", "post_liked",
+                                   "comment_created", "user_followed")
+
+# Coaching notices are KEPT in the other person's inbox — a record of their coaching,
+# its months and its money — with the erased person's name scrubbed in place: the notice
+# and its date stay, and the name reads "Deleted account" in the reader's language (S-207;
+# the manager's ruling A, 2026-11-24). Each names its `actor` as `context.name`
+# (`notifications/listeners/trainer_client_listeners.py`, `users/coaching.py`); a
+# finished session names the client to their trainer, with no actor, by
+# `data.client_id` (`routine/views.py`).
+NOTICES_NAMING_THEIR_ACTOR = (
+    "trainer_assignment_request", "trainer_unassignment", "client_request_received",
+    "client_request_approved", "client_request_rejected", "client_request_cancelled",
+    "client_unassigned_trainer", "coaching_renewed", "coaching_renewal_soon",
+    "coaching_ending_soon", "coaching_payment_due", "coaching_ended", "coaching_finished",
+    "coaching_fee_held", "coaching_fee_released", "coaching_fee_refunded")
+
+
+def _notices_that_go_with_them(user):
     from notifications.models import Notification
 
-    return Notification.objects.filter(actor=user, event_type="chat_message")
+    return Notification.objects.filter(actor=user,
+                                       event_type__in=NOTICES_ERASED_WITH_THEIR_ACTOR)
+
+
+def _scrub_their_name_elsewhere(user, queryset, *, dry_run):
+    """Scrub the erased person's name from the coaching notices in other inboxes (see
+    above): `context.name` emptied and `context.name_erased` set, which the resolver
+    reads as "Deleted account" in the language it renders in
+    (`notifications/template_resolver.py`); the pre-rendered `context.message` a
+    finished session carries is emptied too; `data.person_erased` is set to "true"; and
+    `actor` cleared, so nothing in the row
+    points at the person any more. The inbox hides a row whose actor cannot be shown
+    (the owner's decision 8: a SUSPENDED account's rows come back when it is
+    reinstated); an erasure is final, and a row with no actor is listed like any system
+    notice, so the notice and its date stay in the other person's inbox, as the ruling
+    says. A page of rows at a time. Counts nothing: the rows are other people's."""
+    if dry_run:
+        return {}
+    from django.db.models import Q
+
+    from notifications.models import Notification
+
+    from .registry import batch_rows
+
+    rows = (Notification.objects
+            .filter(Q(actor=user, event_type__in=NOTICES_NAMING_THEIR_ACTOR)
+                    | Q(event_type="session_completed", metadata__data__client_id=user.pk))
+            .exclude(recipient=user))
+    last = None
+    while True:
+        page = rows.order_by("pk")
+        if last is not None:
+            page = page.filter(pk__gt=last)
+        found = list(page[:batch_rows()])
+        if not found:
+            return {}
+        for row in found:
+            metadata = dict(row.metadata or {})
+            context = dict(metadata.get("context") or {})
+            context["name"] = ""
+            context["name_erased"] = True
+            if "message" in context:
+                context["message"] = ""
+            metadata["context"] = context
+            # One rule for the app, whatever the kind (the manager's ruling, 2026-11-24):
+            # `actor` is null on a finished-session notice even while the client
+            # lives, so a null sender says nothing there. A string, like every other
+            # value the push sends. The ids stay as they are: an erased account's id
+            # resolves to nothing, and removing keys would change a documented shape.
+            metadata["data"] = {**(metadata.get("data") or {}), "person_erased": "true"}
+            row.metadata = metadata
+            row.actor = None
+        Notification.objects.bulk_update(found, ["metadata", "actor"])
+        last = found[-1].pk
 
 
 register(PersonalDataSource(
     label="notifications", model="notifications.Notification", user_field="recipient",
-    retention_days=90, erase_also=_chat_notices_sent,
+    retention_days=90, erase_also=_notices_that_go_with_them,
+    before_erase=_scrub_their_name_elsewhere,
     purpose=("The person's in-app inbox of notices (payments, coaching, chat, reminders); "
              "each push goes out through Firebase."),
     recipients=("push_provider",),
@@ -531,8 +609,21 @@ register(PersonalDataSource(label="exercises_created", model="routine.Exercise",
 # was written for. On `created_by` alone a client's own program — the routine their
 # coach wrote them and its exercises below — was in the trainer's export and missing
 # from theirs. Kept on erasure either way: nothing changes for the rows.
+#
+# The fields are DECLARED, `assigned_to` left out (SIDE_BUGS S-253, the fix run's
+# ACC-2): with none declared the export attached every many-to-many as a list of ids,
+# and a legacy routine shared by several clients put the OTHER clients' ids in each
+# client's export. Nothing can make a shared routine any more (a routine is one
+# client's private copy, `routine/assignment.py`), so only old rows did it. A new column
+# on `Routine` is exported only once it is named here.
 register(PersonalDataSource(label="routines_created", model="routine.Routine",
                             user_field=("created_by", "assigned_to"), on_erase="keep",
+                            fields=["id", "name", "description", "translations",
+                                    "created_by", "is_active", "days", "created_at",
+                                    "updated_at", "source_template", "purchase", "trial",
+                                    "start_date", "end_date", "day_names",
+                                    "difficulty_level", "estimated_duration",
+                                    "exercises"],
                             purpose=("Routines a trainer wrote, each one a client's own "
                                      "copy, and the routines written for the person. Kept, "
                                      "because the client's program is built on it."),
@@ -718,12 +809,55 @@ def _unlist_agent(user, queryset, *, dry_run):
     hand cash to an account that can no longer credit them. The directory also requires
     the account to be active (`wallet/views.py AgentDirectoryView`); this makes the row
     itself say so, for the console and for a reinstated account (an operator lists it
-    again on purpose). Counts nothing: the source's own count is the report."""
+    again on purpose). Counts nothing: the source's own count is the report.
+
+    It also stops taking cash: an `active` profile becomes `suspended` (2026-11-24; a
+    banned one stays banned). The erasure
+    holds the profile lock from `_refuse_while_holding_cash`, so a top-up that was
+    waiting for that lock finds the profile suspended and is refused
+    (`agent_not_active`) instead of posting the platform's cash to an account that has
+    just been allowed to go because it held none."""
     if dry_run:
         return {}
-    for profile in queryset.filter(is_listed=True):
+    from django.db.models import Q
+
+    for profile in queryset.filter(Q(is_listed=True) | Q(status="active")):
         profile.is_listed = False
-        profile.save(update_fields=["is_listed", "updated_at"])
+        if profile.status == "active":
+            profile.status = "suspended"
+        profile.save(update_fields=["is_listed", "status", "updated_at"])
+    return {}
+
+
+def _refuse_while_holding_cash(user, queryset, *, dry_run):
+    """An agent cannot delete the account while holding the platform's cash (the owner,
+    2026-11-24). Road to 10 R4 deleted it and only reported `agent_cash`; deleting
+    settles nothing, and the platform's claim was left on an account nobody could reach.
+    Refused (`agent_holds_platform_cash`, with the amounts per currency) until an
+    operator records the settlement (`wallet.agents.record_settlement`), on every path:
+    the API, the console's erase of a web request, `CustomUser.retire()`. The trainer's
+    `trainer_has_active_clients` is the model.
+
+    A `refuse_erase`, so it runs before every `before_erase`: the agent's profile is
+    locked first, as a top-up and a settlement lock it before anything else
+    (`wallet/agents.py`, LOCK ORDER). Under that lock no top-up can add cash between
+    this count and the commit. A dry run never raises: the preview's `money.agent_cash`
+    is the same count."""
+    from wallet.agents import lock_profile, platform_cash_held_by
+    from wallet.models import AgentProfile
+
+    from .registry import ErasureRefused
+
+    profile = AgentProfile.objects.filter(user=user).first()
+    if profile is None:
+        return {}
+    if not dry_run:
+        lock_profile(profile)
+    held = platform_cash_held_by(user)
+    if held and not dry_run:
+        raise ErasureRefused(
+            "The agent still holds the platform's cash, so nothing was erased.",
+            code="agent_holds_platform_cash", agent_cash=held)
     return {}
 
 
@@ -743,6 +877,7 @@ register(PersonalDataSource(label="agent_profile", model="wallet.AgentProfile", 
 # operator's note (as withdrawal events above).
 register(PersonalDataSource(label="agent_receivable", model="wallet.AgentReceivableEntry",
                             user_field="agent__user", on_erase="keep",
+                            refuse_erase=_refuse_while_holding_cash,
                             purpose=("The cash an agent holds for the platform, movement by "
                                      "movement. A record of money."),
                             recipients=(),

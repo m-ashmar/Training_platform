@@ -36,7 +36,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, time, timedelta
 
-from django.db.models import Exists, F, OuterRef, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Subquery, Window
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -213,6 +213,12 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
     # client wrote during THIS coaching and the trainer has not written since — the same
     # `answered` and `began` the form checks use. A form-check video is its own card
     # above and is not counted again; a message the client took back is not waiting.
+    #
+    # ONE ROW PER THREAD, counted by the database (SIDE_BUGS S-281, the fix run's ACC-1):
+    # the first waiting message of each thread (`DISTINCT ON`, by the order below) with
+    # how many are waiting in it (`COUNT(*) OVER` the thread, computed before the
+    # DISTINCT). It read every waiting message into Python and counted them in a loop,
+    # so a client who stacked up messages cost a row each. Still one query.
     waiting = (Message.objects
                .filter(conversation__trainer=trainer,
                        conversation__client_id__in=usable,
@@ -221,14 +227,13 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
                        created_at__gte=Subquery(began))
                .filter(~Exists(answered))
                .exclude(kind=KIND_VIDEO, exercise__isnull=False)
+               .annotate(waiting=Window(Count('id'),
+                                        partition_by=[F('conversation_id')]))
                .order_by('conversation_id', 'created_at', 'id')
-               .values('conversation_id', 'sender_id', 'pk', 'created_at'))
-    threads = {}
-    for row in waiting:
-        thread = threads.setdefault(row['conversation_id'], {'first': row, 'count': 0})
-        thread['count'] += 1
-    for conversation_id, thread in threads.items():
-        first = thread['first']
+               .distinct('conversation_id')
+               .values('conversation_id', 'sender_id', 'pk', 'created_at', 'waiting'))
+    for first in waiting:
+        conversation_id = first['conversation_id']
         items.append({
             'kind': 'unanswered_message',
             'id': f"unanswered_message:{conversation_id}:{first['pk']}",
@@ -237,7 +242,7 @@ def build_queue(trainer, *, request=None, today=None) -> list[dict]:
             'unanswered_message': {
                 'conversation_id': conversation_id,
                 'message_id': first['pk'],
-                'count': thread['count'],
+                'count': first['waiting'],
                 'sent_at': first['created_at'],
             },
         })

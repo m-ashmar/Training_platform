@@ -3,14 +3,17 @@
 One vocabulary, because there were two. `analytics/recorder.py` is the only server-side
 writer of `UserActivity` and it writes `routine_completed`, `diet_plan_generated` and
 `meal_completed` (one per meal); it wrote `exercise_completed`, one per logged set, until
-2026-09-24 (BACKEND_BUGS B-071), and those rows are still read. `social/services.py` reads
-`workout_completed` and `meal_logged` — names nothing has ever written. Every workout,
-streak, milestone, late-night and early-morning achievement in the social app was
-therefore unearnable, and silently so: the queries return 0, not an error.
+2026-09-24 (BACKEND_BUGS B-071), and those rows are still read. The social app's
+achievement code (`social/services.py`, gone since 1dfd730) read `workout_completed` and
+`meal_logged` — names nothing has ever written — so every workout, streak, milestone,
+late-night and early-morning achievement there was unearnable, and silently so: the
+queries returned 0, not an error.
 
-`achievements/engine.py` hit the same wall and was corrected in place, which fixed one
-reader and left the other. A free-text column shared by a writer and three readers needs
-a name they all import.
+`achievements/engine.py` hit the same wall and was corrected in place. A free-text column
+shared by a writer and its readers needs a name they all import: today the writer
+(`analytics/recorder.py`) and the readers (`achievements/engine.py`, `analytics/signals.py`,
+`analytics/serializers.py`) import it from here (SIDE_BUGS S-196: this named a reader that
+no longer exists).
 """
 from __future__ import annotations
 

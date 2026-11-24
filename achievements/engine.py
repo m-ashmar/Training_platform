@@ -154,7 +154,6 @@ class AchievementEngine:
         return awarded
 
     @classmethod
-    @classmethod
     def _flush_progress(cls, rows) -> None:
         """Write every collected progress row in one statement."""
         if not rows:
@@ -545,9 +544,6 @@ class AchievementEngine:
         ).exists()
 
     @classmethod
-
-
-    @classmethod
     @transaction.atomic
     def _award_achievement(cls, user: CustomUser, achievement, **context) -> Optional[Dict]:
         """Award achievement to user and send notification."""
@@ -654,18 +650,25 @@ class AchievementEngine:
             categories[category] = earned.filter(achievement__category=category).count()
         
         # Rank among all users — the ones the leaderboard shows: not a suspended or
-        # erased account (the owner's decision 8, 2026-09-24).
+        # erased account (the owner's decision 8, 2026-09-24) — and in the board's own
+        # order: points, then the user's id for a tie (`achievements/views.py`
+        # leaderboard). It counted only those with MORE points, so a caller tied with
+        # people of smaller ids was told a better place than their own row on the board
+        # (SIDE_BUGS S-192, the fix run's SOC-2). Ahead of the caller: more points, or
+        # the same points and a smaller id. The user filter removes whole users before
+        # their totals are summed, so a total is never a part.
         from django.db.models import Sum as DjSum
         from users.visibility import public_q
         user_points = total_points
-        users_with_more = UserAchievement.objects.filter(public_q('user')).values('user').annotate(
-            total=DjSum('achievement__points')
-        ).filter(total__gt=user_points).count()
-        
+        ranked = UserAchievement.objects.filter(public_q('user')).values('user').annotate(
+            total=DjSum('achievement__points'))
+        ahead = (ranked.filter(total__gt=user_points).count()
+                 + ranked.filter(user_id__lt=user.pk).filter(total=user_points).count())
+
         return {
             'total_points': total_points,
             'total_achievements': earned.count(),
-            'rank': users_with_more + 1,
+            'rank': ahead + 1,
             'categories': categories,
             'recent': [
                 {

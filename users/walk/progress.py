@@ -59,6 +59,7 @@ def client_progress(walk):
     # its own check (`AchievementEngine.bulk_check_for_user`).
     from routine.models import ExerciseSetLog, UserExerciseProgress, WorkoutSession
     from routine.outcomes import record_day_quietly
+    from routine.views import _day_set_counts
 
     sessions = []
     for number, back in enumerate(SESSION_DAYS_BACK):
@@ -91,6 +92,18 @@ def client_progress(walk):
         progress.save(update_fields=["completed_sets", "total_repetitions",
                                      "total_weight", "updated_at"])
         record_day_quietly(me, routine, routine_day, day, via="session", session=session)
+        # And the day closed, as the app closes it at the end of every workout
+        # (`routines/{id}/update_progress/` `completed`, confirmed with its sets not all
+        # logged): the same model call and the same outcome that route records. That is
+        # the `RoutineProgress` row the month trend and the completion figures count —
+        # without it the state's trend read `completed: 0` in every month although it
+        # holds twelve weeks of finished workouts — and a day a PERSON closed, which the
+        # set recalculation leaves completed (`tests/test_road10_trend_finish_paths.py`).
+        routine.update_progress(me, routine_day, "completed", progress_date=day)
+        unlogged = _day_set_counts(routine, me, routine_day, date=day)["unlogged"]
+        record_day_quietly(me, routine, routine_day, day,
+                           via="confirmed_unlogged" if unlogged else "completed",
+                           confirmed_unlogged=bool(unlogged), session=session)
         sessions.append(session.pk)
 
     # Weight and the four circumferences, three readings each, dated back.
@@ -105,7 +118,7 @@ def client_progress(walk):
 
     # A weight goal from 84 to 76 kg, now at 80: half done.
     _s, goal = walk.api(me, "post", "/api/analytics/goals/",
-                        {"goal_type": "weight_loss", "title": "الوصول إلى ٧٦ كغ",
+                        {"goal_type": "weight_loss", "title": "الوصول إلى 76 كغ",
                          "start_value": 84, "target_value": 76, "unit": "kg",
                          "target_date": (today + timedelta(days=60)).isoformat()})
     walk.api(me, "post", f"/api/analytics/goals/{goal['id']}/update_progress/",

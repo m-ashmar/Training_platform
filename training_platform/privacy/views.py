@@ -109,24 +109,21 @@ def money_left(user) -> dict:
     `held_coaching_months` — months of coaching held in escrow for a trainer that the
     erasure returns to the client's wallet first (the wallet then holds more).
     `agent_cash` — an agent only: the cash they collected for the platform and have not
-    settled; deleting the account does not settle it.
+    settled. While it lists anything the deletion is refused, 409
+    `agent_holds_platform_cash` (the owner, 2026-11-24); the same count
+    (`wallet.agents.platform_cash_held_by`), so the preview and the refusal agree.
     `contact_support` — any of the three is non-zero.
 
     Amounts are decimal strings, each beside its currency. Read-only, no lock."""
-    from django.db.models import Sum
-
     from users.models import CoachingPeriod
-    from wallet.models import AgentReceivableEntry, Wallet
+    from wallet.agents import platform_cash_held_by
+    from wallet.models import Wallet
 
     wallet = [{"currency": w.currency, "amount": str(w.balance)}
               for w in (Wallet.objects.filter(owner=user).exclude(balance=0)
                         .order_by("currency", "id"))]
     held = CoachingPeriod.objects.filter(client=user, status="held").count()
-    agent_cash = [{"currency": row["currency"], "amount": str(row["total"])}
-                  for row in (AgentReceivableEntry.objects.filter(agent__user=user)
-                              .values("currency").annotate(total=Sum("amount"))
-                              .order_by("currency"))
-                  if row["total"]]
+    agent_cash = platform_cash_held_by(user)
     return {"wallet": wallet, "held_coaching_months": held, "agent_cash": agent_cash,
             "contact_support": bool(wallet or held or agent_cash)}
 
@@ -145,13 +142,14 @@ class PersonalDataEraseView(APIView):
     **The money left** (R4, 2026-11-23). `GET`, the 400 `confirmation_required` and the
     200 each carry `money` beside the rest: `{wallet: [{currency, amount}],
     held_coaching_months, agent_cash: [{currency, amount}], contact_support}` (see
-    `money_left`; only non-zero amounts are listed). Deleting is not refused for money:
-    while `contact_support` is true the app says, before the person confirms, that the
-    balance is not spendable after deletion and support returns it on request — the
-    privacy policy's "contact us first to get it back". On the 200 it is what remains
-    after the erasure (a held month already returned into `wallet`). For an agent,
-    `agent_cash` is the platform's cash they still hold: deleting does not settle it.
-    The same for every role and on every build.
+    `money_left`; only non-zero amounts are listed). The person's OWN money never refuses
+    a deletion: while `contact_support` is true the app says, before the person
+    confirms, that the balance is not spendable after deletion and support returns it on
+    request — the privacy policy's "contact us first to get it back". On the 200 it is
+    what remains after the erasure (a held month already returned into `wallet`). The
+    PLATFORM's money does: for an agent, `agent_cash` is the cash they collected for the
+    platform and have not settled, and while it lists anything the deletion is refused,
+    409 `agent_holds_platform_cash` (below). The same for every role and on every build.
 
     The anonymous AI training copies (`ai_training_data`) are found by the keyed
     pseudonym they are stored under and deleted, and counted like any other source.
@@ -180,6 +178,13 @@ class PersonalDataEraseView(APIView):
           (`users/trainer_relations.py`); a pending request does not refuse it — it is
           withdrawn and its hold returned with the account. End each coaching first: `POST /api/auth/trainer/unassign-client/`, with
           `at_period_end` for a paid month, which then ends at the month's end.
+      409 `agent_holds_platform_cash` with `agent_cash: [{currency, amount}]` — an agent
+          still holds cash they collected for the platform (the owner, 2026-11-24: an
+          account cannot go while it owes the platform cash). The amounts are per
+          currency, decimal strings, the same list as `money.agent_cash`. Refused until
+          an operator records the settlement of every currency
+          (`wallet.agents.record_settlement`); the agent hands the cash over, then
+          deletes. Additive (R4 deleted the account and only reported `agent_cash`).
       409 `erasure_refused` — a held payment could not be returned, or a trainer's
           verification document could not be deleted from storage (the error says
           which); nothing is erased, retry later.
@@ -219,6 +224,17 @@ class PersonalDataEraseView(APIView):
                                 "each of them before deleting your account."),
                      "code": "trainer_has_active_clients",
                      "active_clients": exc.extra.get("active_clients", 0)},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if exc.code == "agent_holds_platform_cash":
+                logger.warning("Erasure refused for agent %s: holds %s",
+                               user_id, exc.extra.get("agent_cash"))
+                return Response(
+                    {"error": _("You still hold cash you collected for the platform. Hand "
+                                "it over to the platform first; your account can be "
+                                "deleted once it is settled."),
+                     "code": "agent_holds_platform_cash",
+                     "agent_cash": exc.extra.get("agent_cash", [])},
                     status=status.HTTP_409_CONFLICT,
                 )
             # Rolled back whole, and safe to retry: the escrow could not return a held

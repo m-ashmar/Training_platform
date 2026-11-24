@@ -555,6 +555,36 @@ class DatabaseQueryCountMiddleware(MiddlewareMixin):
         return response
 
 
+def account_memo_key(user_id) -> str:
+    """The private-cache key of `CacheMiddleware._account_is_usable`'s memo."""
+    return f"acct_usable:{user_id}"
+
+
+def account_generation_key(user_id) -> str:
+    """The private-cache key of an account's session generation: bumped on the commit of
+    every `users/utils.py end_every_session`, and written into the memo with the
+    digest, so a memo written by a request that read the row before the change is
+    never believed after it (`CacheMiddleware._account_is_usable`)."""
+    return f"acct_session_gen:{user_id}"
+
+
+#: How long an account's session generation is kept. Anything longer than the memo's
+#: minute is safe: a generation that expires reads as 0, and the newest memo of any
+#: generation is at most a minute old.
+ACCOUNT_GENERATION_TTL = 7 * 24 * 3600
+
+
+def bump_account_generation(user_id) -> None:
+    """A new session generation for the account (on the commit of a session's end)."""
+    cache = private_cache()
+    key = account_generation_key(user_id)
+    cache.add(key, 0, timeout=ACCOUNT_GENERATION_TTL)
+    try:
+        cache.incr(key)
+    except ValueError:          # gone between the two calls
+        cache.set(key, 1, timeout=ACCOUNT_GENERATION_TTL)
+
+
 class CacheMiddleware(MiddlewareMixin):
     """
     Cache commonly requested data for performance optimization.
@@ -670,7 +700,7 @@ class CacheMiddleware(MiddlewareMixin):
             try:
                 token = AccessToken(auth_header.split(' ', 1)[1])
                 user_id = token.get('user_id')
-                if user_id and self._account_is_usable(user_id):
+                if user_id and self._account_is_usable(user_id, token):
                     return f"user:{user_id}", True
                 if user_id:
                     # The token verifies but the account behind it does not. Falling
@@ -691,28 +721,56 @@ class CacheMiddleware(MiddlewareMixin):
         return f"anon:{get_trusted_client_ip(request)}", False
 
     @staticmethod
-    def _account_is_usable(user_id) -> bool:
-        """Is the account behind this token still allowed to be used?
+    def _account_is_usable(user_id, token=None) -> bool:
+        """Is the account behind this token still allowed to be used, by this token?
 
         `AccessToken(...)` verifies a signature and an expiry and nothing else — it
-        cannot know the account was deactivated, and simplejwt has no revocation for
-        access tokens. This middleware returns a cached response from the middleware
+        cannot know the account was deactivated, or that its password changed since the
+        token was made. This middleware returns a cached response from the middleware
         chain, which runs BEFORE DRF authentication, so a banned account kept reading
         its exercises, templates and achievements for the full TTL while every uncached
         route correctly answered 401.
 
-        One cheap keyed read per cached request, memoised for a minute, so a deactivation
-        takes effect within a minute rather than never.
+        One cheap keyed read per cached request (the memo and the account's session
+        generation, in one round trip), memoised for a minute: the digest of the
+        account's password hash, or "" for an account that cannot be used. A token made
+        under another password is refused like the API refuses it
+        (`training_platform.jwt_sessions.session_is_current`, the owner's rule of
+        2026-11-24). `users/utils.py end_every_session` drops the memo and bumps the
+        generation on commit, so a password change, a reset or a deactivation takes
+        effect at once; any other change of `is_active` within a minute.
+
+        THE GENERATION (the integrator's review of 7307f94, 2026-11-24): a request that
+        read the row BEFORE the change committed and wrote its memo AFTER the drop left
+        the old digest memoised, and a cached route served the dead token for the
+        minute. The memo is written as "<generation>:<digest>" with the generation read
+        before the row, and believed only while it is still the account's generation;
+        so a late writer's memo is read again, not served. In the memo's value, not its
+        key, so the one key there is to clear stays the same.
         """
         from django.contrib.auth import get_user_model
 
-        cache_key = f"acct_usable:{user_id}"
-        cached = private_cache().get(cache_key)
-        if cached is not None:
-            return bool(cached)
-        usable = get_user_model().objects.filter(pk=user_id, is_active=True).exists()
-        private_cache().set(cache_key, 1 if usable else 0, 60)
-        return usable
+        from training_platform.jwt_sessions import digest_is_current, password_digest
+
+        cache = private_cache()
+        memo_key, generation_key = account_memo_key(user_id), account_generation_key(user_id)
+        found = cache.get_many([memo_key, generation_key])
+        generation = str(found.get(generation_key) or 0)
+        memo = found.get(memo_key)
+        digest = None
+        # A memo from before 2026-11-24 is an int, or a digest with no generation.
+        if isinstance(memo, str) and ":" in memo:
+            memo_generation, _, memo_digest = memo.partition(":")
+            if memo_generation == generation:
+                digest = memo_digest
+        if digest is None:
+            password = (get_user_model().objects.filter(pk=user_id, is_active=True)
+                        .values_list("password", flat=True).first())
+            digest = password_digest(password) if password is not None else ""
+            cache.set(memo_key, f"{generation}:{digest}", 60)
+        if not digest:
+            return False
+        return token is None or digest_is_current(token, digest)
 
     def _build_key(self, request, identity, rule=None):
         """

@@ -3,6 +3,10 @@ one).
 
 Owned by the phase 3 worker.
 """
+from datetime import timedelta
+
+from django.utils import timezone
+
 from . import state
 from .framework import agent_cash_gaps, needs
 
@@ -63,3 +67,65 @@ def premium_no_diet_plan(walk):
     # No food preferences row: the allergies were never answered. No diet plan.
     walk.ids(plan=plan.pk, subscription=subscription["id"],
              payment=paid.get("payment_id"), agent=agent.pk)
+
+
+# ------------------------------------------------------------------ a lapsed plan's diet
+#: `plan_lapsed_with_diet`'s client is handed exactly the plan's price, as
+#: `plan_lapsed`'s is (`users/walk/coaching.py` CASH): one plan, nothing left over.
+LAPSED_DIET_DAYS = 7
+
+
+@needs("plan_lapsed_with_diet")
+def _a_lapsed_plan_with_a_diet_to_read():
+    """The state buys a plan with the diet from a new client's wallet (one on sale in the
+    currency a new wallet takes; an agent who takes its price in a day), and builds the
+    client's diet plan with the platform's planner, which needs a food catalogue it may
+    plan from (vetted foods: `manage.py bootstrap_platform` writes it)."""
+    from diet.models import FoodItem
+
+    from .shared import choose_plan, missing_plan, new_wallet_currency
+
+    plan = choose_plan(new_wallet_currency(), diet=True)
+    gaps = (missing_plan(diet=True) if plan is None
+            else agent_cash_gaps("plan_lapsed_with_diet", in_a_day=plan.price))
+    if not FoodItem.objects.filter(needs_review=False).exists():
+        gaps.append("a food catalogue the diet planner may plan from (vetted foods; "
+                    "`manage.py bootstrap_platform` writes it)")
+    return gaps
+
+
+@state("plan_lapsed_with_diet", area="diet", role="client",
+       summary="plan_lapsed, with a 7-day diet plan the client built (the platform's "
+               "planner) BEFORE the cover ended, today's meals in it: frozen, the plan "
+               "readable, nothing usable (the owner's freeze rule).")
+def plan_lapsed_with_diet(walk):
+    """The same lapse as `plan_lapsed` (`users/walk/coaching.py`, its helpers, not its
+    state, which stays as it is): the cheapest plan with the diet in the client's own
+    currency, paid from a wallet an agent topped up with its price exactly; then, while
+    it is active, the client builds a week's diet plan through the app's route
+    (`POST /api/diet/v1/plans/generate-rule/`: the rule engine, no model), starting
+    today; then the cover ends a day ago, the daily run lapses it and sends its
+    reminders. What the client reads then: `GET v1/client/progress/` with
+    `has_active_plan: true` and today's meals, `GET v1/my/diet-plans/` the plan, and
+    every use (ticking a meal, generating) answered 403 `no_entitlement`."""
+    from .coaching import buy_plan, lapse_now, plan_ends_at, plan_price, plan_reminders_now
+    from .shared import plan_for, top_up
+    from .wallet import agent
+
+    client = walk.account(role="client")
+    plan = plan_for(client, diet=True)
+    top_up(walk, agent(walk), client, plan_price(plan, client).amount)
+    subscription = buy_plan(walk, client, plan)
+
+    # A fresh load, as a real request makes: this object still holds the subscription
+    # it read before the payment (pending), and the diet routes read it off the user.
+    client = type(client).objects.get(pk=client.pk)
+    _status, built = walk.api(client, "post", "/api/diet/v1/plans/generate-rule/",
+                              {"duration_days": LAPSED_DIET_DAYS}, expect=(201,))
+    diet_plan = built.get("id") or built.get("diet_plan_id")
+
+    plan_ends_at(subscription, timezone.now() - timedelta(days=1, hours=2))
+    lapse_now(subscription)
+    plan_reminders_now(subscription)
+    walk.ids(subscription=str(subscription.pk), plan=subscription.plan_id,
+             diet_plan=diet_plan)

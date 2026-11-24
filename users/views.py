@@ -39,6 +39,7 @@ from notifications.domain.trainer_client_events import (
     ClientUnassignedTrainerEvent,
 )
 from training_platform.i18n import LanguageContext, CACHE_VERSION
+from training_platform.media_storage import media_url
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -158,7 +159,7 @@ class CustomLoginView(LoginView):
                 'first_name': user.first_name,
                 'last_name': user.last_name,
                 'user_type': user.user_type,
-                'profile_picture': user.profile_picture.url if user.profile_picture else None,
+                'profile_picture': (media_url(user.profile_picture, self.request) or None),
             },
         })
         return original_response
@@ -269,14 +270,9 @@ class UpdateUserDetailsView(APIView):
         | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
         """
         user = request.user
-        # Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture
-        # sent here was ignored with 200. FILES, not data: a client echoing the picture
-        # URL it read back as text is not refused.
-        if 'profile_picture' in request.FILES:
-            message = _("Upload the profile picture with /api/auth/user/profile-picture/.")
-            return Response({'error': message, 'detail': message,
-                             'code': 'profile_picture_read_only', 'field': 'profile_picture'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
         serializer = UserDetailsSerializer(user, data=request.data, partial=True,
                                            context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -348,14 +344,9 @@ class UserDetailsView(APIView):
 
 
 def _absolute_picture_url(user, request):
-    """The person's profile picture as an absolute url, or None without one."""
-    picture = getattr(user, 'profile_picture', None)
-    if not picture:
-        return None
-    url = picture.url
-    if request is not None and url.startswith('/'):
-        return request.build_absolute_uri(url)
-    return url
+    """The person's profile picture as an absolute url, or None without one — through
+    `media_url`, the one function that turns a stored file into a URL (SIDE_BUGS S-246)."""
+    return media_url(getattr(user, 'profile_picture', None), request) or None
 
 class CustomRegisterView(RegisterView):
     """POST /api/auth/register/ — the body and every field code are in
@@ -404,7 +395,7 @@ class CustomRegisterView(RegisterView):
             'first_name': user.first_name,
             'last_name': user.last_name,
             'user_type': user.user_type,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'profile_picture': (media_url(user.profile_picture, request) or None),
             # Additive (2026-09-27): the language saved for this person's emails and
             # pushes — the field, else Accept-Language, else Arabic.
             'preferred_language': user.preferred_language,
@@ -487,7 +478,7 @@ class OTPVerificationView(APIView):
             'first_name': user.first_name,
             'last_name': user.last_name,
             'user_type': user.user_type,
-            'profile_picture': user.profile_picture.url if user.profile_picture else None,
+            'profile_picture': (media_url(user.profile_picture, request) or None),
             'is_active': user.is_active,
             'onboarding_completed': user.is_onboarding_completed,
         }
@@ -613,6 +604,24 @@ class ResendOTPView(APIView):
 # TRAINER-SPECIFIC VIEWS
 # ============================================================================
 
+def _picture_sent_here(request):
+    """400 `profile_picture_read_only` when a file came as `profile_picture`, else None.
+
+    Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture sent to
+    a profile route was ignored with 200, and the app showed the old one as saved. The
+    picture has its own route, which checks and re-encodes it
+    (`POST /api/auth/user/profile-picture/`). FILES, not data: a client echoing the
+    picture URL it read back as text is not refused. `user/update/`, `trainer/profile/`
+    and `client/profile/` all answer it (SIDE_BUGS S-200: the two profile routes still
+    dropped the file)."""
+    if 'profile_picture' not in request.FILES:
+        return None
+    message = _("Upload the profile picture with /api/auth/user/profile-picture/.")
+    return Response({'error': message, 'detail': message,
+                     'code': 'profile_picture_read_only', 'field': 'profile_picture'},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
 class TrainerProfileView(APIView):
     """`/api/auth/trainer/profile/` — the signed-in trainer's own profile. Auth: Bearer JWT.
 
@@ -628,6 +637,7 @@ class TrainerProfileView(APIView):
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
     | `400` | `content_not_allowed` | a name, `trainer_bio`, `trainer_specializations` or `trainer_certifications` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` (SIDE_BUGS S-200: it was dropped with 200) |
     | `403` | `not_a_trainer` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
     permission_classes = [IsAuthenticated]
@@ -637,50 +647,88 @@ class TrainerProfileView(APIView):
         if not request.user.is_trainer:
             return _not_a_trainer()
 
-        serializer = TrainerProfileSerializer(request.user)
+        serializer = TrainerProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         """Update trainer profile"""
         if not request.user.is_trainer:
             return _not_a_trainer()
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
 
-        serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
+        serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True,
+                                              context={'request': request})
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
         # Read back what was stored and answer it as GET does, so the app needs no
         # second request to see it (BACKEND_BUGS B-173, as `user/update/` does, B-057).
         request.user.refresh_from_db()
-        saved = TrainerProfileSerializer(request.user).data
+        saved = TrainerProfileSerializer(request.user, context={'request': request}).data
         return Response({**saved, 'message': _('Trainer profile updated successfully!')},
                         status=status.HTTP_200_OK)
 
-class TrainerClientsView(APIView):
-    """GET /api/auth/trainer/clients/ — the clients assigned to this trainer.
+#: What `trainer/clients/` holds back while a coaching may not be used: the client's
+#: address and body record. Nulled, never dropped, so the row keeps its keys.
+WITHHELD_WHILE_FROZEN = ('email', 'height', 'weight', 'age', 'gender', 'activity_level',
+                         'client_goals', 'client_preferences')
 
-    200 `{trainer_id, trainer_name, client_count, clients: [...]}`.
+
+class TrainerClientsView(APIView):
+    """GET /api/auth/trainer/clients/ — the clients this trainer coaches.
+
+    200 `{trainer_id, trainer_name, client_count, clients: [...]}`, a row per client
+    with `id, username, email, first_name, last_name, profile_picture, height, weight,
+    age, gender, activity_level, client_goals, client_preferences, date_joined` and
+    `coaching_refusal`, ordered by id. `profile_picture` is a signed URL that expires
+    (use it now, never store it), or null.
     403 `not_a_trainer` when the caller is not a trainer (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
+
+    WHO IS LISTED (the fix run's G10, 2026-11-24): the clients of an APPROVED
+    `TrainerClientRelation` with the caller — the one predicate every other read of a
+    client's record uses (`routine.permissions.accessible_user_ids`). It listed the
+    `assigned_trainer` pointer instead, so a client whose pointer still named a
+    dismissed trainer was shown to that trainer, body record and address included, and
+    a client coached through an approved relation the pointer had drifted from was not.
+
+    WHILE THE COACHING MAY NOT BE USED (frozen, unpaid or ended, as the chat and the
+    trainer's diet reads judge it, `users.coaching.refusals_for`): the client is still
+    listed, by name, and `coaching_refusal` says why (`coaching_frozen`,
+    `coaching_unpaid`, `coaching_ended`; null while the coaching may be used); their
+    `email` and body record (`height`, `weight`, `age`, `gender`, `activity_level`,
+    `client_goals`, `client_preferences`) are null — the rule
+    `diet/trainer_reads.py` applies to the same record. `coaching_refusal` is additive.
+    Identical on every build.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Get all clients assigned to this trainer"""
+        """The clients this trainer coaches (an approved relation)."""
         if not request.user.is_trainer:
             return _not_a_trainer()
 
-        clients = request.user.clients.all()
+        from .coaching import refusals_for
+        from .models import TrainerClientRelation
+
+        clients = list(CustomUser.objects.filter(
+            pk__in=TrainerClientRelation.objects.filter(
+                trainer=request.user, status='approved').values('client_id'))
+            .order_by('id'))
+        refusals = refusals_for(request.user.pk, [client.pk for client in clients])
         client_data = []
-        
         for client in clients:
-            client_data.append({
+            refusal = refusals.get(client.pk)
+            row = {
                 'id': client.id,
                 'username': client.username,
                 'email': client.email,
                 'first_name': client.first_name,
                 'last_name': client.last_name,
-                'profile_picture': client.profile_picture.url if client.profile_picture else None,
+                'profile_picture': (media_url(client.profile_picture, request)
+                                    if client.profile_picture else None),
                 'height': client.height,
                 'weight': client.weight,
                 'age': client.age,
@@ -689,8 +737,12 @@ class TrainerClientsView(APIView):
                 'client_goals': client.client_goals,
                 'client_preferences': client.client_preferences,
                 'date_joined': client.date_joined,
-            })
-        
+                'coaching_refusal': refusal,
+            }
+            if refusal is not None:
+                row.update(dict.fromkeys(WITHHELD_WHILE_FROZEN))
+            client_data.append(row)
+
         return Response({
             'trainer_id': request.user.id,
             'trainer_name': request.user.full_name,
@@ -723,7 +775,7 @@ class AssignClientView(APIView):
     | `403` | `user_blocked` | one of you blocked the other |
     | `404` | `not_found` | no such client |
     | `409` | `request_already_pending` | the same, found by the database as two invitations crossed |
-    | `429` | `too_many_invitations` | 25 invitations are already waiting for an answer |
+    | `429` | `too_many_invitations` | 25 invitations are already waiting for an answer; one to a client in a block with you (either of you blocked the other) does not count, since nobody can answer it (SIDE_BUGS S-201) |
 
     Every refusal but `user_blocked` and `too_many_invitations` answered only its
     status default before (the owner, 2026-09-24: every refusal names its own code).
@@ -759,8 +811,15 @@ class AssignClientView(APIView):
             # person, not a query, so a working trainer needs a handful and a scraper
             # needs thousands.
             OUTSTANDING_INVITE_LIMIT = 25
-            outstanding = TrainerClientRelation.objects.filter(
-                trainer=request.user, status='pending', initiated_by='trainer').count()
+            # An invitation nobody can answer does not count: one to a client who
+            # blocked this trainer, or whom the trainer blocked, is hidden from the
+            # client while the block stands (SIDE_BUGS S-201, the fix run's ACC-1; the
+            # client's side was fixed by ca234f8). It filled the 25 for good.
+            outstanding = (TrainerClientRelation.objects
+                           .filter(trainer=request.user, status='pending',
+                                   initiated_by='trainer')
+                           .exclude(client_id__in=blocked_ids(request.user))
+                           .count())
             if outstanding >= OUTSTANDING_INVITE_LIMIT:
                 return Response(
                     {'error': _('You have too many invitations awaiting a reply. '
@@ -1041,6 +1100,7 @@ class ClientProfileView(APIView):
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
     | `400` | `content_not_allowed` | `first_name` or `last_name` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` (SIDE_BUGS S-200: it was dropped with 200) |
     | `403` | `clients_only` | the caller is not a client (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
     permission_classes = [IsAuthenticated]
@@ -1050,15 +1110,19 @@ class ClientProfileView(APIView):
         if not request.user.is_client:
             return _clients_only()
 
-        serializer = ClientProfileSerializer(request.user)
+        serializer = ClientProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         """Update client profile"""
         if not request.user.is_client:
             return _clients_only()
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
 
-        serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
+        serializer = ClientProfileSerializer(request.user, data=request.data, partial=True,
+                                             context={'request': request})
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -1133,7 +1197,7 @@ class PublicTrainersListView(APIView):
                 'username': None,
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
-                'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                'profile_picture': (media_url(trainer.profile_picture, request) or None),
                 'trainer_bio': trainer.trainer_bio,
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
@@ -1260,7 +1324,7 @@ class AvailableTrainersView(APIView):
                     'email': None,
                     'first_name': trainer.first_name,
                     'last_name': trainer.last_name,
-                    'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'profile_picture': (media_url(trainer.profile_picture, request) or None),
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_certifications': trainer.trainer_certifications,
@@ -1286,7 +1350,7 @@ class AvailableTrainersView(APIView):
                 'email': None,   # never the address; see the class docstring
                 'first_name': trainer.first_name,
                 'last_name': trainer.last_name,
-                'profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                'profile_picture': (media_url(trainer.profile_picture, request) or None),
                 'trainer_bio': trainer.trainer_bio,
                 'trainer_specializations': trainer.trainer_specializations,
                 'trainer_certifications': trainer.trainer_certifications,
@@ -1313,6 +1377,26 @@ class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
     """
     code = 'not_a_trainer'
     message = _lazy('This endpoint is only for trainers')
+
+
+#: What a trainer's file on a client (`trainer/client-profile/`) holds back while the
+#: coaching may not be used (BACKEND_BUGS B-201, the manager's ruling, 2026-11-24): the
+#: list's withheld record (`WITHHELD_WHILE_FROZEN`, below) and what the file adds of the
+#: same kind — the injuries, the onboarding answers, and the figures computed from the
+#: body (BMI, BMR, TDEE), which would give the weight back. Nulled, never dropped.
+PROFILE_WITHHELD_WHILE_FROZEN = (
+    'email', 'height', 'weight', 'age', 'gender', 'specific_injury', 'activity_level',
+    'client_goals', 'client_preferences', 'training_goal', 'training_place',
+    'training_days_per_week', 'injury_areas', 'bmi', 'bmr', 'tdee')
+
+
+def _withheld_profile(row, refusal):
+    """A file's row as the trainer may read it: `coaching_refusal` beside it, and the
+    record nulled while it is set."""
+    row = {**row, 'coaching_refusal': refusal}
+    if refusal is not None:
+        row.update(dict.fromkeys(PROFILE_WITHHELD_WHILE_FROZEN))
+    return row
 
 
 def _coaching_on_file(viewer, client):
@@ -1355,6 +1439,20 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     `renewal_reminder`, `since`, `trainer_id`, `grace_until`. Null when there is no
     approved coaching (an admin: the client's approved coaching with anyone). The list
     does not carry it.
+
+    WHILE THE COACHING MAY NOT BE USED (BACKEND_BUGS B-201, the manager's ruling,
+    2026-11-24; additive): every row, the list's and `{id}/`'s, carries
+    `coaching_refusal` — null while the coaching may be used, else `coaching_frozen`
+    (the renewal found the client's wallet short) or `coaching_unpaid` (support
+    returned the month's payment), the codes `trainer/clients/` and the trainer's diet
+    reads answer for the same pair (`users.coaching.refusals_for`). While it is set, the
+    client's personal record is null: `email`, `height`, `weight`, `age`, `gender`,
+    `specific_injury`, `activity_level`, `client_goals`, `client_preferences`,
+    `training_goal`, `training_place`, `training_days_per_week`, `injury_areas`, `bmi`,
+    `bmr`, `tdee`. The names, the picture, the dates and `coaching` stay, so the screen
+    can say why it is paused (`coaching.status`: `frozen` or `unpaid`). A coaching that
+    ended is no approved relation: `{id}/` answers 403 `not_your_client` as before.
+    An admin reads in full (null). The same on every build.
     """
     queryset = CustomUser.objects.filter(user_type='client')
     serializer_class = ClientProfileViewSerializer
@@ -1408,7 +1506,13 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             private_cache().set(cache_key, data, timeout=300)
         # The coaching is read live, never from the five-minute cache: the client's
         # «do not renew» (S2.7) is a choice they switch, and the file must show it now.
-        return Response({**data, 'coaching': _coaching_on_file(request.user, obj)})
+        # So is what the trainer may read of the client (B-201): the cache is shared by
+        # every reader of this client, and the coaching's state is the reader's.
+        from .coaching import coaching_refusals
+
+        refusal = coaching_refusals(request.user, [obj.pk]).get(obj.pk)
+        return Response({**_withheld_profile(data, refusal),
+                         'coaching': _coaching_on_file(request.user, obj)})
 
     def list(self, request, *args, **kwargs):
         """
@@ -1437,10 +1541,14 @@ class ClientProfileViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             logger.info(f"Trainer {request.user.id} listed their approved clients")
             
             serializer = self.get_serializer(queryset, many=True)
+            rows = list(serializer.data)
+            from .coaching import coaching_refusals
+
+            refusals = coaching_refusals(request.user, [row['id'] for row in rows])
             return Response({
                 'trainer_id': request.user.id,
                 'client_count': queryset.count(),
-                'clients': serializer.data
+                'clients': [_withheld_profile(row, refusals.get(row['id'])) for row in rows]
             })
             
         except PASSTHROUGH_EXCEPTIONS:
@@ -2771,7 +2879,7 @@ class ClientRequestStatusView(APIView):
                     # Never the address (SIDE_BUGS S-152), also for a declined
                     # request: the key stays, null, for builds that read it.
                     'trainer_email': None,
-                    'trainer_profile_picture': trainer.profile_picture.url if trainer.profile_picture else None,
+                    'trainer_profile_picture': (media_url(trainer.profile_picture, request) or None),
                     'trainer_bio': trainer.trainer_bio,
                     'trainer_specializations': trainer.trainer_specializations,
                     'trainer_experience_years': trainer.trainer_experience_years,
@@ -2881,7 +2989,7 @@ class ProfilePictureUploadView(APIView):
             # Return the updated user info
             return Response({
                 'message': _('Profile picture uploaded successfully'),
-                'profile_picture_url': user.profile_picture.url if user.profile_picture else None,
+                'profile_picture_url': (media_url(user.profile_picture, request) or None),
                 'user': {
                     'id': user.id,
                     'username': user.username,
@@ -2889,7 +2997,7 @@ class ProfilePictureUploadView(APIView):
                     'first_name': user.first_name,
                     'last_name': user.last_name,
                     'user_type': user.user_type,
-                    'profile_picture': user.profile_picture.url if user.profile_picture else None,
+                    'profile_picture': (media_url(user.profile_picture, request) or None),
                 }
             }, status=status.HTTP_200_OK)
 
@@ -3086,7 +3194,13 @@ class PasswordResetConfirmView(APIView):
     Step 3: Set a new password using the reset token.
 
     Body: `{reset_token, new_password}`. Consumes the single-use token and updates the
-    user's password. The new password answers the same validator codes as sign-up on
+    user's password, and signs every device out at once: its refresh tokens are
+    blacklisted, and every access token made under the old password answers 401
+    `password_changed` from then on, an open socket closed with it
+    (`users/utils.py end_every_session`; the owner, 2026-11-24). Nothing is signed in:
+    the person signs in with the new password. The person is emailed "your password was
+    changed" (`notifications/channels/email.py queue_password_changed`; the owner,
+    2026-11-24), as on a change while signed in. The new password answers the same validator codes as sign-up on
     `field_errors.new_password` (`password_too_short`, `password_too_common`,
     `password_entirely_numeric`; BACKEND_BUGS B-034).
 
@@ -3141,15 +3255,16 @@ class PasswordResetConfirmView(APIView):
         user.set_password(new_password)
         user.save()
 
-        # Revoke all outstanding refresh tokens — a password reset is exactly the
-        # moment (account recovery/compromise) when previously-issued tokens must
-        # stop working. Access tokens still expire on their own short TTL.
-        try:
-            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
-            for _t in OutstandingToken.objects.filter(user=user):
-                BlacklistedToken.objects.get_or_create(token=_t)
-        except Exception as e:
-            logger.error(f"Failed to blacklist tokens after password reset for user {user.id}: {e}")
+        # Every session ends, at once — a password reset is exactly the moment
+        # (account recovery/compromise) when previously-issued tokens must stop
+        # working: the same revocation as the password change and the console's reset
+        # (`users/utils.py end_every_session`; the owner, 2026-11-24). Access tokens
+        # made under the old password are refused from the commit on.
+        from .utils import end_every_session
+        end_every_session(user)
+        # And the person is told by email, after the commit (the owner, 2026-11-24).
+        from notifications.channels.email import queue_password_changed
+        queue_password_changed(user, "reset")
 
         # The person just proved they own the address: the failures that locked them out
         # are forgiven, or they were locked out again right after resetting (B-017).

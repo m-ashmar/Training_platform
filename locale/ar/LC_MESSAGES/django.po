@@ -2449,6 +2449,12 @@ msgid ""
 "deleting your account."
 msgstr "لا يزال لديك متدربون فاعلون. أنهِ التدريب مع كل منهم قبل حذف حسابك."
 
+#: training_platform/privacy/views.py
+msgid ""
+"You still hold cash you collected for the platform. Hand it over to the "
+"platform first; your account can be deleted once it is settled."
+msgstr "لا يزال لديك نقد جمعته لصالح المنصة. سلّمه للمنصة أولاً؛ يمكن حذف حسابك بعد تسويته."
+
 #: routine/assignment.py
 msgid "customizations must be an object."
 msgstr "يجب أن تكون التخصيصات كائناً."
@@ -6260,3 +6266,59 @@ msgid ""
 msgstr ""
 "لا توجد كلمة مرور لحسابك بعد. عيّنها من «نسيت كلمة المرور» وسنرسل إليك رمزاً "
 "بالبريد الإلكتروني."
+
+#: training_platform/jwt_sessions.py
+msgid "Token contained no recognizable user identification"
+msgstr "لا يحمل الرمز هوية مستخدم معروفة"
+
+#: training_platform/jwt_sessions.py
+msgid "User is inactive"
+msgstr "الحساب غير مفعّل"
+
+#: training_platform/jwt_sessions.py
+msgid "Your password was changed. Sign in again."
+msgstr "تم تغيير كلمة المرور. سجّل الدخول من جديد."
+
+#: notifications/channels/email.py
+msgid "Your password was changed"
+msgstr "تم تغيير كلمة المرور"
+
+#: notifications/channels/email.py
+#, python-format
+msgid "The password of your %(brand)s account was changed."
+msgstr "تم تغيير كلمة المرور لحسابك في %(brand)s."
+
+#: notifications/channels/email.py
+#, python-format
+msgid ""
+"If this wasn't you, reset your password now with \"Forgot password\" on the "
+"app's sign-in screen, and contact support at %(support)s."
+msgstr ""
+"إن لم تكن أنت من غيّرها، فأعد تعيين كلمة المرور الآن من «نسيت كلمة المرور» في "
+"شاشة تسجيل الدخول في التطبيق، وتواصل مع الدعم على %(support)s."
+
+#: notifications/channels/email.py
+msgid ""
+"If it was you, there is nothing to do. Your other devices were signed out."
+msgstr "إن كنت أنت، فلا داعي لأي إجراء. تم تسجيل خروج أجهزتك الأخرى."
+
+#: notifications/channels/email.py
+msgid "When"
+msgstr "الوقت"
+
+#: notifications/channels/email.py
+msgid "How"
+msgstr "الطريقة"
+
+#: notifications/channels/email.py
+msgid "With a code sent to this address"
+msgstr "برمز أُرسل إلى هذا العنوان"
+
+#: notifications/channels/email.py
+msgid "In the app, while signed in"
+msgstr "من التطبيق، أثناء تسجيل الدخول"
+
+#: notifications/template_resolver.py
+msgid "Deleted account"
+msgstr "حساب محذوف"
+

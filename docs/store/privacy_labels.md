@@ -31,7 +31,7 @@ Marks used below:
 | Deleting some data without deleting the account | Yes: posts and comments (`DELETE /api/social/posts/{id}/`, `comments/{id}/`), the AI coach's chats, notes and usage records (`DELETE /api/ai/data/`), the anonymous training copies (switching "help us improve" off). Not a deletion: a chat message the sender takes back is hidden from the thread and kept (for reports). | `social/`, `ai_assistant/views.py`, `chat/models.py` |
 | A copy of one's data | Yes: `GET /api/privacy/export/`, a JSON file of every registered source. | `training_platform/privacy/views.py` |
 | Minimum age | 14, enforced by the server from the date of birth at sign-up (`under_minimum_age`). | `users/serializers.py`, `MINIMUM_AGE_YEARS` |
-| Location | The server never derives a location. `POST /api/analytics/sessions/` accepts `country`, `region` and `city` from the app; **[APP]** the app must send none of them, or Apple "Location > Coarse Location" and Google "Location > Approximate location" must be added. | `analytics/serializers.py` `UserSessionSerializer` |
+| Location | None collected. The server never derives a location, and since 2026-11-24 it never stores one either: `POST /api/analytics/sessions/` ignores `country`, `region` and `city` (read-only, always empty; SIDE_BUGS S-221). | `analytics/serializers.py` `UserSessionSerializer` |
 
 ## 2. Switches that change these answers
 
@@ -152,7 +152,8 @@ religious beliefs, Sexual orientation, In-app search history (while
    timezone, web_socket_channel, qr_flutter).
 2. `firebase_messaging` (when added) registers the token through
    `POST /api/auth/device-token/` only after the person allows notifications.
-3. No call to `POST /api/analytics/sessions/` sends `country`, `region` or `city`.
+3. No call to `POST /api/analytics/sessions/` sends `country`, `region` or `city` (the
+   server ignores them since 2026-11-24, so this is tidiness, not a label question).
 4. The release build's base URL is `https://` and the sockets are `wss://`.
 5. Me > Privacy and data offers "Download my data" (`/api/privacy/export/`) and "Delete
    my account" (`/api/privacy/erase/`), and opens the policy, terms and deletion page
