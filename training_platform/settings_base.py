@@ -42,7 +42,9 @@ INSTALLED_APPS = [
     "modeltranslation",
 
     # Django Core
-    "django.contrib.admin",
+    # `django.contrib.admin`, with the stock /admin/ behind the console's door: only a
+    # console operator gets in (`admin_dashboard/stock_site.py`; the owner, 2026-11-24).
+    "admin_dashboard.stock_admin_config.OperatorsOnlyAdminConfig",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
