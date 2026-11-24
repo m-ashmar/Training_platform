@@ -348,6 +348,16 @@ raises ImportError, so the old-code run "fails" without ever reaching the bug. P
   two unlocked backend runs went beside a simulator build (2026-11-24).
   ONE ticket per run and one hold of at most about 30 minutes: a longer list is cut into
   pieces that each take their own place in the queue (the manager, 2026-11-24).
+- **Read `heavy.lock/who` before ANY unlocked pytest, a single file included.** If it
+  names an app builder's suite (`B1`, `B2`, `B3` or `B4` followed by `(suite)`), start
+  nothing until `who` changes: an app builder's golden run died after 24 minutes on the
+  lock because single test files of several sessions ran beside it (2026-11-25, the
+  manager and the app manager). An app hold is at most 25 minutes. During a `(sim)` hold
+  or a backend hold the rule above stands: one file, under 2 minutes, never two at once.
+- **A script never WAITS inside a hold.** Everything a run needs (a marker file, a
+  database, a build, another session's step) is ready BEFORE its ticket is queued: a hold
+  that sleeps on a missing marker kept the Mac's one lock idle for 13 minutes when its
+  session died (00:03 to 00:16, 2026-11-25).
 - **A `-k` subset of the regression gate is not the gate file.** Before a commit is
   reported as ready (a "merge" line), the WHOLE `tests/test_regression_gate.py` runs on it,
   through the queue as a short piece: several of its tests read SOURCE text and fail on a
