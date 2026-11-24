@@ -634,32 +634,10 @@ class Routine(RowValidationMixin, models.Model):
             models.Q(is_global=True) | models.Q(created_by=self.created_by)
         ).filter(is_active=True)
 
-    def can_be_accessed_by(self, user):
-        """
-        Check if a user can access this routine.
-        
-        Args:
-            user: CustomUser instance
-            
-        Returns:
-            bool: True if user can access this routine
-        """
-        if not self.is_active:
-            return False
-            
-        # Creator can access their own routines
-        if self.created_by == user:
-            return True
-            
-        # Assigned clients can access their routines
-        if user in self.assigned_to.all():
-            return True
-            
-        # Admins can access all routines
-        if user.is_admin:
-            return True
-            
-        return False
+    # Who may read a routine is `routine.permissions.readable_routines`, its one
+    # definition. A `can_be_accessed_by` stood here with no caller anywhere, refusing an
+    # inactive routine and ignoring an approved trainer, unlike that rule (the fix run's
+    # S-227): deleted, so nobody wires the wrong answer in.
 
     def save(self, *args, **kwargs):
         self.validate_row()
