@@ -66,6 +66,24 @@ def refuse_unless_development(settings) -> None:
             f"are {module or 'unknown'!s} (only {DEVELOPMENT_SETTINGS}).")
 
 
+#: Database hosts on this machine: a loopback address, or a socket (an empty host).
+LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+def refuse_unless_local_database() -> None:
+    """The development settings take the database from the environment (`DB_HOST`,
+    `DB_NAME`), so the settings module alone does not keep this command off a remote
+    server: `DB_HOST=<anything>` would point it there. Refused unless the database is on
+    this machine — a loopback host, a `.localhost` name, or a Unix socket."""
+    from django.db import connections
+
+    host = (connections["default"].settings_dict.get("HOST") or "").strip()
+    if host in LOCAL_HOSTS or host.startswith("/") or host.endswith(".localhost"):
+        return
+    raise WalkRefused(f"Refusing to run: the database host is {host!r}, not this machine. "
+                      f"seed_walk_states writes only to a local development database.")
+
+
 def password_from_environment() -> str:
     """The walk accounts' one password: from the environment, never the code, never
     printed or written anywhere."""
@@ -234,7 +252,7 @@ class Walk:
 
     # The real routes, for what has no service function ------------------------
     def api(self, user, method: str, path: str, data=None, *, build: str = "apk",
-            version: str = "1.0.0", expect=(200, 201)):
+            version: str = "1.0.0", expect=(200, 201), multipart: bool = False):
         """Call a REAL route as `user`, with the build declared, and answer
         `(status, body)`.
 
@@ -243,7 +261,8 @@ class Walk:
         the way the phone syncs it. The URL is resolved and its view called with a
         request authenticated as `user` (no token is minted; the middleware stack is
         not run). A status outside `expect` raises `WalkApiRefused` with the body, so a
-        state never builds on a refusal it did not mean."""
+        state never builds on a refusal it did not mean. `multipart=True` sends the body
+        as a form, for an upload (a `SimpleUploadedFile` in `data`), as the app does."""
         from django.urls import resolve
         from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -254,7 +273,8 @@ class Walk:
         if method.lower() == "get":
             request = maker(path, data or {}, **headers)
         else:
-            request = maker(path, data or {}, format="json", **headers)
+            request = maker(path, data or {}, format="multipart" if multipart else "json",
+                            **headers)
         force_authenticate(request, user=user)
         match = resolve(path.split("?")[0])
         response = match.func(request, *match.args, **match.kwargs)

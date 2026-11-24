@@ -20,6 +20,8 @@ the same file:
     users/walk/inbox.py      inbox
     users/walk/operator.py   the operator's pages
     users/walk/progress.py   progress, badges and body measurements
+    users/walk/diet.py       diet plans and their questions
+    users/walk/coach_desk.py a trainer's first steps and Today queue
 
 `users/walk/shared.py` holds what several areas use (a coaching made through the request
 and its answer). `walk.api(user, method, path, data)` calls a real route as an account,
@@ -84,6 +86,8 @@ AREAS = {
     "inbox": "inbox",
     "operator": "the operator's pages",
     "progress": "progress, badges and body measurements",
+    "diet": "diet plans and their questions",
+    "coach_desk": "a trainer's first steps and Today queue",
 }
 
 ROLES = ("client", "trainer", "agent", "admin")
