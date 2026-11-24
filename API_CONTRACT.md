@@ -3340,7 +3340,7 @@ English). Prefix `/api/routine/`.
 
 | Endpoint | New codes |
 |---|---|
-| `DELETE exercises/{id}/` | 409 `exercise_has_history` |
+| `DELETE exercises/{id}/` | 409 `exercise_has_history`; 409 `exercise_in_use` with `routines`, `templates` (a routine or template still uses it: remove it there, or retire it with `is_active=false`; the fix run's G2, 2026-11-24, additive) |
 | `POST exercises/create-with-image/` | 400 `missing_fields` (+ `fields`, `field`; minted as `field_required` and unified before it shipped, B-092) |
 | `DELETE routines/{id}/` | 409 `routine_has_history` |
 | `POST routines/{id}/assign_to_client/` | 400 `client_id_required`, `not_your_client`, `already_assigned`; 404 `client_not_found`; 500 `routine_assign_failed` |

@@ -279,13 +279,36 @@ class ExerciseViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
 
         409 `exercise_has_history` — someone has logged work against it; retire it with
         `is_active=false` instead (the owner, 2026-09-24: every refusal names its code).
+
+        409 `exercise_in_use` (additive, the fix run's G2, 2026-11-24), with `routines`
+        and `templates` — how many of each still name it — when nobody has logged work
+        against it but a routine or a template still uses it. `RoutineExercise` and
+        `RoutineTemplateExercise` CASCADE too, so the delete took the exercise out of
+        every routine that used it — clients' assigned programmes included — and out of
+        every template, and said nothing. Take it out of those first, or retire it with
+        `is_active=false` (the routines keep it; it leaves the pickers). Checked after
+        `exercise_has_history`, which keeps its answer.
         """
+        from .models import RoutineExercise, RoutineTemplateExercise
+
         exercise = self.get_object()
         if exercise.progress.exists():
             return Response(
                 {'error': _('Clients have recorded work against this exercise, so it '
                             'cannot be deleted. Set is_active=false to retire it.'),
                  'code': 'exercise_has_history'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        routines = (RoutineExercise.objects.filter(exercise=exercise)
+                    .values('routine_id').distinct().count())
+        templates = (RoutineTemplateExercise.objects.filter(exercise=exercise)
+                     .values('template_id').distinct().count())
+        if routines or templates:
+            return Response(
+                {'error': _('This exercise is still part of a routine or a template, so '
+                            'it cannot be deleted. Remove it from them first, or set '
+                            'is_active=false to retire it.'),
+                 'code': 'exercise_in_use', 'routines': routines, 'templates': templates},
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)

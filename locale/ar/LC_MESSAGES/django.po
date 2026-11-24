@@ -6322,3 +6322,11 @@ msgstr "من التطبيق، أثناء تسجيل الدخول"
 msgid "Deleted account"
 msgstr "حساب محذوف"
 
+#: routine/views.py
+msgid ""
+"This exercise is still part of a routine or a template, so it cannot be "
+"deleted. Remove it from them first, or set is_active=false to retire it."
+msgstr ""
+"هذا التمرين ما زال جزءاً من برنامج أو قالب، لذا لا يمكن حذفه. أزِله منها أولاً، "
+"أو اجعل is_active=false لإيقافه."
+
