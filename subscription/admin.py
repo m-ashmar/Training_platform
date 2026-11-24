@@ -43,7 +43,7 @@ def _set(subscription, **fields):
 # Shared by both admin sites. Each goes through `save()` and writes an admin log entry per
 # row: `queryset.update()` skipped both, so granting or cancelling paid access in bulk left
 # no record of who did it — on the table that decides what a customer has paid for.
-@admin.action(description="Activate selected subscriptions")
+@admin.action(description="Activate selected subscriptions", permissions=["change"])
 def activate_subscriptions(modeladmin, request, queryset):
     count = _each_subscription_under_lock(
         request, queryset, "Activated via bulk admin action",
@@ -52,7 +52,7 @@ def activate_subscriptions(modeladmin, request, queryset):
     modeladmin.message_user(request, f"Activated {count} subscriptions.")
 
 
-@admin.action(description="Cancel selected subscriptions")
+@admin.action(description="Cancel selected subscriptions", permissions=["change"])
 def cancel_subscriptions(modeladmin, request, queryset):
     now = timezone.now()
     count = _each_subscription_under_lock(
@@ -61,7 +61,7 @@ def cancel_subscriptions(modeladmin, request, queryset):
     modeladmin.message_user(request, f"Cancelled {count} subscriptions.")
 
 
-@admin.action(description="Extend subscriptions by 30 days")
+@admin.action(description="Extend subscriptions by 30 days", permissions=["change"])
 def extend_subscriptions(modeladmin, request, queryset):
     count = _each_subscription_under_lock(
         request, queryset, "Extended by 30 days via bulk admin action",
@@ -109,11 +109,13 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
         count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
         self.message_user(request, f"Activated {count} plans.")
     activate_plans.short_description = "Activate selected plans"
+    activate_plans.allowed_permissions = ('change',)
     
     def deactivate_plans(self, request, queryset):
         count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
         self.message_user(request, f"Deactivated {count} plans.")
     deactivate_plans.short_description = "Deactivate selected plans"
+    deactivate_plans.allowed_permissions = ('change',)
 
 @admin.register(Subscription)
 class SubscriptionAdmin(admin.ModelAdmin):
@@ -288,6 +290,7 @@ class PaymentAdmin(admin.ModelAdmin):
             evidence={'action': 'mark_as_completed'},
         ), "Completed")
     mark_as_completed.short_description = "Mark as completed"
+    mark_as_completed.allowed_permissions = ('change',)
 
     def mark_as_failed(self, request, queryset):
         from subscription.services.payment_service import By, PaymentService
@@ -295,6 +298,7 @@ class PaymentAdmin(admin.ModelAdmin):
             p.id, "Marked failed by an administrator", by=By.OPERATOR,
             actor=getattr(request, "user", None)), "Failed")
     mark_as_failed.short_description = "Mark as failed"
+    mark_as_failed.allowed_permissions = ('change',)
 
     def mark_as_refunded(self, request, queryset):
         """Refunds the payment and withdraws the access it paid for."""
@@ -303,6 +307,7 @@ class PaymentAdmin(admin.ModelAdmin):
             p.id, "Refunded by an administrator", by=By.OPERATOR,
             actor=getattr(request, "user", None)), "Refunded")
     mark_as_refunded.short_description = "Mark as refunded"
+    mark_as_refunded.allowed_permissions = ('change',)
 
 @admin.register(SubscriptionFeature)
 class SubscriptionFeatureAdmin(admin.ModelAdmin):
@@ -317,11 +322,13 @@ class SubscriptionFeatureAdmin(admin.ModelAdmin):
         count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
         self.message_user(request, f"Activated {count} features.")
     activate_features.short_description = "Activate selected features"
+    activate_features.allowed_permissions = ('change',)
     
     def deactivate_features(self, request, queryset):
         count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
         self.message_user(request, f"Deactivated {count} features.")
     deactivate_features.short_description = "Deactivate selected features"
+    deactivate_features.allowed_permissions = ('change',)
 
 @admin.register(SubscriptionUsage)
 class SubscriptionUsageAdmin(admin.ModelAdmin):

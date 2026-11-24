@@ -193,7 +193,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **Data types.** Device push token (`device_ids`).
 
-**Fields stored.** `id`, `user`, `token`, `platform`, `app_version`, `device_id`, `is_active`, `last_used_at`, `created_at`.
+**Fields stored.** `id`, `user`, `token`, `platform`, `app_channel`, `app_version`, `device_id`, `is_active`, `last_used_at`, `created_at`.
 
 **In the export.** Every field.
 

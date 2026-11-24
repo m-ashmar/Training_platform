@@ -49,17 +49,29 @@ class ClientInline(admin.TabularInline):
 # (trainer_verification/admin.py), and that decision is the ONE place the flag is written
 # (`trainer_verification.services.decide` / `revoke`). One tick in a bulk action verified
 # people nobody had checked, with no documents and no record of what was looked at.
-@admin.action(description="Mark selected trainers as available")
+@admin.action(description="Mark selected trainers as available", permissions=["change"])
 def make_available(modeladmin, request, queryset):
     count = bulk_apply(request, queryset.filter(user_type='trainer'),
                        "Trainer marked available via bulk admin action",
                        trainer_is_available=True)
     messages.success(request, f"Marked {count} trainers as available.")
 
+# Every action declares the permission it needs (Road to 10 round 4, 2026-11-24). An
+# action with none is offered by Django to anyone who can VIEW the changelist: a staff
+# account given only `view_customuser` deactivated accounts and took pictures down.
+# `tests/test_road10_admin_action_permissions.py` walks every ModelAdmin of both sites.
+#
+# allauth's `EmailAddressAdmin.make_verified` (registered on the stock `/admin/`) marks
+# addresses verified and declares nothing: it needs the change permission too.
+from allauth.account.admin import EmailAddressAdmin as _EmailAddressAdmin  # noqa: E402
+
+_EmailAddressAdmin.make_verified.allowed_permissions = ('change',)
+
+
 # The bulk "reset to a known password" action is gone. It set every selected account
 # to one shared, source-visible string, which is an account takeover of every user an
 # operator can select. Password recovery goes through the OTP flow like everyone else.
-@admin.action(description="Remove the profile picture of the selected users")
+@admin.action(description="Remove the profile picture of the selected users", permissions=["change"])
 def remove_profile_pictures(modeladmin, request, queryset):
     """A reported picture taken down (the owner's D9, 2026-11-22: a trainer uploads their
     own photo; it can be reported, `target_type: user`, and removed). The file leaves
@@ -71,12 +83,12 @@ def remove_profile_pictures(modeladmin, request, queryset):
     messages.success(request, f"Removed {count} profile pictures.")
 
 
-@admin.action(description="Activate selected users")
+@admin.action(description="Activate selected users", permissions=["change"])
 def activate_users(modeladmin, request, queryset):
     count = bulk_apply(request, queryset, "Activated via bulk admin action", is_active=True)
     messages.success(request, f"Activated {count} users.")
 
-@admin.action(description="Deactivate selected users")
+@admin.action(description="Deactivate selected users", permissions=["change"])
 def deactivate_users(modeladmin, request, queryset):
     count = bulk_apply(request, queryset, "Deactivated via bulk admin action", is_active=False)
     messages.success(request, f"Deactivated {count} users.")
@@ -320,14 +332,26 @@ class CustomUserAdmin(UserAdmin):
         told the operator what it was. Anyone who read this file could sign in as any
         account an operator had ever "helped". An account is recovered through the OTP
         flow, which is the only path that proves the person owns the address.
+
+        It also ends every session the account has (Road to 10 round 4): an operator
+        resets a password because the account may be in someone else's hands, and
+        leaving its refresh tokens alive kept every signed-in device signed in for up
+        to seven days. The same revocation the password change makes
+        (`users/utils.py end_every_session`), in the same transaction as the reset.
         """
         if '_reset_password' in request.POST:
-            obj.set_unusable_password()
-            obj.save(update_fields=['password'])
+            from django.db import transaction
+
+            from .utils import end_every_session
+
+            with transaction.atomic():
+                obj.set_unusable_password()
+                obj.save(update_fields=['password'])
+                ended = end_every_session(obj)
             messages.success(
                 request,
-                f"{obj.email} can no longer sign in with a password. "
-                f"Ask them to use 'forgot password' to set a new one."
+                f"{obj.email} can no longer sign in with a password, and was signed out "
+                f"of {ended} session(s). Ask them to use 'forgot password' to set a new one."
             )
             return HttpResponseRedirect('.')
         return super().response_change(request, obj)

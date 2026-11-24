@@ -1975,8 +1975,19 @@ def _sync_one_set(request, row, key, known, today):
                              if existing.user_exercise_progress_id else None),
                 _duplicate_touch(user, row, existing), None)
 
-    # 2. The date. Bounded exactly as `bulk-create` bounds it.
-    parsed = _date_or_none(row.get('date')) if row.get('date') else today
+    # 2. The date. Bounded exactly as `bulk-create` bounds it. Sent, it is kept; not
+    #    sent, a set that names its session is dated on the session's START day
+    #    (SIDE_BUGS S-289, `routine/models.py set_day_without_date`), any other today.
+    #    The session itself is checked in step 4 (`session_not_found`).
+    if row.get('date'):
+        parsed = _date_or_none(row.get('date'))
+    else:
+        from .models import set_day_without_date
+
+        named = (WorkoutSession.objects.filter(
+                     pk=_int_or_none(row.get('workout_session_id')), user=user).first()
+                 if row.get('workout_session_id') is not None else None)
+        parsed = set_day_without_date(named, today)
     if parsed is None:
         return _sync_error(key, 'bad_date',
                            _('date must be in YYYY-MM-DD format.')), None, None
@@ -2136,7 +2147,10 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
     POST may carry `client_uuid` (the app's id for the set): the first POST with it
     answers 201, a retry answers 200 with the same row, and an id already used by
     someone else's set answers 409 `idempotency_conflict`. `date` is writable, so a set
-    logged offline keeps its day.
+    logged offline keeps its day. Omitted, it is today — or, for a set that names its
+    `workout_session`, that session's START day (SIDE_BUGS S-289): a workout begun at
+    23:40 is one workout on its start day, its 00:10 sets included. A sent date is
+    always kept. `set-logs/sync/` dates its rows the same way.
 
     A client's new set answers 403 `coaching_frozen` / `coaching_unpaid` / `coaching_ended` / `product_refunded` (with
     `trainer_id`) while the coaching its routine came from is unpaid or over, unless the
@@ -2639,7 +2653,9 @@ class ExerciseSetLogViewSet(viewsets.ModelViewSet):
 
             client_uuid         required — the app's own id for the set, the retry key
             exercise_id         required
-            date                YYYY-MM-DD; today when omitted
+            date                YYYY-MM-DD; kept as sent. Omitted: the START day of
+                                the row's `workout_session_id` session (a workout
+                                begun at 23:40 is that day's, S-289), else today
             set_number          1-100, optional
             weight              kg, 0-1000, optional
             reps                1-1000 — required, unless `as_prescribed: true`

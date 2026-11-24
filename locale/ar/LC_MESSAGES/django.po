@@ -6240,3 +6240,23 @@ msgstr ""
 "لدى هذا العميل تدريب جارٍ مع %(name)s. لتغيير المدرب أنهِه أولاً: ينهيه المدرب "
 "أو العميل من التطبيق، فيُعاد أي مبلغ محجوز له. ولإعادة حقل المدرب إلى ما "
 "يطابقه، اختر %(name)s."
+
+#. `subscription_expired` on a build that may not sell the plan (Road to 10 R1).
+#: notifications/domain/subscription_events.py
+msgid "Your diet plan and routine are saved and you can still see them."
+msgstr "خطتك الغذائية وبرنامجك التدريبي محفوظان ويمكنك الاطلاع عليهما."
+
+#. `coaching_payment_due` on a build that may not pay for coaching (Road to 10 R1).
+#: notifications/domain/trainer_client_events.py
+#, python-format
+msgid "Your coaching with %(name)s is paused. You can still see your routines."
+msgstr "تدريبك مع %(name)s متوقف مؤقتاً. لا يزال بإمكانك الاطلاع على برامجك."
+
+#. `password_not_set` on POST /api/auth/password/change/ (Road to 10 round 4).
+#: users/password_views.py
+msgid ""
+"Your account has no password yet. Set one with \"Forgot password\": we will "
+"email you a code."
+msgstr ""
+"لا توجد كلمة مرور لحسابك بعد. عيّنها من «نسيت كلمة المرور» وسنرسل إليك رمزاً "
+"بالبريد الإلكتروني."

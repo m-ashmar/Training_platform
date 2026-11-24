@@ -97,6 +97,9 @@ def _set_field_action(name, description, message, **fields):
 
     action.__name__ = name
     action.short_description = description
+    # Changing rows needs the change permission (Road to 10 round 4): without a declared
+    # permission Django offers an action to anyone who can VIEW the changelist.
+    action.allowed_permissions = ('change',)
     return action
 
 
@@ -203,11 +206,13 @@ class ExerciseAdmin(admin.ModelAdmin):
         updated = _bulk_apply(request, queryset, "Made global via bulk admin action", is_global=True)
         self.message_user(request, f"{updated} record(s) updated.")
     make_global.short_description = "Make exercises global"
+    make_global.allowed_permissions = ('change',)
     
     def make_private(self, request, queryset):
         updated = _bulk_apply(request, queryset, "Made private via bulk admin action", is_global=False)
         self.message_user(request, f"{updated} record(s) updated.")
     make_private.short_description = "Make exercises private"
+    make_private.allowed_permissions = ('change',)
 
     def get_queryset(self, request):
         # Per-row `.count()` columns cost one query per row — ~125 queries for a
@@ -273,6 +278,7 @@ class RoutineAdmin(OneClientRoutineAdminMixin, admin.ModelAdmin):
             copy_routine(routine, name=f"{routine.name} (Copy)"[:255], is_active=False)
         self.message_user(request, f"{queryset.count()} routines duplicated successfully.")
     duplicate_routines.short_description = "Duplicate selected routines"
+    duplicate_routines.allowed_permissions = ('add',)
 
     def get_queryset(self, request):
         # Per-row `.count()` columns cost one query per row — ~125 queries for a

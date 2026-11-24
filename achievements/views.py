@@ -4,6 +4,7 @@ Achievement Views - Rich API endpoints for achievement system.
 
 from rest_framework import viewsets, status, permissions
 from django.utils.translation import gettext as _
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -18,6 +19,14 @@ from .serializers import (
 )
 from .engine import AchievementEngine
 from training_platform.query_params import int_param
+
+
+class AchievementCheckThrottle(UserRateThrottle):
+    """`POST achievements/check/` per account (SIDE_BUGS S-272): the whole engine each
+    call, so a loop of calls was a cheap way to load the server. The rate is
+    `DEFAULT_THROTTLE_RATES['achievement_check']`."""
+
+    scope = 'achievement_check'
 
 
 class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
@@ -275,7 +284,7 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
             'user_stats': user_stats
         })
     
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], throttle_classes=[AchievementCheckThrottle])
     def check(self, request):
         """
         Manually trigger achievement check for current user.
@@ -283,6 +292,13 @@ class AchievementViewSet(viewsets.ReadOnlyModelViewSet):
         POST /api/achievements/check/
         
         Useful for retroactive achievement awarding.
+
+        Auth required; no body; nothing differs by build. 200 `{message,
+        newly_awarded}`. Badges are already awarded on their own after every activity,
+        and nothing in the app calls this; it re-runs the whole engine, so it is
+        limited to 6 an hour per account (`achievement_check`, SIDE_BUGS S-272): past
+        that, 429 `{error, detail, code: "throttled"}` with the seconds to wait in
+        `Retry-After`, as the platform's other per-account limits answer.
         """
         user = request.user
         
