@@ -1041,6 +1041,15 @@ null, times_done}` (+ `session_id` while a session on it runs). `place` is the
 onboarding answer (`training_place`), home when unanswered. Identical on every build:
 free, no price, nothing to buy.
 
+**An open coaching request on every home (BACKEND_BUGS B-200, 2026-11-24).** Additive:
+no route, section, key or value renamed. While a request is open the checklist's
+`coach` step (`state: awaiting`, as before) also carries `direction` (`waiting` | `invited`,
+the hero's `step`), `request_id` and `trainer: {id, first_name}` — the facts
+`find_trainer_hero` carries, from one function, but present whatever hero leads: a client
+with no coach who bought a programme gets `workout_hero` and no `find_trainer_hero`, and
+read one `awaiting` for a request sent and an invitation received. A request the client
+can no longer see (a suspended or hidden trainer, a block) is not open.
+
 | Method | Path | Auth | View |
 |---|---|---|---|
 | `GET` | `/api/v1/home` | auth | `HomeView` |

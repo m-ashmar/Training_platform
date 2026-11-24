@@ -55,6 +55,23 @@ def open_request(person):
             .first())
 
 
+def open_request_facts(pending) -> dict:
+    """What Home says of an open request, wherever it says it (Road to 10 S2.1,
+    BACKEND_BUGS B-200): `direction` — `invited` (a trainer invited them) or `waiting`
+    (the client asked, or a row from before `initiated_by` was kept); `request_id`, what
+    `client/cancel-trainer-request/` or `client/respond-to-invite/` acts on; and the
+    trainer's `{id, first_name}`.
+
+    `pending` is `open_request(person)`, so a request the client can no longer see (the
+    trainer suspended or hidden, a block either way) has no facts and no name. ONE rule
+    for both places: the first-day hero answers `direction` as its `step`, and the
+    checklist's coach step carries all three keys as they are."""
+    return {'direction': 'invited' if pending.initiated_by == 'trainer' else 'waiting',
+            'request_id': pending.pk,
+            'trainer': {'id': pending.trainer_id,
+                        'first_name': pending.trainer.first_name}}
+
+
 def find_trainer_hero(person, *, pending=None) -> dict | None:
     """The first-day hero: the goal they chose, and how many trainers suit it — and, once
     a request is open, which face the hero shows (Road to 10 S2.1).
@@ -87,10 +104,9 @@ def find_trainer_hero(person, *, pending=None) -> dict | None:
     if pending is not None:
         # Only while a request is open: with nothing open the section keeps the shape it
         # always had, `{goal, matches}`, and no `step` means `choose`.
-        data['step'] = 'invited' if pending.initiated_by == 'trainer' else 'waiting'
-        data['request_id'] = pending.pk
-        data['trainer'] = {'id': pending.trainer_id,
-                           'first_name': pending.trainer.first_name}
+        facts = open_request_facts(pending)
+        data['step'] = facts.pop('direction')
+        data.update(facts)
     return data
 
 
@@ -124,9 +140,17 @@ def setup_checklist(person, *, routine, plan, coached, pending=None) -> dict | N
                          else 'current' if step['code'] == current else 'todo')
     # A request is open (sent, or an invitation received): the coach step is neither
     # to do nor done — it is awaiting the other side (Road to 10 S2.1). Additive value.
+    #
+    # And WHICH way, with the request and the trainer (BACKEND_BUGS B-200): the hero
+    # carries them only when no `workout_hero` leads, so a client with no coach who is
+    # training (a bought programme) read the one `awaiting` for a request they sent and
+    # for an invitation they received. The checklist is answered to every client with
+    # no coach — its coach step cannot be done without one — which is every client a
+    # request can be open for, so here the facts reach the app whatever hero leads.
     coach = steps[1]
     if not coach['done'] and pending is not None:
         coach['state'] = 'awaiting'
+        coach.update(open_request_facts(pending))
     return {'steps': steps, 'current': current}
 
 
