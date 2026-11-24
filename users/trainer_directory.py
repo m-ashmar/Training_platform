@@ -85,10 +85,15 @@ def listed_trainers():
     card with no name. Listing is not existing: the profile (`trainers/{id}/`) still
     answers a nameless trainer by id, because the trainer's own shell and the chat read
     it. Whether a trainer is VERIFIED decides nothing here (the owner, D1 "not now").
-    """
-    from django.db.models.functions import Trim
 
-    return directory_trainers().alias(_first=Trim('first_name')).exclude(_first='')
+    "Empty" is `users/names.py`'s rule, the one `onboarding_missing` asks by: no
+    characters but whitespace and the invisible marks (a zero-width space, an RLM, a
+    tatweel alone). It trimmed spaces only, so a name of invisible characters was listed
+    (the phase 0 review, 2026-11-23).
+    """
+    from .names import BLANK_NAME_REGEX
+
+    return directory_trainers().exclude(first_name__regex=BLANK_NAME_REGEX)
 
 
 def _strings(value) -> list[str]:

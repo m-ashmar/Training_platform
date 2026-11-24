@@ -1552,7 +1552,10 @@ directory's does (a username search would confirm the names it no longer shows).
 `trainer_hourly_rate` / `coaching_currency` are unchanged: null together on a build that
 may not show a coaching fee. The signed-in client's list, `GET
 /api/auth/client/available-trainers/`, follows the same listing rule (blocks still left
-out) and the same `client_count` rule; its `username` and search are unchanged.
+out) and the same `client_count` rule; its `username` and search are unchanged. A first
+name of only spaces or invisible marks (a zero-width space, an RLM, a lone tatweel) is
+no first name, for every list and for `onboarding_missing` alike (`users/names.py`,
+2026-11-24).
 
 ### Coaching (monthly)
 
@@ -1836,7 +1839,10 @@ Additive fields:
 
 `{"email": "support@yalagym.com", "whatsapp": null | "+9639..."}`: how the Help page
 reaches support, the same for every build and person. `whatsapp` is null until the owner
-sets `SUPPORT_WHATSAPP`. Its own route, not keys in `capabilities.links`.
+sets `SUPPORT_WHATSAPP`, and then always the digits with a leading `+` (spaces, dashes,
+dots and brackets dropped, `00` read as `+`, Arabic-Indic digits written as ASCII), so
+`https://wa.me/<digits>` is the chat link. Its own route, not keys in
+`capabilities.links`.
 
 Keyed on `X-App-Channel` and `X-App-Version` and on nothing else — not the account, the
 country, the IP, the device's clock or an experiment bucket. Two users on one build get
