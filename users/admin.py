@@ -344,10 +344,38 @@ try:
     
     @admin.register(TrainerClientRelation)
     class TrainerClientRelationAdmin(admin.ModelAdmin):
-        list_display = ('trainer', 'client', 'status', 'created_at')
+        """Read-only, as the operator console's is (admin_dashboard/admin.py).
+
+        This row carries consent, the agreed price, the escrow reference and both ends
+        of the coaching. With every field editable here, any staff account could set
+        `status='approved'` with no client consent and no money held, point
+        `hold_reference` at nothing, change `agreed_rate`, or set an end flag (the only
+        source of SIDE_BUGS S-266's state); deleting a row left its held month in escrow
+        with nothing to return it from (`CoachingPeriod.relation` is SET_NULL). A
+        relation's money moves only through users/trainer_relations.py and
+        users/coaching.py: the request, the answers, the first programme, the monthly
+        run and the two leaving routes. The one console path left that writes a
+        relation is the user form's `assigned_trainer` (`CustomUserAdmin.save_model`):
+        it puts a stale pointer back in step, and refuses anything that would end
+        another coaching (the phase-3 review, round 4, 2026-11-24).
+        """
+        list_display = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                        'hold_reference', 'created_at')
         list_filter = ('status', 'created_at')
         search_fields = ('trainer__email', 'client__email')
-        readonly_fields = ('created_at', 'updated_at')
+        readonly_fields = ('trainer', 'client', 'status', 'initiated_by', 'agreed_rate',
+                           'agreed_currency', 'hold_reference', 'requested_at',
+                           'ends_at_period_end', 'client_stops_renewal', 'client_note',
+                           'responded_at', 'created_at', 'updated_at')
+
+        def has_add_permission(self, request):
+            return False
+
+        def has_change_permission(self, request, obj=None):
+            return False
+
+        def has_delete_permission(self, request, obj=None):
+            return False
         
     @admin.register(DeviceToken)
     class DeviceTokenAdmin(admin.ModelAdmin):

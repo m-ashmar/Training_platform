@@ -768,6 +768,13 @@ class TrainerClientRelationAdmin(admin.ModelAdmin):
     def has_change_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        """Not deleted either: a deleted approved row left its held month in escrow with
+        nothing to return it from (`CoachingPeriod.relation` is SET_NULL). A coaching
+        ends through the trainer's or the client's leaving route, or the monthly run
+        (the phase-3 review, round 4, 2026-11-24)."""
+        return False
+
 
 # Why coachings end (BACKEND_BUGS B-159, B-160): the reasons the leave and remove sheets
 # collect, for the operators — the only people who ever see them (the owner,
