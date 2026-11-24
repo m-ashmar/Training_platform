@@ -11,8 +11,17 @@ writes a ledger row, a payment state or a hold: every one is the platform's own 
 The agent's caps and ceiling are the operator's console settings on the agent's
 profile, set the way the console sets them.
 
-The helpers (`call`, `operator`, `agent`, `top_up`, `funded_client`, `coach`) are
-shared with `users/walk/coaching.py`, the other money module.
+**One currency per state, never a rate.** Each state trades in its client's own
+currency (`money_of`: the wallet's, or for an account no money has reached yet the
+platform's base currency, so a new Syrian client's wallet is in pounds). A top-up is in
+that currency and the agent's caps, ceiling and settlement are read in it; a trainer is
+a fresh account too, so the coaching price (`COACH_RATE`, in the trainer's currency) and
+the client's money are the same currency and a transfer never crosses. Nothing here
+converts, and nothing creates or sets an exchange rate: that is the operator's value,
+and a development database may have none (the app builders' does, on purpose).
+
+The helpers (`call`, `operator`, `agent`, `top_up`, `funded_client`, `coach`,
+`money_of`) are shared with `users/walk/coaching.py`, the other money module.
 """
 from __future__ import annotations
 
@@ -22,7 +31,8 @@ from decimal import ROUND_UP, Decimal
 from . import state
 from .framework import on_retire
 
-#: A trainer's monthly fee in the walk states, in pounds (the platform's base currency).
+#: A trainer's monthly fee in the walk states, in the trainer's currency (a fresh
+#: account's: the platform's base currency, pounds).
 COACH_RATE = Decimal("40000.00")
 
 
@@ -34,6 +44,14 @@ def call(walk, user, method: str, path: str, data=None, *, expect=(200, 201)):
 
 def key() -> str:
     return uuid.uuid4().hex
+
+
+def money_of(user) -> str:
+    """The currency `user` trades in (`wallet.currency_for`): the wallet's, or the
+    platform's base currency for an account no money has reached yet."""
+    from wallet import currency_for
+
+    return currency_for(user)
 
 
 # ------------------------------------------------------------------ the people
@@ -56,14 +74,16 @@ def agent(walk, part="agent", **console):
     return user
 
 
-def top_up(walk, agent_user, client, amount, currency="SYP"):
+def top_up(walk, agent_user, client, amount, currency=None):
     """Cash handed to `agent_user`, credited to `client` by the agent's app
-    (`POST wallet/agent/topup/proxy/`, WALLET_MOVE). An amount above the agent's
-    per-top-up cap is handed over in several top-ups, as an agent would."""
+    (`POST wallet/agent/topup/proxy/`, WALLET_MOVE), in the client's own currency
+    (`money_of`) unless one is named. An amount above the agent's per-top-up cap in
+    that currency is handed over in several top-ups, as an agent would."""
     from wallet.models import ensure_agent_profile
 
+    currency = currency or money_of(client)
     amount = Decimal(amount)
-    cap = ensure_agent_profile(agent_user).per_transaction_limit or amount
+    cap = ensure_agent_profile(agent_user).per_transaction_limit_for(currency) or amount
     receipts = []
     while amount > 0:
         part = min(amount, Decimal(cap))
@@ -212,23 +232,27 @@ def trainer_withdrawal_refused(walk):
                "held for the platform near the ceiling.")
 def agent_busy_day(walk):
     from wallet import agents
-    from wallet.models import ensure_agent_profile
+    from wallet.models import AgentProfile, ensure_agent_profile
 
     the_operator = operator(walk)
-    me = agent(walk, None, receivable_ceiling="200000")
     clients = [walk.account(f"client{n}", role="client", first_name=name, last_name=family)
                for n, (name, family) in enumerate(
                    [("ليلى", "خوري"), ("مازن", "العلي"), ("هبة", "سعيد")], start=1)]
+    # The cash the clients hand over is in their currency; the ceiling the operator set
+    # and the settlement are in that one (`AgentProfile.CEILING_FIELDS`).
+    currency = money_of(clients[0])
+    me = agent(walk, None, **{AgentProfile.CEILING_FIELDS[currency]: "200000"})
     top_up(walk, me, clients[0], "50000")
     top_up(walk, me, clients[1], "50000")
     profile = ensure_agent_profile(me)
-    settlement = agents.record_settlement(profile.pk, "SYP", Decimal("60000"), the_operator,
-                                          note="تسليم نقدي في المكتب", key=key())
+    settlement = agents.record_settlement(profile.pk, currency, Decimal("60000"),
+                                          the_operator, note="تسليم نقدي في المكتب",
+                                          key=key())
     top_up(walk, me, clients[2], "50000")
     top_up(walk, me, clients[0], "45000")
     top_up(walk, me, clients[1], "45000")
     walk.ids(clients=[c.pk for c in clients], settlement=settlement.pk,
-             operator=the_operator.pk)
+             operator=the_operator.pk, currency=currency)
 
 
 @state("agent_key_paired_elsewhere", area="wallet", role="agent",

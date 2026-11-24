@@ -317,8 +317,11 @@ def test_the_refusal_names_every_gap_at_once_and_writes_nothing(walk_env):
         _run(walk_env)
     message = str(refused.value)
     assert "channel capabilities" in message and "bootstrap_platform" in message
-    gap = "a plan on sale with the diet, priced in SYP (the currency a new wallet takes)"
-    assert message.count(gap) == 1, message
+    # In the words a state's own refusal uses (`shared.cheapest_plan`), and once, though
+    # three areas need it (coaching_frozen, plan_lapsed, premium_no_diet_plan).
+    diet = "no paid subscription plan on sale in SYP with the diet (the currency a new wallet takes)"
+    plain = "no paid subscription plan on sale in SYP (the currency a new wallet takes)"
+    assert message.count(diet) == 1 and message.count(plain) == 1, message
     assert not walk_env.exists()
     assert not CustomUser.objects.filter(email__startswith="walk.").exists()
 
@@ -332,8 +335,31 @@ def test_a_need_is_checked_only_for_the_states_that_have_it(walk_env):
         is_active=False)
     manifest, _out = _run(walk_env, "--only", "member_with_post")
     assert set(manifest["states"]) == {"member_with_post"}
-    with pytest.raises(CommandError, match="priced in SYP"):
+    with pytest.raises(CommandError, match="on sale in SYP with the diet"):
         _run(walk_env, "--only", "premium_no_diet_plan")
+
+
+def test_the_settings_a_state_moves_money_under_are_checked_up_front(walk_env, settings):
+    """Not bootstrap data but the environment: a new agent's caps in the base currency,
+    and the payout minimum and daily cap for it. Named before anything is written; the
+    payout ones only for the states that request a withdrawal."""
+    from users.models import CustomUser
+
+    settings.AGENT_DEFAULT_DAILY_LIMIT = 0
+    settings.PAYOUT_DAILY_CAP = {"USD": 5000}
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        _run(walk_env)
+    message = str(refused.value)
+    assert "AGENT_DEFAULT_DAILY_LIMIT above 0" in message
+    assert "a SYP entry above 0 in the setting PAYOUT_DAILY_CAP" in message
+    assert "PAYOUT_MIN_AMOUNT" not in message
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+    settings.AGENT_DEFAULT_DAILY_LIMIT = 250000
+    manifest, _out = _run(walk_env, "--only", "member_with_post")
+    assert set(manifest["states"]) == {"member_with_post"}
+    with pytest.raises(CommandError, match="PAYOUT_DAILY_CAP"):
+        _run(walk_env, "--only", "trainer_withdrawal_requested")
 
 
 def test_keep_going_writes_what_succeeds_and_names_every_failure(walk_env, monkeypatch):

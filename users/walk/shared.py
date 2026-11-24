@@ -91,34 +91,46 @@ def plans_on_sale(currency: str, *, diet: bool = False):
     return plans.order_by("price", "id")
 
 
+def cheapest_plan(currency: str, *, diet: bool = False):
+    """The cheapest paid plan on sale in `currency` (the client's own), with the diet
+    when asked. Prices are compared within that one currency only. Refuses, naming what
+    is missing, when there is none: a state never makes, prices or converts a plan.
+    (Moved here from `coaching.py`, the money worker's, so every area uses one rule.)"""
+    from .framework import WalkRefused
+
+    plan = plans_on_sale(currency, diet=diet).first()
+    if plan is None:
+        raise WalkRefused(
+            f"no paid subscription plan on sale in {currency}"
+            f"{' with the diet' if diet else ''}: the walk client trades in {currency} and "
+            f"a plan in another currency would need the operator's exchange rate. Put "
+            f"one on sale in the console; this command never makes or prices a plan.")
+    return plan
+
+
 def missing_plan(currency: str | None = None, *, diet: bool = False) -> list[str]:
-    """For an area's `@needs`: `[]` when a plan is on sale priced in `currency` (a new
-    wallet's when None), with the diet if `diet`; else the one gap, in the same words
-    for every area that needs it (the refusal names each gap once)."""
+    """For an area's `@needs`: `[]` when a paid plan is on sale priced in `currency` (a
+    new wallet's when None), with the diet if `diet`; else the one gap, in the words
+    `cheapest_plan` refuses with, the same for every area (the refusal names each gap
+    once)."""
     currency = currency or new_wallet_currency()
     if plans_on_sale(currency, diet=diet).exists():
         return []
-    return [f"a plan on sale{' with the diet' if diet else ''}, priced in {currency} "
-            f"(the currency a new wallet takes)"]
+    return [f"no paid subscription plan on sale in {currency}"
+            f"{' with the diet' if diet else ''} (the currency a new wallet takes)"]
 
 
 def plan_for(client, *, diet: bool = False, prefer: str | None = None):
     """A plan `client` can pay from their own wallet without an exchange rate: on sale,
     priced in the client's wallet currency (`currency_for`), with the diet if `diet`.
     The catalogue's `prefer` plan (`catalogue_key`) when it is one of those, else the
-    cheapest of them. Raises `WalkRefused` naming what is missing; the command's
-    pre-flight check (`@needs`) names it before any state runs."""
+    cheapest of them (`cheapest_plan`, which refuses by name when there is none)."""
     from wallet import currency_for
 
-    from .framework import WalkRefused
-
     currency = currency_for(client)
-    plans = plans_on_sale(currency, diet=diet)
-    plan = (plans.filter(catalogue_key=prefer).first() if prefer else None) or plans.first()
-    if plan is None:
-        raise WalkRefused(f"no plan on sale{' with the diet' if diet else ''} priced in "
-                          f"{currency} (the client's wallet currency)")
-    return plan
+    preferred = (plans_on_sale(currency, diet=diet).filter(catalogue_key=prefer).first()
+                 if prefer else None)
+    return preferred or cheapest_plan(currency, diet=diet)
 
 
 def top_up(walk, agent, client, amount: str, currency: str | None = None):

@@ -35,6 +35,14 @@ at a state that took "the cheapest plan" and got a dollar one):
 
 It answers the password, for a test that signs in with it.
 
+**`other_currency_plan`** (on top of `walk_platform`, which already holds it) answers the
+developers' plan in the platform's OTHER currency (`Pro (USD)`, 12.00), and checks what
+makes it the trap it was on their database: on sale with the diet, cheaper BY NUMBER
+than every plan in the base currency (1,000 SYP and up), and NO exchange rate set by an
+operator. Every state must still run: a state that compared prices across currencies,
+or priced a plan in a currency its client does not trade in, fails here as it failed
+there. (The money worker's fixture; one plan since walk_platform made the same one.)
+
 **`walk_run(name, ...)`** resets states through the command itself
 (`seed_walk_states --only <name> --manifest <tmp>`), with the after-commit work executed
 as it is outside a test (counts, notices, recounts), and answers the state's manifest
@@ -141,3 +149,23 @@ def walk_run(walk_platform, tmp_path, django_capture_on_commit_callbacks):
 
     run.manifest = manifest
     return run
+
+
+@pytest.fixture
+def other_currency_plan(walk_platform):
+    from decimal import Decimal
+
+    from django.conf import settings
+
+    from subscription.models import SubscriptionPlan
+    from wallet.models import ExchangeRate
+
+    base = settings.PLATFORM_CURRENCY
+    plan = SubscriptionPlan.objects.get(name="Pro (USD)")
+    assert plan.currency != base and plan.price == Decimal("12.00")
+    on_sale = SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
+    assert on_sale.filter(pk=plan.pk, has_diet_access=True).exists()
+    assert on_sale.filter(currency=base, has_diet_access=True).exists()
+    assert not on_sale.filter(currency=base, price__lte=plan.price).exists()
+    assert not ExchangeRate.objects.exists(), "the development database has no rate"
+    return plan
