@@ -748,6 +748,17 @@ commit landed after `9b286e7` reaches the server only after the owner's next pus
     the password at a hidden prompt, the same address pattern every time), and again
     shortly before each store submission:
     `docker compose exec -u appuser -e REVIEW_ACCOUNTS_EMAIL -e REVIEW_ACCOUNTS_PASSWORD web python manage.py seed_review_accounts`.
+- After the update that carries landing 3 (the fix run's RTN-1 and PAY-1 to PAY-3, 2026-11-24):
+  - ONE migration the migrate service applies: routine 0038 (`Routine.days` bounded to
+    1..365 by validators only, no SQL; a new column `UserExerciseProgress.claimed_sets`,
+    default 0, filled for rows that claim more sets than their logs hold). Before that
+    update, count the routines outside the bound — a stored one refuses its next save
+    until its days are set inside it:
+    `docker compose exec -u appuser web python manage.py shell -c "from django.db.models import Q; from routine.models import Routine; print(Routine.objects.filter(Q(days__lt=1)|Q(days__gt=365)).count())"`.
+    0 is expected; anything else is the owner's to fix in the console before the update.
+  - ShamCash: with `SHAMCASH_API_URL` unset (its default since 2026-11-24, no third
+    party), the server calls no payment API; `GET v1/gateways/` answers ShamCash as kind
+    "reviewed" and checkout is the manual transfer a person confirms (`SHAMCASH_ACCOUNT_ID`).
 - After the update that carries landing 2a (the fix run, 2026-11-24):
   - A password change, a forgot-password reset, the console's reset and a deactivation
     sign the account out of EVERY device at once (each token carries a digest of the
