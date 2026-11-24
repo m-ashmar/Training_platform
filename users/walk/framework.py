@@ -46,6 +46,31 @@ def on_retire(hook):
     return hook
 
 
+#: What states need of THIS database beyond bootstrap's own steps, declared by their area
+#: modules with `@needs(...)`: `(check, state names, area)`. A check answers what is
+#: missing, one sentence per gap (`[]` when nothing is), and must only READ.
+NEEDS: list[tuple[Callable, frozenset, str | None]] = []
+
+
+def needs(*state_names: str, area: str | None = None):
+    """Declare what some states need of the database, checked ONCE before any state is
+    built (`refuse_unless_ready`), with every other gap, so a run names everything
+    missing at once and writes nothing::
+
+        @needs("premium_no_diet_plan")
+        def _a_diet_plan_a_new_wallet_can_pay():
+            return [] if ... else ["a plan on sale with the diet, priced in SYP"]
+
+    Names: the check applies when one of these states is run. `area`: when any state of
+    that area is. Neither: always. A gap is said as what is missing, in the words an
+    operator would act on: "a plan on sale with the diet, priced in SYP (the currency a
+    new wallet takes)", never "plan lookup failed"."""
+    def register(check):
+        NEEDS.append((check, frozenset(state_names), area))
+        return check
+    return register
+
+
 class WalkRefused(Exception):
     """The command must not run; the message says why."""
 
@@ -104,27 +129,26 @@ def password_from_environment() -> str:
 def bootstrap_gaps() -> list[str]:
     """What `bootstrap_platform` writes and is missing here, one entry per step the
     states rely on (its own steps, read from its own sources). Empty on a dev server
-    that ran it. The command refuses ONCE, before any state, when this is not empty:
-    a state never creates platform data (a sellable plan, a catalogue row) itself."""
+    that ran it. A state never creates platform data (a sellable plan, a catalogue row)
+    itself.
+
+    Plans are not here: which plan a state can use depends on the CURRENCY its client
+    trades in, and "a plan on sale" was true of a database whose only one was in dollars
+    (the developers', 2026-11-24). Each state that buys or prices a plan declares the
+    plan it needs, by currency, with `@needs` (below, and `diet.py`)."""
     from achievements.models import Achievement
     from diet.models import DietPlanTemplate, FoodItem
     from policy.models import ChannelCapabilities
     from routine.data.exercise_catalogue import STARTER_EXERCISES
     from routine.data.platform_templates import PLATFORM_TEMPLATES
     from routine.models import Exercise, RoutineTemplate
-    from subscription.models import SubscriptionFeature, SubscriptionPlan
+    from subscription.models import SubscriptionFeature
 
     starter = {exercise.key for exercise in STARTER_EXERCISES}
     templates = {template.key for template in PLATFORM_TEMPLATES}
     checks = (
         ("channel capabilities", ChannelCapabilities.objects.exists()),
         ("quota features", SubscriptionFeature.objects.exists()),
-        ("a subscription plan on sale",
-         SubscriptionPlan.objects.filter(is_active=True, price__gt=0).exists()),
-        # The money states buy a plan whose diet a coach then writes (`coaching.py`).
-        ("a subscription plan on sale with the diet",
-         SubscriptionPlan.objects.filter(is_active=True, price__gt=0,
-                                         has_diet_access=True).exists()),
         ("diet plan templates", DietPlanTemplate.objects.exists()),
         ("achievements", Achievement.objects.exists()),
         ("starter exercises",
@@ -137,13 +161,43 @@ def bootstrap_gaps() -> list[str]:
     return [name for name, present in checks if not present]
 
 
-def refuse_unless_bootstrapped() -> None:
-    gaps = bootstrap_gaps()
-    if gaps:
-        raise WalkRefused(
-            f"Refusing to run: this database has not been bootstrapped (missing: "
-            f"{', '.join(gaps)}). Run `manage.py bootstrap_platform` first; the walk "
-            f"states use what it writes and never create it themselves.")
+def state_needs(names=None) -> list[str]:
+    """What the states named (every registered state when None) need of this database
+    and is missing (`@needs`), in registration order, each gap once."""
+    from . import load_states
+
+    states = load_states()
+    chosen = set(states) if names is None else set(names)
+    areas = {states[name].area for name in chosen if name in states}
+    gaps: list[str] = []
+    for check, for_states, for_area in NEEDS:
+        applies = ((not for_states and for_area is None) or bool(for_states & chosen)
+                   or (for_area is not None and for_area in areas))
+        if applies:
+            gaps.extend(gap for gap in check() if gap not in gaps)
+    return gaps
+
+
+def refuse_unless_ready(names=None) -> None:
+    """ONCE, before any state: what `bootstrap_platform` writes, and what the states to
+    be run need of this database (`@needs`). Every gap is named in one refusal, and
+    nothing is written."""
+    missing = bootstrap_gaps()
+    wanted = state_needs(names)
+    if not missing and not wanted:
+        return
+    parts = []
+    if missing:
+        parts.append(
+            f"this database has not been bootstrapped (missing: {', '.join(missing)}). "
+            f"Run `manage.py bootstrap_platform` first; the walk states use what it writes "
+            f"and never create it themselves")
+    if wanted:
+        parts.append(
+            f"the walk states to be run cannot run on this database and these settings: "
+            f"{'; '.join(wanted)}. The states never create platform data or a rate "
+            f"themselves")
+    raise WalkRefused("Refusing to run, nothing was written: " + ". And ".join(parts) + ".")
 
 
 # ------------------------------------------------------------------ addresses
@@ -358,3 +412,80 @@ def write_manifest(path: Path, data: dict) -> None:
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
                          encoding="utf-8")
     temporary.replace(path)
+
+
+# ------------------------------------------------------------------ what the states need
+# Declared here, with the framework's own checks, at the manager's ruling (2026-11-24):
+# what the money worker's states need (`coaching.py`, `wallet.py`) and what the
+# environment must allow for any state to move money. An area may declare its own beside
+# its states instead (`diet.py` does). Each check only reads, and says each gap in the
+# words an operator acts on.
+
+@needs("coaching_frozen", "plan_lapsed")
+def _a_plan_with_the_diet_a_new_wallet_can_pay():
+    """These buy a plan whose diet a coach then writes, from a new client's wallet."""
+    from .shared import missing_plan
+
+    return missing_plan(diet=True)
+
+
+@needs("plan_not_renewing", "plan_renewal_due", "client_wallet_covers_plan")
+def _a_plan_a_new_wallet_can_pay():
+    """These buy or price a plan from a new client's wallet."""
+    from .shared import missing_plan
+
+    return missing_plan()
+
+
+def _base_suffix(currency: str) -> str:
+    """The settings name a currency's twin by: the pound caps are unsuffixed, the
+    others carry `_<CODE>` (`wallet.models.ensure_agent_profile`)."""
+    return "" if currency == "SYP" else f"_{currency}"
+
+
+@needs()
+def _a_new_agent_may_take_cash_in_the_base_currency():
+    """Every state that tops a wallet up does it at a new agent, whose caps are the
+    settings' defaults (`ensure_agent_profile`). A daily or monthly cap of 0, or a set
+    per-top-up cap or ceiling of 0, means that agent takes no cash at all."""
+    from decimal import Decimal
+
+    from django.conf import settings
+
+    from .shared import new_wallet_currency
+
+    currency = new_wallet_currency()
+    suffix = _base_suffix(currency)
+    gaps = []
+    for name, required in (("AGENT_DEFAULT_DAILY_LIMIT", True),
+                           ("AGENT_DEFAULT_MONTHLY_LIMIT", True),
+                           ("AGENT_DEFAULT_PER_TRANSACTION_LIMIT", False),
+                           ("AGENT_DEFAULT_RECEIVABLE_CEILING", False)):
+        value = getattr(settings, name + suffix, None)
+        if value in (None, "") and not required:
+            continue            # unset: no cap of its own, as ensure_agent_profile reads it
+        if value in (None, "") or Decimal(str(value)) <= 0:
+            gaps.append(f"the setting {name + suffix} above 0 (a new agent's {currency} cap: "
+                        f"at 0 it takes no cash)")
+    return gaps
+
+
+@needs("trainer_withdrawal_requested", "trainer_withdrawal_sent",
+       "trainer_withdrawal_refused", "inbox_every_kind")
+def _withdrawals_in_the_base_currency():
+    """These request withdrawals in a new trainer's currency, which `payouts.services`
+    refuses without a minimum and a daily cap set for it."""
+    from decimal import Decimal
+
+    from django.conf import settings
+
+    from .shared import new_wallet_currency
+
+    currency = new_wallet_currency()
+    gaps = []
+    if (getattr(settings, "PAYOUT_MIN_AMOUNT", {}) or {}).get(currency) is None:
+        gaps.append(f"a {currency} entry in the setting PAYOUT_MIN_AMOUNT")
+    cap = (getattr(settings, "PAYOUT_DAILY_CAP", {}) or {}).get(currency)
+    if cap is None or Decimal(str(cap)) <= 0:
+        gaps.append(f"a {currency} entry above 0 in the setting PAYOUT_DAILY_CAP")
+    return gaps

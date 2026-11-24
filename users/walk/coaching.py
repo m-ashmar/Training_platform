@@ -12,7 +12,18 @@ relation), `users.coaching.remind_upcoming(relation_ids=...)`,
 `send_renewal_reminders(subscription_ids=...)`. Never the whole sweep: on a shared
 development database that renewed, froze, lapsed and reminded every builder's own
 accounts (the framework owner's review, 2026-11-24). Never a hand-written ledger row,
-payment state or hold. The states that read platform data (a plan on sale, the diet templates
+payment state or hold.
+
+**No state needs an exchange rate.** A plan is chosen in the client's OWN currency
+(`cheapest_plan(money_of(client))`) and bought in it, so nothing is converted; prices in
+two currencies are never compared (a dollar plan at 12.00 is not "cheaper" than a pound
+plan at 1,000). Where no paid plan is on sale in the client's currency the state refuses
+and says so: it never makes or prices a plan, never makes the wallet follow the plan's
+currency, and never sets a rate (the operator's value; a development database may have
+none). The coaching price is in the trainer's currency, which is the client's (both are
+fresh accounts: `users/walk/wallet.py`).
+
+The states that read platform data (a plan on sale, the diet templates
 and the food catalogue, the starter exercises) need a bootstrapped database: the
 command refuses once, before any state, when one is not (`framework.bootstrap_gaps`).
 
@@ -38,7 +49,7 @@ from django.utils import timezone
 from . import state
 from .framework import WalkRefused, on_retire
 from .shared import coach_client, starter_exercise
-from .wallet import COACH_RATE, agent, call, coach, funded_client, key, top_up
+from .wallet import COACH_RATE, agent, call, coach, funded_client, key, money_of, top_up
 
 
 # ------------------------------------------------------------------ on a reset
@@ -132,23 +143,36 @@ def plan_reminders_now(subscription):
 
 
 # ------------------------------------------------------------------ plan steps
-def cheapest_plan(*, diet=False):
-    """The cheapest paid plan on sale (with the diet: `framework.bootstrap_gaps` makes
-    sure there is one)."""
+def cheapest_plan(currency, *, diet=False):
+    """The cheapest paid plan on sale in `currency` (the client's own), with the diet
+    when asked. Prices are compared within that one currency only. Refuses, naming what
+    is missing, when there is none: a state never makes, prices or converts a plan."""
     from subscription.models import SubscriptionPlan
 
-    plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
+    plans = SubscriptionPlan.objects.filter(is_active=True, price__gt=0, currency=currency)
     if diet:
         plans = plans.filter(has_diet_access=True)
-    return plans.order_by("price", "id").first()
+    plan = plans.order_by("price", "id").first()
+    if plan is None:
+        raise WalkRefused(
+            f"no paid subscription plan on sale in {currency}"
+            f"{' with the diet' if diet else ''}: the walk client trades in {currency} and "
+            f"a plan in another currency would need the operator's exchange rate. Put "
+            f"one on sale in the console; this command never makes or prices a plan.")
+    return plan
 
 
 def plan_price(plan, client):
-    """The plan's price in the client's currency, as the plan list quotes it."""
+    """The plan's price as the plan list quotes it to the client: the price of record,
+    the plan being in the client's own currency (`cheapest_plan`), so no rate is read.
+    A plan in another currency is refused, never converted."""
     from subscription.pricing import charge_for
-    from wallet import currency_for
 
-    return charge_for(plan.price, plan.currency, currency_for(client))
+    currency = money_of(client)
+    if plan.currency != currency:
+        raise WalkRefused(f"plan {plan.pk} is priced in {plan.currency}, the walk client "
+                          f"trades in {currency}: the walk states never convert a price")
+    return charge_for(plan.price, plan.currency, currency)
 
 
 def buy_plan(walk, client, plan):
@@ -177,10 +201,10 @@ def plan_ends_at(subscription, when):
 
 
 def subscribed_client(walk, *, diet=False, extra=Decimal("0")):
-    """A client (main account) who bought the cheapest plan from a wallet an agent
-    topped up with its price (and `extra` more)."""
-    plan = cheapest_plan(diet=diet)
+    """A client (main account) who bought the cheapest plan in their currency from a
+    wallet an agent topped up with its price (and `extra` more)."""
     client = walk.account(role="client")
+    plan = cheapest_plan(money_of(client), diet=diet)
     top_up(walk, agent(walk), client, plan_price(plan, client).amount + Decimal(extra))
     return client, buy_plan(walk, client, plan)
 
@@ -207,9 +231,9 @@ def coach_diet_plan(trainer, client):
        summary="A coaching whose month ended unpaid, and a plan that lapsed: the coach's "
                "routine and diet plan are readable and cannot be used.")
 def coaching_frozen(walk):
-    plan = cheapest_plan(diet=True)
     trainer = coach(walk)
     client = walk.account(role="client")
+    plan = cheapest_plan(money_of(client), diet=True)
     # The plan's price and one month of coaching, and a little: not a second month.
     top_up(walk, agent(walk), client, plan_price(plan, client).amount + COACH_RATE + 5000)
     subscription = buy_plan(walk, client, plan)
@@ -316,9 +340,10 @@ def client_invited_by_coach(walk):
 
 # ------------------------------------------------------------------ 7. a plan in reach
 @state("client_wallet_covers_plan", area="coaching", role="client",
-       summary="A client with no plan whose wallet covers the cheapest plan exactly.")
+       summary="A client with no plan whose wallet covers the cheapest plan in its "
+               "currency exactly.")
 def client_wallet_covers_plan(walk):
-    plan = cheapest_plan()
     client = walk.account(role="client")
+    plan = cheapest_plan(money_of(client))
     top_up(walk, agent(walk), client, plan_price(plan, client).amount)
     walk.ids(plan=plan.pk)

@@ -44,9 +44,28 @@ The name is the state's id in the manifest and in its addresses: lower case, dig
 are the only accounts the command ever touches.
 
 **Platform data is assumed, never made.** The command refuses ONCE, before any state, on
-a database `bootstrap_platform` has not prepared (`framework.bootstrap_gaps`). A state
-never creates "if missing" a sellable plan, a catalogue exercise, a food or a template:
-it uses what bootstrap wrote, and a dev database gets nothing else from it.
+a database `bootstrap_platform` has not prepared (`framework.bootstrap_gaps`), or one
+missing what the states to be run need of it, every gap named at once and nothing
+written. A state never creates "if missing" a sellable plan, a catalogue exercise, a
+food, a template or an exchange rate: it uses what is there.
+
+**Declare what your states need** of the database, beside them, with `@needs` (a check
+that only reads, answering one sentence per gap)::
+
+    from .framework import needs
+
+    @needs("client_waiting_for_coach")          # or area="coaching", or no argument: always
+    def _a_plan_a_new_wallet_can_pay():
+        from .shared import missing_plan
+        return missing_plan(diet=True)          # [] or ["a plan on sale with the diet, ..."]
+
+**Never compare or pick across currencies.** A developer's database holds plans in pounds
+AND dollars and no exchange rate: "the cheapest plan" by its number is the dollar one,
+and pricing it in pounds needs a rate no state may set. Pick within the client's own
+wallet currency (`shared.plan_for(client, diet=..., prefer=...)`, `shared.plans_on_sale`)
+and top up in it (`shared.top_up` does by default). Never "the first row" of a table a
+developer's database also fills: name the row (a `catalogue_key`, a `platform_key`, a
+starter exercise by its key).
 
 **An upload goes through the real route** (`walk.api(...)` with a file, e.g. a trainer's
 verification documents), never a file written by hand.
@@ -60,10 +79,14 @@ screen reads, with the SHARED fixtures (`tests/walk_fixtures.py`)::
         entry = walk_run("client_waiting_for_coach")   # its manifest entry
         ...
 
-`walk_platform` gives the test's database what a dev server has after bootstrap_platform
-(the real command, inside the test's transaction; the session's food catalogue) and puts
-`MEDIA_ROOT` and `PRIVATE_MEDIA_ROOT` in the test's `tmp_path`, so an upload never lands
-in the project's real media folders.
+`walk_platform` gives the test's database what a developer's database has: what
+bootstrap_platform writes (the real command, inside the test's transaction; the
+session's food catalogue) AND what the app builders' seed puts beside it — its plans in
+both currencies with the dollar one cheapest by number, no exchange rate, and ordinary
+`@dev.test` accounts with their own plans and coachings — so a state that only works on
+a clean bootstrap fails in your test, not on their database. It puts `MEDIA_ROOT` and
+`PRIVATE_MEDIA_ROOT` in the test's `tmp_path`, so an upload never lands in the project's
+real media folders.
 
 **Nothing reads these accounts but the command.** Rule zero: the server serves a walk
 account exactly what it serves any account. There is no flag, group or column that marks

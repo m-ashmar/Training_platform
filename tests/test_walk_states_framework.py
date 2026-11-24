@@ -255,3 +255,143 @@ def test_after_a_second_run_nothing_retired_is_seen(walk_env, make_user, api):
     second = _what_real_people_see(make_user, api, "two")
     assert all(not seen for seen in second["retired_seen"].values()), second["retired_seen"]
     assert second["queues"] == first["queues"], (first["queues"], second["queues"])
+
+
+# ------------------------------------------------------------------ the developers' database
+def _developers_shape():
+    """What the ordinary `@dev.test` accounts of `walk_platform` hold: their own rows."""
+    from django.db.models import Q
+
+    from subscription.models import Subscription
+    from tests.walk_fixtures import DEVELOPERS_DOMAIN
+    from users.models import CoachingPeriod, CustomUser, TrainerClientRelation
+    from wallet.models import Transaction, Wallet
+
+    people = CustomUser.objects.filter(email__endswith=f"@{DEVELOPERS_DOMAIN}")
+    ids = list(people.values_list("pk", flat=True))
+    assert len(ids) == 4, "walk_platform makes four ordinary accounts"
+    return {
+        "people": sorted(people.values_list("email", "is_active", "user_type",
+                                            "preferred_language")),
+        "wallets": sorted(Wallet.objects.filter(owner_id__in=ids)
+                          .values_list("owner_id", "currency", "balance")),
+        "ledger": Transaction.objects.filter(Q(source_wallet__owner_id__in=ids)
+                                             | Q(destination_wallet__owner_id__in=ids)).count(),
+        "relations": sorted(TrainerClientRelation.objects.filter(client_id__in=ids)
+                            .values_list("client_id", "status")),
+        "periods": sorted(CoachingPeriod.objects.filter(client_id__in=ids)
+                          .values_list("client_id", "number", "status", "ends_at")),
+        "subscriptions": sorted(Subscription.objects.filter(user_id__in=ids)
+                                .values_list("user_id", "status", "plan_id", "end_date")),
+    }
+
+
+def test_every_state_builds_on_a_database_shaped_like_the_developers(walk_env):
+    """The first real run, on the app builders' database (2026-11-24), stopped at its 12th
+    state: it took "the cheapest plan on sale" by its number, got `Pro (USD)` at 12.00,
+    and could not price dollars in pounds, as no operator had set a rate. Our databases
+    had only bootstrap's plans. `walk_platform` is now shaped like theirs (its own plans
+    in both currencies, no rate, ordinary accounts with their own plans and coachings):
+    every state builds there, and the ordinary accounts are as they were."""
+    from users.walk import load_states
+
+    before = _developers_shape()
+    manifest, _out = _run(walk_env)
+    assert set(manifest["states"]) == set(load_states())
+    assert _developers_shape() == before
+
+
+def test_the_refusal_names_every_gap_at_once_and_writes_nothing(walk_env):
+    """What bootstrap writes AND what the states need of this database (each area's
+    `@needs`), named in ONE refusal before anything is written, each gap once. Here: the
+    channel capabilities are gone, and the only plans with the diet left on sale are in
+    dollars, which a new wallet (pounds) cannot pay without a rate."""
+    from policy.models import ChannelCapabilities
+    from subscription.models import SubscriptionPlan
+    from users.models import CustomUser
+
+    ChannelCapabilities.objects.all().delete()
+    SubscriptionPlan.objects.filter(currency="SYP", has_diet_access=True).update(
+        is_active=False)
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        _run(walk_env)
+    message = str(refused.value)
+    assert "channel capabilities" in message and "bootstrap_platform" in message
+    # In the words a state's own refusal uses (`shared.cheapest_plan`), and once, though
+    # three areas need it (coaching_frozen, plan_lapsed, premium_no_diet_plan).
+    diet = "no paid subscription plan on sale in SYP with the diet (the currency a new wallet takes)"
+    plain = "no paid subscription plan on sale in SYP (the currency a new wallet takes)"
+    assert message.count(diet) == 1 and message.count(plain) == 1, message
+    assert not walk_env.exists()
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+
+def test_a_need_is_checked_only_for_the_states_that_have_it(walk_env):
+    """`--only` a state that needs no plan runs on a database with no pound plan with the
+    diet; the state that needs one is refused, naming it."""
+    from subscription.models import SubscriptionPlan
+
+    SubscriptionPlan.objects.filter(currency="SYP", has_diet_access=True).update(
+        is_active=False)
+    manifest, _out = _run(walk_env, "--only", "member_with_post")
+    assert set(manifest["states"]) == {"member_with_post"}
+    with pytest.raises(CommandError, match="on sale in SYP with the diet"):
+        _run(walk_env, "--only", "premium_no_diet_plan")
+
+
+def test_the_settings_a_state_moves_money_under_are_checked_up_front(walk_env, settings):
+    """Not bootstrap data but the environment: a new agent's caps in the base currency,
+    and the payout minimum and daily cap for it. Named before anything is written; the
+    payout ones only for the states that request a withdrawal."""
+    from users.models import CustomUser
+
+    settings.AGENT_DEFAULT_DAILY_LIMIT = 0
+    settings.PAYOUT_DAILY_CAP = {"USD": 5000}
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        _run(walk_env)
+    message = str(refused.value)
+    assert "AGENT_DEFAULT_DAILY_LIMIT above 0" in message
+    assert "a SYP entry above 0 in the setting PAYOUT_DAILY_CAP" in message
+    assert "PAYOUT_MIN_AMOUNT" not in message
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+    settings.AGENT_DEFAULT_DAILY_LIMIT = 250000
+    manifest, _out = _run(walk_env, "--only", "member_with_post")
+    assert set(manifest["states"]) == {"member_with_post"}
+    with pytest.raises(CommandError, match="PAYOUT_DAILY_CAP"):
+        _run(walk_env, "--only", "trainer_withdrawal_requested")
+
+
+def test_keep_going_writes_what_succeeds_and_names_every_failure(walk_env, monkeypatch):
+    """By default the run stops at the first state that fails (its transaction rolled
+    back). `--keep-going` builds the next one, writes it, and at the end names every
+    failed state with its reason and fails the command (a non-zero exit)."""
+    import dataclasses
+
+    from users.models import CustomUser
+    from users.walk import STATES, load_states
+
+    load_states()
+
+    def broken(walk):
+        walk.account()
+        raise RuntimeError("the probe's own failure")
+
+    monkeypatch.setitem(STATES, "member_with_post",
+                        dataclasses.replace(STATES["member_with_post"], build=broken))
+    both = ("--only", "member_with_post", "--only", "operator_staff")
+
+    with pytest.raises(CommandError, match="walk state member_with_post failed"):
+        _run(walk_env, *both)
+    assert not walk_env.exists()
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+    with pytest.raises(CommandError) as failed:
+        _run(walk_env, *both, "--keep-going")
+    assert "1 walk state(s) reset, 1 failed" in str(failed.value)
+    assert "member_with_post: the probe's own failure" in str(failed.value)
+    manifest = json.loads(walk_env.read_text(encoding="utf-8"))
+    assert set(manifest["states"]) == {"operator_staff"}
+    assert not CustomUser.objects.filter(email="walk.member_with_post@yalla.test").exists()
+    assert CustomUser.objects.filter(email="walk.operator_staff@yalla.test",
+                                     is_active=True).exists()
