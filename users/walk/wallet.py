@@ -20,6 +20,7 @@ import uuid
 from decimal import ROUND_UP, Decimal
 
 from . import state
+from .framework import on_retire
 
 #: A trainer's monthly fee in the walk states, in pounds (the platform's base currency).
 COACH_RATE = Decimal("40000.00")
@@ -146,6 +147,27 @@ def withdraw(walk, trainer, amount):
 
 
 # ------------------------------------------------------------------ 4. withdrawals
+@on_retire
+def _close_the_withdrawals_of_retired_walk_trainers(users):
+    """A withdrawal waits on the operator's desk (the console's queue, the operator
+    phone's `withdrawals` count) whoever asked for it, so every run of the withdrawal
+    states would leave two more open under retired trainers. Each open one (requested,
+    approved or sent) is closed as an operator closes one that cannot be paid, through
+    `payouts.services.fail` with its reason: the money goes back to the retired
+    trainer's balance, its events are written as for any failure, and the queue is as it
+    was. The state's own operator (its `operator` part) is the one who closes it. Walk
+    data only: `users` are walk accounts being retired."""
+    from payouts import services
+    from payouts.models import OPEN_STATES, Withdrawal
+
+    the_operator = next((user for user in users if user.user_type == "admin"), None)
+    still_open = (Withdrawal.objects.filter(trainer__in=users, state__in=OPEN_STATES)
+                  .order_by("pk").values_list("pk", flat=True))
+    for withdrawal_id in list(still_open):
+        services.fail(withdrawal_id, the_operator,
+                      "Walk-through account reset: this request was closed.")
+
+
 @state("trainer_withdrawal_requested", area="wallet", role="trainer",
        summary="A verified trainer with a payout method, whose withdrawal waits for the "
                "operator.")

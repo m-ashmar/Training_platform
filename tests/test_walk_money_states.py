@@ -268,3 +268,32 @@ def test_no_account_but_the_walk_accounts_is_renewed_lapsed_or_reminded(
     assert soon_month.renewal_reminder_sent_at is None                       # not reminded
     assert Notification.objects.filter(recipient__in=people).count() == notices
 
+
+# ------------------------------------------------------------------ a second run
+def _withdrawal_queue(api, make_user):
+    from users.models import CustomUser
+
+    operator = (CustomUser.objects.filter(username="m2_console_operator").first()
+                or make_user("m2_console_operator", user_type="admin"))
+    queues = api(operator).get("/api/v1/ops/queue-counts/").json()["queues"]
+    return {row["key"]: row["count"] for row in queues}["withdrawals"]
+
+
+def test_a_second_run_leaves_the_withdrawal_queue_as_the_first(api, make_user, walk_run):
+    """Each run of the withdrawal states opens two withdrawals (requested, sent). The
+    reset closes the retired trainers' open ones as an operator closes one that cannot
+    be paid, so the operator's queue holds the same after run 2 as after run 1 (the
+    framework owner's review, M2)."""
+    from payouts.models import Withdrawal
+
+    states = ("trainer_withdrawal_requested", "trainer_withdrawal_sent",
+              "trainer_withdrawal_refused")
+    first = walk_run(*states)
+    after_first = _withdrawal_queue(api, make_user)
+    assert after_first == 2
+    walk_run(*states)
+    assert _withdrawal_queue(api, make_user) == after_first
+    for name in states[:2]:
+        old = Withdrawal.objects.get(pk=first["states"][name]["ids"]["withdrawal"])
+        assert old.state == "failed" and old.failure_reason
+
