@@ -86,7 +86,10 @@ class PaymentGatewayService:
         try:
             self._validate_payment_request(amount, currency, user_data)
             payment_data = {
-                'amount': float(amount),
+                # The Decimal itself (SIDE_BUGS S-228): a float here reached the
+                # transfer instructions as "13000.0". An adapter that must send a JSON
+                # number converts it there.
+                'amount': amount,
                 'currency': currency,
                 'merchant_id': self.config.get('merchant_id'),
                 'user_data': user_data,
@@ -213,9 +216,10 @@ class PaymentGatewayService:
             raise ValidationError(f"Amount {amount} {currency} is below minimum {limits['min']}")
         if amount > limits['max']:
             raise ValidationError(f"Amount {amount} {currency} exceeds maximum {limits['max']}")
-        for field in ('email', 'phone'):
-            if not user_data.get(field):
-                raise ValidationError(f"Missing required field: {field}")
+        # No contact field is required (SIDE_BUGS S-229). A blank phone or email was a
+        # 400 `gateway_error`, though no adapter reads `user_data`: the transfer is to the
+        # merchant account with the reference in its note. Registration gives everyone a
+        # phone, so only one an operator blanked was refused — for nothing.
 
     @staticmethod
     def _validate_webhook_data(payment_data: Dict[str, Any]) -> bool:

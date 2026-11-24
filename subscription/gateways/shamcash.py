@@ -142,7 +142,9 @@ class ShamCashGateway(PaymentGateway):
             'payment_url': None,
             'instructions': {
                 'account_id': self.account_id,
-                'amount': str(amount),
+                # Two decimals, as the checkout's own `amount` reads ("13000.00"); this
+                # was "13000.0" from a float (SIDE_BUGS S-228).
+                'amount': str(Decimal(str(amount)).quantize(Decimal('0.01'))),
                 'currency': currency,
                 'note': reference,  # user must include this reference in the transfer note
             },
