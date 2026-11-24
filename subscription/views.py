@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 
 from .models import (
     OPEN_PAYMENT_STATUSES, SubscriptionPlan, Subscription, Payment,
-    SubscriptionFeature, SubscriptionUsage, paid_by, plan_snapshot
+    SubscriptionFeature, SubscriptionUsage, paid_by
 )
 from .serializers import (
     SubscriptionPlanSerializer, SubscriptionSerializer,
@@ -506,6 +506,11 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
         `immediate: true` ends it now (`status: "cancelled"`); otherwise it only turns
         `auto_renew` off and the cover runs to its end. 200 `{"message", "status"}`.
 
+        A cancellation writes NO payment (SIDE_BUGS S-184, S-252): it used to add a
+        zero-amount `cancelled` row to `GET v1/payments/`, which the app had learned to
+        hide. The fact is in the operator's audit log (`subscription.cancelled`);
+        `reason` is still accepted and validated, and not kept.
+
         Codes it can answer (branch on `code`, never on the text):
 
         | Status | `code` | Meaning |
@@ -571,20 +576,19 @@ class SubscriptionViewSet(mixins.CreateModelMixin,
                     'status', 'cancelled_at', 'auto_renew', 'updated_at'])
 
                 if state_changed:
-                    # Audit row. Currency follows the plan like every other Payment;
-                    # 'USD' here was a third independent guess at a currency the
-                    # platform does not charge in.
-                    Payment.objects.create(
-                        subscription=subscription,
-                        amount=0,
-                        currency=subscription.plan.currency,
-                        status='cancelled',
-                        description=f"Subscription cancelled: {reason}",
-                        # The plan that was cancelled, so the history row keeps naming
-                        # it after the row moves to another plan (`Payment.plan_bought`).
-                        metadata={'reason': reason, 'immediate': immediate,
-                                  'plan': plan_snapshot(subscription.plan)}
-                    )
+                    # The fact goes to the audit log, in this transaction. It used to be
+                    # a zero-amount 'cancelled' Payment written here, outside
+                    # PaymentService, with no PaymentEvent, in the plan's currency
+                    # rather than the buyer's, listed in the person's payment history
+                    # (SIDE_BUGS S-184, S-252): a cancellation is not a payment. The
+                    # free-text `reason` is not kept — the audit log outlives an
+                    # erasure (`privacy/sources.py`, on_erase "keep"), and nothing
+                    # read it — only whether one was given.
+                    from wallet.views import audit
+                    audit('subscription.cancelled', request, {
+                        'subscription_id': str(subscription.pk),
+                        'plan_id': subscription.plan_id, 'immediate': immediate,
+                        'reason_given': bool(reason)})
 
             logger.info(f"Cancelled subscription {subscription.id} for user {request.user.id}")
 

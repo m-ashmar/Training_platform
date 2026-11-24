@@ -2209,7 +2209,9 @@ show plan status, expiry and history, and history without receipts is not histor
   `404 receipt_not_available` (the payment is not `completed`). The payer and a
   superuser, nobody else.
 - `GET /api/subscription/v1/payments/` rows gain `item` (what was bought, in pieces),
-  `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list.
+  `completed_at`, `reference` and `receipt_available` — the "مدفوعات سابقة" list. A
+  cancellation (`POST subscriptions/{id}/cancel/`) no longer adds a zero-amount
+  `cancelled` row to it (SIDE_BUGS S-184, S-252): the list holds payments only.
 - `GET /api/subscription/v1/usage/today/` — `{quotas: [{feature, used, limit,
   resets_at}]}` for `daily_meals` and, on a plan with the AI coach, `ai_messages`
   (the same counter and the same allowance the WebSocket enforces: 10 a day by default

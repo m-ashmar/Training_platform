@@ -143,7 +143,7 @@ def test_f4_history_and_receipt_name_the_plan_in_the_readers_language(
 
 
 # ---------------------------------------------------------------- F5 / F12 / F18
-def test_f5_a_cancellation_row_keeps_naming_the_plan_that_was_cancelled(
+def test_f5_a_payment_keeps_naming_its_plan_after_a_cancel_and_a_move(
         make_user, api, shamcash, django_capture_on_commit_callbacks):
     from subscription.models import Payment
 
@@ -158,9 +158,15 @@ def test_f5_a_cancellation_row_keeps_naming_the_plan_that_was_cancelled(
     assert resp.status_code == 200, resp.content
     assert _change(c, sub, premium.id).status_code == 200
 
-    audit = Payment.objects.get(subscription=sub, status="cancelled")
+    # CONTRACT CHANGE (SIDE_BUGS S-184, S-252; Road to 10 PAY-2, 2026-11-24): a
+    # cancellation writes no payment row any more. It was a zero-amount 'cancelled'
+    # Payment written outside PaymentService, which the app filtered out of its history.
+    # What F5 protects holds for the rows that remain: the payment made on Basic keeps
+    # naming Basic after the subscription moved to Premium.
+    assert not Payment.objects.filter(subscription=sub, status="cancelled").exists()
+    paid = Payment.objects.get(subscription=sub, status="completed")
     row = next(r for r in _rows(c.get("/api/subscription/v1/payments/"))
-               if r["id"] == str(audit.id))
+               if r["id"] == str(paid.id))
     assert row["item"]["plan_id"] == basic.id, row["item"]
 
 
