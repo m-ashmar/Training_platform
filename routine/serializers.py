@@ -20,6 +20,20 @@ from users.models import CustomUser
 logger = logging.getLogger(__name__)
 
 
+def refused_image(error):
+    """The upload guard's refusal as a field error carrying the guard's OWN `code`
+    (`file_too_large`, `invalid_mime_type`, `unreadable_image`, `image_too_many_pixels`,
+    ...; `invalid_image` when it names none), under `field_errors.image[0].code`.
+
+    Both `validate_image` methods kept only the sentence, so DRF filled in `invalid` and
+    the app could not tell a photo that is too big from a file that is not a photo
+    (the fix run's S-165; `routine/views.py _refused_upload` is the same rule for the
+    routes that answer outside a serializer, S-118)."""
+    reason = error.messages[0] if getattr(error, 'messages', None) else str(error)
+    return serializers.ValidationError(reason,
+                                       code=getattr(error, 'code', None) or 'invalid_image')
+
+
 class ExerciseMediaSerializer(serializers.ModelSerializer):
     """Serializer for Exercise Media (e.g., videos, photos, text).
 
@@ -222,8 +236,7 @@ class ExerciseSerializer(ExerciseAuthoringFieldsMixin, ExerciseMediaSlotsMixin,
         try:
             safe_file, ext = process_uploaded_image(value, max_bytes=5 * 1024 * 1024)
         except DjangoValidationError as e:
-            raise serializers.ValidationError(
-                e.messages[0] if getattr(e, 'messages', None) else str(e))
+            raise refused_image(e)
         # The DETECTED format decides the extension; only the stem of the client's name
         # survives, so `shell.php.jpg` cannot come back out of storage as `shell.php`.
         base = _os.path.splitext(getattr(value, 'name', 'exercise'))[0][:60] or 'exercise'
@@ -285,7 +298,7 @@ class ExerciseCreateWithImageSerializer(ExerciseAuthoringFieldsMixin, ExerciseMe
         try:
             safe_file, ext = process_uploaded_image(value, max_bytes=5 * 1024 * 1024)
         except DjangoValidationError as e:
-            raise serializers.ValidationError(e.messages[0] if getattr(e, 'messages', None) else str(e))
+            raise refused_image(e)
         base = _os.path.splitext(getattr(value, 'name', 'exercise'))[0][:60] or 'exercise'
         safe_file.name = f"{base}.{ext}"
         return safe_file
