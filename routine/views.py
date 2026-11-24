@@ -17,9 +17,8 @@ from .models import EQUIPMENT_CHOICES
 from .serializers import (
     ExerciseSerializer, ExerciseCreateWithImageSerializer, RoutineSerializer, 
     RoutineExerciseSerializer, UserExerciseProgressSerializer, RoutineProgressSerializer,
-    UserRoutineSerializer, ExerciseSetLogSerializer, TrainerRoutineSerializer,
+    ExerciseSetLogSerializer, TrainerRoutineSerializer,
     WorkoutSessionSerializer, RoutineTemplateSerializer,
-    ExerciseMediaSerializer,
     RecentActivitySerializer,
 )
 # NOT imported here any more:
@@ -32,6 +31,10 @@ from .serializers import (
 #   `WorkoutSessionDetailSerializer`, `ClientProfileViewSerializer` — the same, on the
 #   adjacent names (SIDE_BUGS S-055). `ClientProfileViewSerializer` is still used, by
 #   `users/views.py`, which imports it from serializers.py itself.
+#   `UserRoutineSerializer`, `ExerciseMediaSerializer` — imported and never used here
+#   (the fix run's S-169). The first was used nowhere at all and is deleted, with
+#   `WorkoutSessionDetailSerializer`, which nothing read; the second is the nested
+#   `media` of the exercise serializers.
 from .permissions import (
     IsAdminOrOwnerOrReadOnly, 
     IsTrainerOrAdmin,

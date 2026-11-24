@@ -1226,17 +1226,6 @@ class RoutineProgressSerializer(serializers.ModelSerializer):
                 'day': obj.day}
 
 
-class UserRoutineSerializer(serializers.ModelSerializer):
-    """Serializer for User Routines with progress tracking."""
-    users = serializers.PrimaryKeyRelatedField(many=True, queryset=get_user_model().objects.all())
-    routine_template = RoutineSerializer(read_only=True)
-    progress = RoutineProgressSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Routine
-        fields = ['id', 'users', 'routine_template', 'start_date', 'end_date', 'progress']
-
-
 class DayOutcomeSummarySerializer(DayOutcomeSerializer):
     """A `DayOutcomeSerializer` row without `detail` — for `analytics/adherence/`
     `by_day`, whose queryset DEFERS that column (SIDE_BUGS S-072).
@@ -1382,7 +1371,7 @@ class ExerciseSetLogSerializer(serializers.ModelSerializer):
 
         `user_exercise_progress` was guarded and this field was not — a bare
         `PrimaryKeyRelatedField` over every session in the table. Session ids are
-        sequential, and every reader (`WorkoutSessionDetailSerializer`, the trainer's
+        sequential, and every reader (the session detail, the trainer's
         client-progress screen, the roster's recent activity) aggregates a session's
         `set_logs` without re-checking whose progress each log belongs to. So a stranger
         could post onto another client's session and the trainer watched that client's
@@ -2252,114 +2241,6 @@ class DetailedExerciseSetSerializer(serializers.ModelSerializer):
         if obj.weight and obj.reps:
             return obj.weight * obj.reps
         return 0
-
-
-class WorkoutSessionDetailSerializer(serializers.ModelSerializer):
-    """Detailed serializer for workout sessions with exercise information."""
-    routine_name = serializers.CharField(source='routine.name', read_only=True)
-    routine_id = serializers.IntegerField(source='routine.id', read_only=True)
-    duration_minutes = serializers.SerializerMethodField()
-    total_volume = serializers.SerializerMethodField()
-    intensity_score = serializers.SerializerMethodField()
-    muscles_worked = serializers.SerializerMethodField()
-    exercises_completed = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = WorkoutSession
-        fields = [
-            'id', 'routine_name', 'routine_id', 'start_time', 'end_time',
-            'status', 'duration_minutes', 'total_volume', 'intensity_score',
-            'muscles_worked', 'exercises_completed',
-            # How hard it felt, 1-5, or null while unanswered (BACKEND_DELTA item 11).
-            # Read-only here: it is written on the session itself, by whoever trained.
-            'effort_rating',
-        ]
-        read_only_fields = fields
-    
-    def _get_set_logs(self, obj):
-        """Cache set logs to avoid duplicate queries across methods."""
-        if not hasattr(self, '_set_logs_cache'):
-            self._set_logs_cache = {}
-        
-        if obj.id not in self._set_logs_cache:
-            # Use prefetched data if available, otherwise query with optimization
-            if hasattr(obj, '_prefetched_objects_cache') and 'set_logs' in obj._prefetched_objects_cache:
-                self._set_logs_cache[obj.id] = list(obj.set_logs.all())
-            else:
-                self._set_logs_cache[obj.id] = list(
-                    ExerciseSetLog.objects.filter(workout_session=obj)
-                    .select_related('user_exercise_progress__exercise')
-                )
-        return self._set_logs_cache[obj.id]
-    
-    def get_duration_minutes(self, obj):
-        if obj.start_time and obj.end_time:
-            duration = obj.end_time - obj.start_time
-            return round(duration.total_seconds() / 60, 1)
-        return None
-    
-    def get_total_volume(self, obj):
-        # Use cached set logs
-        set_logs = self._get_set_logs(obj)
-        total_volume = sum(
-            (log.weight * log.reps) for log in set_logs 
-            if log.weight and log.reps
-        )
-        return total_volume
-    
-    def get_exercises_completed(self, obj):
-        """Get exercises completed in this session with optimized queries."""
-        set_logs = self._get_set_logs(obj)
-        
-        # Group logs by exercise
-        exercise_map = {}
-        for log in set_logs:
-            if not log.user_exercise_progress or not log.user_exercise_progress.exercise:
-                continue
-            exercise = log.user_exercise_progress.exercise
-            if exercise.id not in exercise_map:
-                exercise_map[exercise.id] = {
-                    'exercise_name': exercise.name,
-                    'exercise_id': exercise.id,
-                    'sets_data': [],
-                    'total_volume': 0
-                }
-            
-            volume = (log.weight * log.reps) if log.weight and log.reps else 0
-            exercise_map[exercise.id]['sets_data'].append({
-                'set_number': log.set_number,
-                'weight': log.weight,
-                'reps': log.reps,
-                'volume': volume,
-                'rpe': log.rpe,
-                'notes': log.notes
-            })
-            exercise_map[exercise.id]['total_volume'] += volume
-        
-        # Build result with sets_completed count
-        exercise_details = []
-        for data in exercise_map.values():
-            data['sets_completed'] = len(data['sets_data'])
-            exercise_details.append(data)
-        
-        return exercise_details
-
-    def get_intensity_score(self, obj):
-        """Calculate intensity (Volume / Duration in minutes)."""
-        duration = self.get_duration_minutes(obj)
-        volume = self.get_total_volume(obj)
-        if duration and duration > 0 and volume:
-            return round(volume / duration, 1)
-        return 0.0
-
-    def get_muscles_worked(self, obj):
-        """Return list of muscles targeted in this session."""
-        set_logs = self._get_set_logs(obj)
-        return list(set(
-            log.user_exercise_progress.exercise.target_muscle 
-            for log in set_logs
-            if log.user_exercise_progress and log.user_exercise_progress.exercise
-        ))
 
 
 # `DetailedClientProgressSerializer` was here and is gone (SIDE_BUGS S-037). It was
