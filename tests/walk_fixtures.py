@@ -25,6 +25,14 @@
 
 It answers the password, for a test that signs in with it.
 
+**`other_currency_plan`** (on top of `walk_platform`) makes this database priced the way
+the app builders' development database is (`yalla_gym/app/tool/seed_local_backend.py`):
+a paid plan with the diet in the platform's OTHER currency, cheaper BY NUMBER than every
+plan in the base one (12.00 USD beside 1,000 SYP and up), on sale beside them, and NO
+exchange rate set by an operator. Every state must still run: a state that compared
+prices across currencies, or priced a plan in a currency its client does not trade in,
+fails here as it failed on that database. Answers the plan.
+
 **`walk_run(name, ...)`** resets states through the command itself
 (`seed_walk_states --only <name> --manifest <tmp>`), with the after-commit work executed
 as it is outside a test (counts, notices, recounts), and answers the state's manifest
@@ -67,3 +75,27 @@ def walk_run(walk_platform, tmp_path, django_capture_on_commit_callbacks):
 
     run.manifest = manifest
     return run
+
+
+@pytest.fixture
+def other_currency_plan(walk_platform):
+    from decimal import Decimal
+
+    from django.conf import settings
+
+    from subscription.models import SubscriptionPlan
+    from wallet.currencies import CURRENCY_CODES
+    from wallet.models import ExchangeRate
+
+    base = settings.PLATFORM_CURRENCY
+    other = next(code for code in CURRENCY_CODES if code != base)
+    plan = SubscriptionPlan.objects.create(
+        name=f"Pro ({other})", plan_type="pro", description="خطة تغذية وتدريب لمدة شهر.",
+        price=Decimal("12.00"), currency=other, duration_days=30, is_active=True,
+        has_diet_access=True, has_routine_access=True, has_challenges_access=True,
+        has_ai_advice=True)
+    on_sale = SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
+    assert on_sale.filter(currency=base, has_diet_access=True).exists()
+    assert not on_sale.filter(currency=base, price__lte=plan.price).exists()
+    assert not ExchangeRate.objects.exists(), "the development database has no rate"
+    return plan

@@ -12,7 +12,7 @@ from decimal import Decimal
 import pytest
 from django.utils import timezone
 
-from tests.walk_fixtures import walk_platform, walk_run  # noqa: F401
+from tests.walk_fixtures import other_currency_plan, walk_platform, walk_run  # noqa: F401
 
 pytestmark = pytest.mark.django_db
 
@@ -195,9 +195,15 @@ def test_client_wallet_covers_plan(api, walk_run):
     assert current.status_code == 404 or not current.json().get("id"), current.content
     gateways = api(me).get("/api/subscription/v1/gateways/").json()
     assert gateways["can_pay_from_wallet"] is True
-    cheapest = (SubscriptionPlan.objects.filter(is_active=True, price__gt=0)
+    # The cheapest plan IN THE CLIENT'S CURRENCY: prices in two currencies are never
+    # compared (a 12.00 USD plan is not cheaper than a 1,000 SYP one), the walk-state
+    # fix of 2026-11-24 after the app builders' database had both and no rate.
+    currency = gateways["wallet"]["currency"]
+    cheapest = (SubscriptionPlan.objects.filter(is_active=True, price__gt=0,
+                                                currency=currency)
                 .order_by("price", "id").first())
     assert Decimal(gateways["wallet"]["balance"]) == cheapest.price
+    assert _entry["ids"]["plan"] == cheapest.pk
 
 
 def test_client_wallet_short_of_coach(api, walk_run):
@@ -313,3 +319,55 @@ def test_a_second_run_leaves_no_held_month_behind(walk_run):
     old = TrainerClientRelation.objects.get(
         pk=first["states"]["client_awaiting_first_program"]["ids"]["relation"])
     assert old.hold_reference == ""
+
+
+# ------------------------------------------------------------------ two currencies, no rate
+def test_every_money_state_runs_beside_a_cheaper_plan_in_the_other_currency(
+        other_currency_plan, walk_run):
+    """The app builders' development database: a dollar plan at 12.00 beside the pound
+    plans, and no exchange rate. Every money state runs; each plan a state bought or
+    priced is in its client's currency; and no rate was set on the way."""
+    from django.conf import settings
+
+    from subscription.models import Subscription, SubscriptionPlan
+    from users.models import CustomUser
+    from wallet import currency_for
+    from wallet.models import ExchangeRate
+
+    manifest = walk_run(*MONEY_STATES)
+
+    assert set(manifest["states"]) >= set(MONEY_STATES)
+    for name in MONEY_STATES:
+        ids = manifest["states"][name]["ids"]
+        me = CustomUser.objects.get(pk=ids["user"])
+        if "plan" in ids:
+            plan = SubscriptionPlan.objects.get(pk=ids["plan"])
+            assert plan.currency == currency_for(me) == settings.PLATFORM_CURRENCY, name
+        if "subscription" in ids:
+            bought = Subscription.objects.get(pk=ids["subscription"])
+            assert bought.plan_id != other_currency_plan.pk, name
+    assert not ExchangeRate.objects.exists()
+
+
+def test_a_plan_state_refuses_by_name_when_no_plan_is_on_sale_in_its_currency(
+        other_currency_plan, walk_run):
+    """With only the other currency's plan on sale, a state that needs a plan refuses
+    and names the currency, rather than converting, making a plan or moving the
+    wallet's currency; nothing of it is kept."""
+    from django.conf import settings
+    from django.core.management.base import CommandError
+
+    from subscription.models import SubscriptionPlan
+    from wallet.models import ExchangeRate, Wallet
+
+    base = settings.PLATFORM_CURRENCY
+    SubscriptionPlan.objects.filter(currency=base).update(is_active=False)
+    wallets = Wallet.objects.count()
+
+    with pytest.raises(CommandError) as refused:
+        walk_run("client_wallet_covers_plan")
+
+    assert f"no paid subscription plan on sale in {base}" in str(refused.value)
+    assert Wallet.objects.count() == wallets
+    assert not SubscriptionPlan.objects.filter(currency=base, is_active=True).exists()
+    assert not ExchangeRate.objects.exists()
