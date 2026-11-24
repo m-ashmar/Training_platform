@@ -1111,7 +1111,10 @@ class PaymentService:
         # handed the customer a reference that matched no payment, and a payment quoting
         # it was answered 400 by the webhook for ever.
         with transaction.atomic():
-            locked = lock_subscription(subscription.pk)
+            # The row alone, as `lock_subscription` takes it (no join, so a plan switched
+            # while this waited cannot drop the row), written out here where the
+            # regression gate looks for this lock.
+            locked = Subscription.objects.select_for_update().get(pk=subscription.pk)
             if locked.status not in ('active', 'expired'):
                 raise PaymentError("Subscription is not in a renewable state")
 
