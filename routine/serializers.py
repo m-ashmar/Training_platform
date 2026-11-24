@@ -1685,10 +1685,18 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
     TODO: Add progress tracking and analytics
     TODO: Implement goal achievement tracking
     TODO: Add performance metrics and trends
+
+    `activity_level_answered` (additive, the fix run's G9, 2026-11-24): false while the
+    client never chose an activity level (`CustomUser.activity_level_unanswered`).
+    `activity_level` then reads its default, `Sedentary`, which says nothing about them,
+    and `tdee` is 0.0 — what it answers for any profile it cannot compute — not a figure
+    built on that default (a plan is not generated from it either; the owner,
+    2026-09-20).
     """
     bmi = serializers.SerializerMethodField()
     bmr = serializers.SerializerMethodField()
     tdee = serializers.SerializerMethodField()
+    activity_level_answered = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
     training_history = serializers.SerializerMethodField()
     # The onboarding answers the client gave for their trainer (design v2). The date of
@@ -1700,7 +1708,7 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'email', 'full_name', 'profile_picture',
             'height', 'weight', 'age', 'gender', 'specific_injury',
-            'activity_level', 'client_goals', 'client_preferences',
+            'activity_level', 'activity_level_answered', 'client_goals', 'client_preferences',
             'training_goal', 'training_place', 'training_days_per_week', 'injury_areas',
             'bmi', 'bmr', 'tdee', 'training_history',
             'date_joined', 'last_login'
@@ -1726,8 +1734,11 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
         the whole of `/api/auth/trainer/client-profile/` — 260 clients unreachable
         because of one. A profile this serializer cannot compute is a zero for that
         row, logged, not an error for everyone else's.
+
+        0.0 too while the activity level is unanswered (G9): the sedentary factor of a
+        default nobody chose is not this client's figure.
         """
-        if not (obj.height and obj.weight and obj.age):
+        if not (obj.height and obj.weight and obj.age) or obj.activity_level_unanswered:
             return 0.0
         try:
             value = obj.calculate_daily_calories('Maintain')
@@ -1735,6 +1746,9 @@ class ClientProfileViewSerializer(serializers.ModelSerializer):
             logger.warning("TDEE unavailable for user %s", obj.pk, exc_info=True)
             return 0.0
         return value if value is not None else 0.0
+
+    def get_activity_level_answered(self, obj):
+        return not obj.activity_level_unanswered
 
     def get_full_name(self, obj):
         """Get client's full name."""

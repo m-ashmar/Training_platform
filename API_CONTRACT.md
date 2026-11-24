@@ -1777,6 +1777,14 @@ back `client.goal`; its training record stays. The three values: `coaching_froze
 `coaching_unpaid` keep the relation approved; `coaching_ended` means it is gone (the file
 answers 403 `not_your_client`, the lists leave the client out). No new code.
 
+**Whether the client answered the activity level (the fix run's G9, 2026-11-24;
+additive).** `trainer/client-profile/` (the list and `{id}/`) and each row of
+`trainer/clients/` carry `activity_level_answered`: false while the client never chose
+a level — `activity_level` then reads its default, `Sedentary`, which says nothing about
+them — and true once they did (a row from before the stamp counts as answered when its
+level is not the default). While false, the file's `tdee` is 0.0, as for any profile it
+cannot compute. Null with the rest of the record while the coaching may not be used.
+
 Every count agrees with the list it summarises, for the viewer reading it:
 `followers_count`, `following_count` and `posts_count` on a public profile, and
 `likes_count` and `comments_count` on a post and a comment, all exclude the rows a

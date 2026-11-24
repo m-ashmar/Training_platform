@@ -673,7 +673,7 @@ class TrainerProfileView(APIView):
 #: What `trainer/clients/` holds back while a coaching may not be used: the client's
 #: address and body record. Nulled, never dropped, so the row keeps its keys.
 WITHHELD_WHILE_FROZEN = ('email', 'height', 'weight', 'age', 'gender', 'activity_level',
-                         'client_goals', 'client_preferences')
+                         'activity_level_answered', 'client_goals', 'client_preferences')
 
 
 class TrainerClientsView(APIView):
@@ -681,9 +681,12 @@ class TrainerClientsView(APIView):
 
     200 `{trainer_id, trainer_name, client_count, clients: [...]}`, a row per client
     with `id, username, email, first_name, last_name, profile_picture, height, weight,
-    age, gender, activity_level, client_goals, client_preferences, date_joined` and
-    `coaching_refusal`, ordered by id. `profile_picture` is a signed URL that expires
-    (use it now, never store it), or null.
+    age, gender, activity_level, activity_level_answered, client_goals,
+    client_preferences, date_joined` and `coaching_refusal`, ordered by id.
+    `profile_picture` is a signed URL that expires (use it now, never store it), or null.
+    `activity_level_answered` (additive, the fix run's G9): false while the client never
+    chose a level — `activity_level` then reads the default, `Sedentary`, which says
+    nothing about them (`CustomUser.activity_level_unanswered`).
     403 `not_a_trainer` when the caller is not a trainer (it answered the generic
     `permission_denied` before; the owner, 2026-09-24).
 
@@ -734,6 +737,7 @@ class TrainerClientsView(APIView):
                 'age': client.age,
                 'gender': client.gender,
                 'activity_level': client.activity_level,
+                'activity_level_answered': not client.activity_level_unanswered,
                 'client_goals': client.client_goals,
                 'client_preferences': client.client_preferences,
                 'date_joined': client.date_joined,
@@ -1386,8 +1390,8 @@ class _TrainerOfApprovedClient(IsTrainerOfApprovedClient):
 #: body (BMI, BMR, TDEE), which would give the weight back. Nulled, never dropped.
 PROFILE_WITHHELD_WHILE_FROZEN = (
     'email', 'height', 'weight', 'age', 'gender', 'specific_injury', 'activity_level',
-    'client_goals', 'client_preferences', 'training_goal', 'training_place',
-    'training_days_per_week', 'injury_areas', 'bmi', 'bmr', 'tdee')
+    'activity_level_answered', 'client_goals', 'client_preferences', 'training_goal',
+    'training_place', 'training_days_per_week', 'injury_areas', 'bmi', 'bmr', 'tdee')
 
 
 def _withheld_profile(row, refusal):
