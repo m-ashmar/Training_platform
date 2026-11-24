@@ -10,6 +10,7 @@ trainer's template and the operator come from `users/walk/training.py`.
 from __future__ import annotations
 
 from . import state
+from .framework import on_retire
 from .training import THREE_A_WEEK, template, the_operator
 
 #: What the operator writes when the verification is returned: the trainer reads it.
@@ -17,6 +18,35 @@ RETURNED_REASON = "صورة الهوية غير واضحة: أعد تصويره�
 
 #: What the operator writes when a product is returned: the trainer reads it.
 PRODUCT_RETURNED_REASON = "الوصف قصير جداً: اشرح لمن البرنامج وما يحتاجه من معدات."
+
+
+#: Why a retired walk trainer's waiting work is taken off the operator's desk.
+RESET_REASON = "Walk-through account reset (seed_walk_states)."
+
+
+@on_retire
+def _clear_the_operators_desk_of_a_retired_walk_trainer(users):
+    """A verification application and a product wait on the operator's desk (the
+    console's queues, the operator phone's counts) whoever sent them, so every run of
+    `trainer_verification_in_review` and `trainer_products` would leave one more of
+    each. Before the accounts are retired, each is decided as an operator decides one:
+    a pending application returned (`trainer_verification.services.decide`), a product
+    still in review returned to draft (`routine.products.reject`), the reason saying
+    why. Walk data only — `users` are walk accounts being retired; the decider is the
+    retiring state's own operator when it has one."""
+    from routine import products
+    from routine.product_models import ProductStatus, RoutineProduct
+    from trainer_verification import services
+    from trainer_verification.models import ApplicationState, VerificationApplication
+
+    decider = next((user for user in users if getattr(user, "user_type", "") == "admin"),
+                   None)
+    for application in VerificationApplication.objects.filter(
+            trainer__in=users, state=ApplicationState.PENDING):
+        services.decide(application.pk, decider, approve=False, reason=RESET_REASON)
+    for product_id in RoutineProduct.objects.filter(
+            trainer__in=users, status=ProductStatus.IN_REVIEW).values_list("pk", flat=True):
+        products.reject(product_id, decider, RESET_REASON)
 
 
 # ------------------------------------------------------------------ helpers

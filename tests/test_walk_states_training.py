@@ -168,3 +168,42 @@ def test_a_client_whose_only_history_is_the_free_first_workout(walk_run, api):
     assert _rows(api(me).get("/api/routine/routines/").json()) == []   # no programme
     sessions = _rows(api(me).get("/api/routine/workout-sessions/").json())
     assert [s["routine"] for s in sessions] == [entry["ids"]["routine"]]
+
+
+# ------------------------------------------------------------------ the review's B3, B4
+def test_no_badge_beyond_what_the_history_earns(walk_run, api):
+    """Nine workouts over fifteen days, each at six in the evening: nine counted once,
+    one short of `workout_warrior` (10), and no early-bird or night-owl badge for the hour
+    the seed happened to run (walk review B3)."""
+    from achievements.models import UserAchievement
+    from analytics.models import UserActivity
+
+    entry = walk_run("programme_training_today")
+    me = _user(entry)
+    activity = UserActivity.objects.filter(user=me, activity_type="routine_completed")
+    assert activity.count() == 9
+    days = [timezone.localtime(row.timestamp).date() for row in activity]
+    assert len(set(days)) == 9                              # one a day, each on its own
+    assert not activity.filter(timestamp__date=timezone.localdate()).exists()
+    earned = set(UserAchievement.objects.filter(user=me)
+                 .values_list("achievement__key", flat=True))
+    assert not earned & {"workout_warrior", "early_bird", "night_owl"}, earned
+
+
+def test_a_second_run_leaves_nothing_more_on_the_operators_desk(walk_run):
+    """A run retires the last run's trainers; their pending application and their
+    product in review are decided as an operator decides them, so the operator's queues
+    after run 2 are what they were after run 1 (walk review B4)."""
+    from routine.product_models import ProductStatus, RoutineProduct
+    from trainer_verification.models import ApplicationState, VerificationApplication
+
+    def desk():
+        return (VerificationApplication.objects.filter(state=ApplicationState.PENDING).count(),
+                RoutineProduct.objects.filter(status=ProductStatus.IN_REVIEW).count())
+
+    names = ("trainer_verification_in_review", "trainer_products")
+    walk_run(*names)
+    first = desk()
+    assert first == (1, 1)
+    walk_run(*names)
+    assert desk() == first
