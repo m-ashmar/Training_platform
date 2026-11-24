@@ -688,6 +688,10 @@ containers still serving; the dump is the way back. Then run the update's own co
 **The Road to 10 update** (2026-11-23: a server on `f77b3e1` or `f9f4cf1`, to
 `spec/payments-compliance` at `8a52c6c` or later):
 
+Origin holds `spec/payments-compliance` at `9b286e7` since 2026-11-24 (the owner's push,
+`f9f4cf1..9b286e7`): the live server may be updated to it now, with the steps below. A
+commit landed after `9b286e7` reaches the server only after the owner's next push.
+
 - Variables:
   - Required, only on a `deploy/.env` written before 2026-11-21: `PUBLIC_PAGES_BASE_URL`
     and the `APP_LINKS_*` lines, with the two commands in 12.3. Without the first,
@@ -698,6 +702,13 @@ containers still serving; the dump is the way back. Then run the update's own co
       the owner gives the number.
     - `SUPPORT_EMAIL`: default `support@yalagym.com`.
     - `CHALLENGE_HOST_LIMIT`: default 3.
+    - `AI_MAX_MESSAGES_PER_DAY`: the AI coach's messages per person per day, a whole
+      number of 1 or more (boot refuses 0, a negative number or an empty line). Unset, it
+      is 10: the allowance drops from 50 to 10 for everyone on the first update that
+      carries the fix run's `fx/w2-small` (landed after `9b286e7`, so after the next
+      push). Only to choose another number:
+      `grep -q '^AI_MAX_MESSAGES_PER_DAY=' .env || echo 'AI_MAX_MESSAGES_PER_DAY=10' >> .env`,
+      then `docker compose up -d`.
   - Push stays off until `FIREBASE_CREDENTIALS_JSON` is set (the owner's Firebase service
     account key, `base64 -w0`; section 3.7).
 - Migrations the migrate service applies:

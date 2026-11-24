@@ -939,8 +939,9 @@ one) is 400 on a trainer's meal write (`trainer/meals/`, `trainer/meals/{meal_id
 403 on the trainer's plan reads (`nutrition/plan/{plan_id}/`,
 `meals/{meal_id}/components/`, `plan/{plan_id}/meals-with-ingredients/`) and the review
 (`trainer/diet-plans/{plan_id}/review/`), and 409 on the client's
-`client/meals/{meal_id}/complete/`. Each status is shipped and stays: branch on `code`,
-never on the status. Each view's docstring says so; nothing changed on the wire.
+`client/meals/{meal_id}/complete/` and its undo, `client/meals/{meal_id}/undo/` (Road to
+10 S3.5). Each status is shipped and stays: branch on `code`, never on the status. Each
+view's docstring says so; nothing changed on the wire.
 
 New codes: `bad_macro_split` (400, above). `bad_meals` (400: `meals` is not a non-empty
 list, or an item is not an object). Reused with their meaning: `bad_duration` (now also

@@ -64,6 +64,7 @@ def test_plan_superseded_names_its_status_on_every_route():
         DietPlanNutritionView,
         MealComponentsView,
         MealCompletionView,
+        MealUndoView,
         TrainerMealView,
     )
 
@@ -79,6 +80,8 @@ def test_plan_superseded_names_its_status_on_every_route():
         trainer_plan_views.TrainerPlanReviewView: ("trainer/meals/", COMPLETE),
         # 409 on the completion: the trainer's reads are 403, his writes 400.
         MealCompletionView: ("plan reads", "trainer/meals/"),
+        # 409 on its undo too (Road to 10 S3.5), named the same way.
+        MealUndoView: ("plan reads", "trainer/meals/"),
     }
     silent = [view.__name__ for view, routes in expected.items()
               if not _says(inspect.getdoc(view) or "", *statuses, *routes)]

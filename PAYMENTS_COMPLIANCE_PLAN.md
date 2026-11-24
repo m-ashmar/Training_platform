@@ -108,6 +108,51 @@ ROAD_TO_10 Part 3:**
 | D19, a plan paid from the wallet | Yes (2026-11-22, confirmed in the backend session): "users can charge their wallets and use them to pay to subscribe in app features"; never inside a store build | S2.13 (phase 2): a plan and its renewal paid from the wallet on `apk` and `web` only, refused on `play`/`ios` by the same capability check (`can_purchase_platform_sub` is store-locked); 100% to the platform (2026-09-19); the gateway list names the wallet where it is a way to pay |
 | D13, support contacts | `support@yalagym.com` (support), `admin@yalagym.com` (admin); the WhatsApp number comes before the launch | S2.12: `links.support_email` = support@yalagym.com; `links.support_whatsapp` empty until the owner gives the number |
 
+**Owner decisions (2026-11-24, in the manager's session: «all as recommended»).** They close
+the owed list below as it stood that morning. The ones marked «build» are in the next table.
+
+| # | The owner's word | What the server does |
+|---|---|---|
+| 1 | iOS wallet moves stay off (B-199) | the flag stands: `can_transfer_wallet` off on the first `ios` build |
+| 2 | An agent cannot delete the account while holding platform cash | build |
+| 3 | The Play coaching switch stops new payments only | R8 as built: a paid request sent before the flip can still be approved, running coachings renew until the client sends `renew: false` |
+| 4 | A plan upgrade's difference may be paid from the wallet, on `apk` and `web` only | build |
+| 5 | The console must not approve a coaching with no consent and no charge | build (the `assigned_trainer` sync) |
+| 6 | The 10-minute `already_paid` window stays | as built (`WALLET_REPEAT_WINDOW`) |
+| 7 | Selling an unchanged starter copy stays allowed for now | as built (`copy/`, then a routine product) |
+| 8 | A password change signs every device out at once | build (today access tokens live up to 60 minutes) |
+| 9 | The stock `/admin/` is gated to operators (SIDE_BUGS S-274) | build |
+| 10 | Build flags are read fresh: `policy_channelcapabilities` on `CACHALOT_UNCACHABLE_TABLES` (S-292) | build |
+| 11 | Keep the 5-per-15-minutes password-change limit, and add an e-mail on a password change | build (the e-mail) |
+| 12 | A trainer's request limit is 1,500 an hour | build (`training_platform/middleware.py`, from 1,000) |
+| 13 | The trainer directory stays readable without sign-in | as built (`/api/v1/trainers/`, `trainers/public/`) |
+| 14 | Accounts made outside sign-up default to Arabic (`users/models.py:297`) | build |
+| 15 | A hidden challenge holds no hosting place | as built |
+| 16 | Meal undo only on the same day; the rating and the badge stay | as built (S3.5) |
+| 17 | The trial card's rules | as built |
+| 18 | The store wording of `subscription_expired` | as built (R1) |
+| 19 | An operator's trial grant is capped at the plan's length | as built (S-273) |
+| 20 | Retiring the unused routes waits until after launch | S3.6 / S3.7 after launch |
+
+**To build from them** (each a worker's item, through the integrator as every round):
+
+| # | Item | Worker | State |
+|---|---|---|---|
+| 2 | An agent holding platform cash is refused account deletion, with a code | phase 3 worker | owed |
+| 4 | A plan upgrade's difference paid from the wallet (`apk`, `web`; refused on `play`/`ios` by `can_purchase_platform_sub`) | money worker | owed |
+| 5 | The console's `assigned_trainer` sync never approves a relation with no consent and no charge | money worker | owed |
+| 8 | A password change ends every session at once (SIMPLE_JWT `CHECK_REVOKE_TOKEN` or equal; every device signs out once when it is deployed) | phase 3 worker | owed |
+| 9 | The stock `/admin/` gated to console operators | phase 3 worker | owed |
+| 10 | `policy_channelcapabilities` on `CACHALOT_UNCACHABLE_TABLES` | batch B worker | owed |
+| 11 | An e-mail to the account on a password change (the 5-per-15-minutes limit kept) | phase 3 worker | owed |
+| 12 | A trainer's request limit 1,500 an hour | batch B worker | owed |
+| 14 | Accounts made outside sign-up default to Arabic (about 20 to 25 test files' setup) | batch B worker | owed |
+
+**Pushed (2026-11-24, the owner's word, done by the manager):** `git push origin
+spec/payments-compliance`, `f9f4cf1..9b286e7` (144 commits). The live server may be updated
+to `9b286e7` (DEPLOY_CHECKLIST §12.5); anything landed after it reaches origin only at the
+owner's next push.
+
 **Phase 0** (the app does its own phase 0 in parallel; S0.1 first, the app deletes its own schedule
 arithmetic when it lands). Each landed item: its route, fields and codes in the view docstring and
 API_CONTRACT.md, the row's Status and Backend note when it is a BACKEND_BUGS row, and a message to
@@ -221,36 +266,18 @@ S-274, each being verified by the worker named there.
 **Not built:** S2.5 (D2: no), S2.6 (D1: not now), S2.9 (later), S3.2 (the ShamCash rebuild waits for
 `sc-epay-doc.pdf`), S3.3 (the owner's server update: DEPLOY_CHECKLIST §12.5), S3.6 (after launch).
 
-**Owed by the owner:** whether a trainer's request limit rises from 1000 to 1500 an hour now that the
-community is a trainer's too (`training_platform/middleware.py`); the support WhatsApp number; the
-Firebase credentials on the server; a review of the CONTENT the batch B worker wrote, the two free
-first workouts and the eight starter templates (`routine/data/platform_templates.py`: exercises,
-sets, reps, names in both languages); whether a second wallet payment of the same plan within 10
-minutes under another key stays refused (`already_paid`, `WALLET_REPEAT_WINDOW`: the money worker's
-choice, so a person cannot pay two periods ahead in one sitting); whether a trainer may sell an
-unchanged copy of a platform starter template (today they can: `copy/`, then list the copy as a
-routine product). The server update (S3.3) is DEPLOY_CHECKLIST §12.5, "The Road to 10 update":
-migrate through the compose `migrate` service, then `bootstrap_platform` (writes the ten
-platform templates) and `create_starter_challenge`; the push to origin waits for the owner; after it, and again before each store submission,
-`seed_review_accounts` (DEPLOY_CHECKLIST §12, the password at a hidden prompt). Also the
-owner's: access tokens stay valid up to 60 minutes after a password change (ending them at
-once needs SIMPLE_JWT `CHECK_REVOKE_TOKEN`, which signs every device out once when it is
-deployed); the trainer directory (`/api/v1/trainers/`) and `trainers/public/` are readable
-without signing in; an agent may delete the account while holding the platform's cash (the
-receivable stays on record; refusing with a code is a business ruling); R8's two limits (a
-trainer can still approve a paid request sent before the flip, and running coachings renew
-until the client sends `renew: false`); the stock `/admin/` (SIDE_BUGS S-274: gate it to
-console operators, or unmount it); B-199: whether the first ios build should
-run the agent's top-ups and the trainer's withdrawals (today its flag refuses them,
-the spec's table); whether `policy_channelcapabilities` belongs on
-`CACHALOT_UNCACHABLE_TABLES` (SIDE_BUGS S-292: cached up to 24 hours, and a write
-from outside Django, a restore included, does not clear it; DEPLOY_CHECKLIST §9 now
-clears it after a restore); and the console's `assigned_trainer` sync, which still
-approves a pending or rejected relation with no consent from the client and no
-charge (older than Road to 10; the money worker's reviewer flagged it); and the default language of an
-account made outside sign-up (`users/models.py:297`: English, while sign-up saves Arabic),
-which decides the language of its pushes and e-mails; changing it touches about 20 to 25
-test files, under 100 assertion lines (the phase 3 worker's count).
+**Owed by the owner** (after his decisions of 2026-11-24 above): the ShamCash gateway: he
+has an API key and named the documentation (https://shamcash-api.com/en/docs); the money
+worker is reading it, and nothing is built on the gateway until his word on the plan; the
+backup bucket (hours away: `fx/w2-backups` needs it for its first drill); the Firebase
+credentials on the live server (`FIREBASE_CREDENTIALS_JSON` in `deploy/.env`, his step;
+the app needs its own client files); the support WhatsApp number (it comes last); a review
+of the CONTENT the batch B worker wrote, the two free first workouts and the eight starter
+templates (`routine/data/platform_templates.py`). The server update (S3.3) is
+DEPLOY_CHECKLIST §12.5, "The Road to 10 update": migrate through the compose `migrate`
+service, then `bootstrap_platform` (writes the ten platform templates) and
+`create_starter_challenge`; after it, and again before each store submission,
+`seed_review_accounts` (DEPLOY_CHECKLIST §12, the password at a hidden prompt).
 
 ## The fix run (started 2026-09-28, owner's go-ahead in the backend session) — PAUSED 2026-11-22, resume after Road to 10 phase 0
 
@@ -409,9 +436,10 @@ is locked (spec §8); the numbers above are the defaults.
    `SUBSCRIPTION_TRAINER_SHARE = 0`, so no trainer is paid anything for a plan. Either
    the line goes or the share is priced; shipping both is a promise the ledger does not
    keep. (b) The AI coach's daily allowance is ONE GLOBAL SETTING
-   (`AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY'] = 50`) applied to every plan that has
-   `has_ai_advice`, while `Plans.png` prices three different allowances (Basic none,
-   Premium 50 a day, Professional "بلا حدود"). `usage/today/` answers 50 to everyone
+   (`AI_ASSISTANT_CONFIG['MAX_MESSAGES_PER_DAY']`, from the optional `AI_MAX_MESSAGES_PER_DAY`:
+   10 since the owner's word of 2026-11-21, it was 50; `fx/w2-small`) applied to every plan
+   that has `has_ai_advice`, while `Plans.png` prices three different allowances (Basic none,
+   Premium 50 a day, Professional "بلا حدود"). `usage/today/` answers 10 to everyone
    until there is a per-plan field and the owner's numbers for it. (c) `Pay.png` counts
    down 72 hours ("الرمز صالح لمدة 71:42:10") and `PAYMENT_CHECKOUT_TTL_MINUTES` is 60
    MINUTES; `expires_at` now answers the server's real TTL, so the screen and the server
