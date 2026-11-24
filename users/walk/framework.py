@@ -50,6 +50,11 @@ class WalkRefused(Exception):
     """The command must not run; the message says why."""
 
 
+class WalkApiRefused(Exception):
+    """A route a state called answered what the state did not expect: the state's
+    transaction is rolled back and the command says which route answered what."""
+
+
 # ------------------------------------------------------------------ the guards
 def refuse_unless_development(settings) -> None:
     """Only under the development settings: never production, never anything else."""
@@ -76,6 +81,47 @@ def password_from_environment() -> str:
     except ValidationError as exc:
         raise WalkRefused(f"{PASSWORD_ENV} is not strong enough: " + " ".join(exc.messages))
     return password
+
+
+def bootstrap_gaps() -> list[str]:
+    """What `bootstrap_platform` writes and is missing here, one entry per step the
+    states rely on (its own steps, read from its own sources). Empty on a dev server
+    that ran it. The command refuses ONCE, before any state, when this is not empty:
+    a state never creates platform data (a sellable plan, a catalogue row) itself."""
+    from achievements.models import Achievement
+    from diet.models import DietPlanTemplate, FoodItem
+    from policy.models import ChannelCapabilities
+    from routine.data.exercise_catalogue import STARTER_EXERCISES
+    from routine.data.platform_templates import PLATFORM_TEMPLATES
+    from routine.models import Exercise, RoutineTemplate
+    from subscription.models import SubscriptionFeature, SubscriptionPlan
+
+    starter = {exercise.key for exercise in STARTER_EXERCISES}
+    templates = {template.key for template in PLATFORM_TEMPLATES}
+    checks = (
+        ("channel capabilities", ChannelCapabilities.objects.exists()),
+        ("quota features", SubscriptionFeature.objects.exists()),
+        ("a subscription plan on sale",
+         SubscriptionPlan.objects.filter(is_active=True, price__gt=0).exists()),
+        ("diet plan templates", DietPlanTemplate.objects.exists()),
+        ("achievements", Achievement.objects.exists()),
+        ("starter exercises",
+         Exercise.objects.filter(catalogue_key__in=starter).count() == len(starter)),
+        ("platform templates",
+         RoutineTemplate.objects.filter(platform_key__in=templates).count()
+         == len(templates)),
+        ("food catalogue", FoodItem.objects.filter(needs_review=False).exists()),
+    )
+    return [name for name, present in checks if not present]
+
+
+def refuse_unless_bootstrapped() -> None:
+    gaps = bootstrap_gaps()
+    if gaps:
+        raise WalkRefused(
+            f"Refusing to run: this database has not been bootstrapped (missing: "
+            f"{', '.join(gaps)}). Run `manage.py bootstrap_platform` first; the walk "
+            f"states use what it writes and never create it themselves.")
 
 
 # ------------------------------------------------------------------ addresses
@@ -181,6 +227,42 @@ class Walk:
         user.save()
         self.accounts[key] = {"email": user.email, "role": role, "id": user.pk}
         return user
+
+    # The real routes, for what has no service function ------------------------
+    def api(self, user, method: str, path: str, data=None, *, build: str = "apk",
+            version: str = "1.0.0", expect=(200, 201), multipart: bool = False):
+        """Call a REAL route as `user`, with the build declared, and answer
+        `(status, body)`.
+
+        For what the platform does through a route and no service function — a
+        challenge made or joined, a post, a report, a measurement, a goal, a set synced
+        the way the phone syncs it. The URL is resolved and its view called with a
+        request authenticated as `user` (no token is minted; the middleware stack is
+        not run). A status outside `expect` raises `WalkApiRefused` with the body, so a
+        state never builds on a refusal it did not mean. `multipart=True` sends the body
+        as a form, for an upload (a `SimpleUploadedFile` in `data`), as the app does."""
+        from django.urls import resolve
+        from rest_framework.test import APIRequestFactory, force_authenticate
+
+        factory = APIRequestFactory()
+        headers = {"HTTP_X_APP_CHANNEL": build, "HTTP_X_APP_VERSION": version,
+                   "HTTP_ACCEPT_LANGUAGE": "ar"}
+        maker = getattr(factory, method.lower())
+        if method.lower() == "get":
+            request = maker(path, data or {}, **headers)
+        else:
+            request = maker(path, data or {}, format="multipart" if multipart else "json",
+                            **headers)
+        force_authenticate(request, user=user)
+        match = resolve(path.split("?")[0])
+        response = match.func(request, *match.args, **match.kwargs)
+        if hasattr(response, "render"):
+            response.render()
+        body = json.loads(response.content) if response.content else None
+        if response.status_code not in expect:
+            raise WalkApiRefused(f"{method.upper()} {path} as {user.email} answered "
+                                 f"{response.status_code}: {body}")
+        return response.status_code, body
 
     # What the walk scripts read ---------------------------------------------
     def ids(self, **ids) -> None:

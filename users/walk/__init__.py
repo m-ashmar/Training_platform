@@ -18,6 +18,14 @@ the same file:
     users/walk/wallet.py     wallet and agents
     users/walk/community.py  community
     users/walk/inbox.py      inbox
+    users/walk/operator.py   the operator's pages
+    users/walk/progress.py   progress, badges and body measurements
+    users/walk/diet.py       diet plans and their questions
+    users/walk/coach_desk.py a trainer's first steps and Today queue
+
+`users/walk/shared.py` holds what several areas use (a coaching made through the request
+and its answer). `walk.api(user, method, path, data)` calls a real route as an account,
+with the build declared, for what has no service function.
 
 **Adding one.** In the area's module::
 
@@ -34,6 +42,28 @@ the same file:
 The name is the state's id in the manifest and in its addresses: lower case, digits and
 `_` only. Every account a state makes is a `walk.<state>…@yalla.test` account, and those
 are the only accounts the command ever touches.
+
+**Platform data is assumed, never made.** The command refuses ONCE, before any state, on
+a database `bootstrap_platform` has not prepared (`framework.bootstrap_gaps`). A state
+never creates "if missing" a sellable plan, a catalogue exercise, a food or a template:
+it uses what bootstrap wrote, and a dev database gets nothing else from it.
+
+**An upload goes through the real route** (`walk.api(...)` with a file, e.g. a trainer's
+verification documents), never a file written by hand.
+
+**Testing a state.** One test per state, in your area's test file, through the API the
+screen reads, with the SHARED fixtures (`tests/walk_fixtures.py`)::
+
+    from tests.walk_fixtures import walk_platform, walk_run  # noqa: F401
+
+    def test_client_waiting_for_coach(walk_run, api):
+        entry = walk_run("client_waiting_for_coach")   # its manifest entry
+        ...
+
+`walk_platform` gives the test's database what a dev server has after bootstrap_platform
+(the real command, inside the test's transaction; the session's food catalogue) and puts
+`MEDIA_ROOT` and `PRIVATE_MEDIA_ROOT` in the test's `tmp_path`, so an upload never lands
+in the project's real media folders.
 
 **Nothing reads these accounts but the command.** Rule zero: the server serves a walk
 account exactly what it serves any account. There is no flag, group or column that marks
@@ -54,6 +84,10 @@ AREAS = {
     "wallet": "wallet and agents",
     "community": "community",
     "inbox": "inbox",
+    "operator": "the operator's pages",
+    "progress": "progress, badges and body measurements",
+    "diet": "diet plans and their questions",
+    "coach_desk": "a trainer's first steps and Today queue",
 }
 
 ROLES = ("client", "trainer", "agent", "admin")
