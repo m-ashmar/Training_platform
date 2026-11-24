@@ -313,6 +313,11 @@ REST_FRAMEWORK = {
         # Analytics rows are written by the app, and nothing bounded how fast. Generous
         # for real telemetry, fatal to a loop filling the tables.
         'analytics_write': '300/hour',
+        # `POST /api/achievements/check/` re-runs the whole achievement engine for the
+        # caller. The engine already runs after every activity (signals) and nothing in
+        # the app calls this route; a manual check is a rare retry. Six an hour per
+        # account, then 429 `throttled` (SIDE_BUGS S-272, Road to 10 round 4).
+        'achievement_check': '6/hour',
     },
     # DRF's own parsers, with one addition: a NUL byte anywhere in a request payload is
     # a 400 here rather than a ValueError from psycopg at execute time, which several
