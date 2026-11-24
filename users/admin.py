@@ -221,15 +221,18 @@ class CustomUserAdmin(UserAdmin):
             # keeping the text served the client's own note back to them as the
             # trainer's (the review of B-093).
             defaults = {'status': 'approved', 'initiated_by': 'trainer',
-                        'client_note': '', 'ends_at_period_end': False}
-            # The client's «do not renew» (S2.7) belongs to a coaching, not to the row:
-            # cleared when this makes a NEW coaching, kept on one already running, or an
-            # operator re-pointing a stale pointer would charge a month the client
-            # stopped.
+                        'client_note': ''}
+            # Both ends of a coaching belong to the coaching, not to the row: the
+            # client's «do not renew» (S2.7) and the trainer's «end when this month
+            # ends». Cleared when this makes a NEW coaching, kept on one already
+            # running: an operator re-pointing a stale pointer reset the trainer's
+            # scheduled end, the coaching renewed and the client was charged a month
+            # neither side wanted (SIDE_BUGS S-264).
             if not TrainerClientRelation.objects.filter(
                     trainer_id=obj.assigned_trainer_id, client=obj,
                     status='approved').exists():
                 defaults['client_stops_renewal'] = False
+                defaults['ends_at_period_end'] = False
             TrainerClientRelation.objects.update_or_create(
                 trainer_id=obj.assigned_trainer_id, client=obj, defaults=defaults)
             TrainerClientRelation.objects.filter(client=obj, status='approved').exclude(
