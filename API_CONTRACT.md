@@ -616,6 +616,12 @@ names, and a trainer's bio, specialisations and certifications) answer 400
 field in `field_errors` and nothing saved; see "The banned-terms filter" under Safety
 (2026-09-27).
 
+`user/update/`, `trainer/profile/` and `client/profile/` answer 400
+`profile_picture_read_only` (with `field`) for a FILE sent as `profile_picture`, and save
+nothing; the picture has its own route, `POST /api/auth/user/profile-picture/` (the owner,
+2026-09-20: refused, not dropped). The two profile routes dropped the file with 200 until
+the fix run's S-200 (2026-11-24). The picture's URL echoed back as text is not refused.
+
 **`user/details/` names the role** (BACKEND_BUGS B-121, 2026-09-24; additive). The answer
 gains `user_type` (`client` | `trainer` | `agent` | `admin`) and `media` — the person's
 media map in the trainer cards' shape, `{slot: {url_1x, url_2x, blur, focal, brightness,

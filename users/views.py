@@ -269,14 +269,9 @@ class UpdateUserDetailsView(APIView):
         | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
         """
         user = request.user
-        # Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture
-        # sent here was ignored with 200. FILES, not data: a client echoing the picture
-        # URL it read back as text is not refused.
-        if 'profile_picture' in request.FILES:
-            message = _("Upload the profile picture with /api/auth/user/profile-picture/.")
-            return Response({'error': message, 'detail': message,
-                             'code': 'profile_picture_read_only', 'field': 'profile_picture'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
         serializer = UserDetailsSerializer(user, data=request.data, partial=True,
                                            context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -613,6 +608,24 @@ class ResendOTPView(APIView):
 # TRAINER-SPECIFIC VIEWS
 # ============================================================================
 
+def _picture_sent_here(request):
+    """400 `profile_picture_read_only` when a file came as `profile_picture`, else None.
+
+    Refused, not dropped (the owner, 2026-09-20; BACKEND_BUGS B-026): a picture sent to
+    a profile route was ignored with 200, and the app showed the old one as saved. The
+    picture has its own route, which checks and re-encodes it
+    (`POST /api/auth/user/profile-picture/`). FILES, not data: a client echoing the
+    picture URL it read back as text is not refused. `user/update/`, `trainer/profile/`
+    and `client/profile/` all answer it (SIDE_BUGS S-200: the two profile routes still
+    dropped the file)."""
+    if 'profile_picture' not in request.FILES:
+        return None
+    message = _("Upload the profile picture with /api/auth/user/profile-picture/.")
+    return Response({'error': message, 'detail': message,
+                     'code': 'profile_picture_read_only', 'field': 'profile_picture'},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
 class TrainerProfileView(APIView):
     """`/api/auth/trainer/profile/` — the signed-in trainer's own profile. Auth: Bearer JWT.
 
@@ -628,6 +641,7 @@ class TrainerProfileView(APIView):
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
     | `400` | `content_not_allowed` | a name, `trainer_bio`, `trainer_specializations` or `trainer_certifications` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` (SIDE_BUGS S-200: it was dropped with 200) |
     | `403` | `not_a_trainer` | the caller is not a trainer (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
     permission_classes = [IsAuthenticated]
@@ -644,6 +658,9 @@ class TrainerProfileView(APIView):
         """Update trainer profile"""
         if not request.user.is_trainer:
             return _not_a_trainer()
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
 
         serializer = TrainerProfileSerializer(request.user, data=request.data, partial=True)
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
@@ -1081,6 +1098,7 @@ class ClientProfileView(APIView):
     | `400` | `validation_error` | a field is refused; its own code in `field_errors.<field>[0].code` |
     | `400` | `content_not_allowed` | `first_name` or `last_name` holds a term on the banned-terms list (spec B1); the field is in `field_errors` with the same code; nothing is saved |
     | `401` | `not_authenticated`, `token_not_valid` | no token; an expired or invalid one |
+    | `400` | `profile_picture_read_only` | a file sent as `profile_picture` (with `field`); nothing in the request is saved. Upload it with `POST /api/auth/user/profile-picture/` (SIDE_BUGS S-200: it was dropped with 200) |
     | `403` | `clients_only` | the caller is not a client (it answered the generic `permission_denied` before; the owner, 2026-09-24) |
     """
     permission_classes = [IsAuthenticated]
@@ -1097,6 +1115,9 @@ class ClientProfileView(APIView):
         """Update client profile"""
         if not request.user.is_client:
             return _clients_only()
+        refused = _picture_sent_here(request)
+        if refused is not None:
+            return refused
 
         serializer = ClientProfileSerializer(request.user, data=request.data, partial=True)
         # Raised, not returned, so field errors keep their `code` (see UpdateUserDetailsView).
