@@ -287,6 +287,22 @@ so parse ids client-side.
 | `weekly_recap` | `week` (the ISO week key), `missed_sets` |
 | `trainer_weekly_digest` | `week` (the ISO week key), `attention` — how many clients need a look |
 
+**`person_erased` (additive, 2026-11-24): a `data` key that can appear on these kinds after
+an erasure.** When the person a notice names erases their account, the notice stays in the
+reader's inbox with its date, the name reads "Deleted account" in the reader's language,
+`actor` is null, and `data` gains `person_erased: "true"` (a string, like every value
+here). The kinds: `trainer_assignment_request`, `trainer_unassignment`,
+`client_request_received`, `client_request_approved`, `client_request_rejected`,
+`client_request_cancelled`, `client_unassigned_trainer`, `coaching_renewed`,
+`coaching_renewal_soon`, `coaching_ending_soon`, `coaching_payment_due`, `coaching_ended`,
+`coaching_finished`, `coaching_fee_held`, `coaching_fee_released`, `coaching_fee_refunded`,
+and a trainer's `session_completed` about the erased client. The other `data` keys stay as
+they were (an erased account's id reads nothing: its session answers 404, its file
+`trainer/client-profile/{id}/` 403 `not_your_client`). Branch on `person_erased`, never on a null sender: `session_completed` has no
+`actor` even while the client lives. It is on the inbox row (`GET
+/api/social/notifications/`); a push already delivered does not change. A suspended
+account's notices never carry it.
+
 `title`/`body` arrive in the FCM `notification` block, already rendered in the
 recipient's language.
 

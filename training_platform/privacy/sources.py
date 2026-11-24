@@ -409,7 +409,8 @@ def _scrub_their_name_elsewhere(user, queryset, *, dry_run):
     above): `context.name` emptied and `context.name_erased` set, which the resolver
     reads as "Deleted account" in the language it renders in
     (`notifications/template_resolver.py`); the pre-rendered `context.message` a
-    finished session carries is emptied too; and `actor` cleared, so nothing in the row
+    finished session carries is emptied too; `data.person_erased` is set to "true"; and
+    `actor` cleared, so nothing in the row
     points at the person any more. The inbox hides a row whose actor cannot be shown
     (the owner's decision 8: a SUSPENDED account's rows come back when it is
     reinstated); an erasure is final, and a row with no actor is listed like any system
@@ -443,6 +444,12 @@ def _scrub_their_name_elsewhere(user, queryset, *, dry_run):
             if "message" in context:
                 context["message"] = ""
             metadata["context"] = context
+            # One rule for the app, whatever the kind (the manager's ruling, 2026-11-24):
+            # `actor` is null on a finished-session notice even while the client
+            # lives, so a null sender says nothing there. A string, like every other
+            # value the push sends. The ids stay as they are: an erased account's id
+            # resolves to nothing, and removing keys would change a documented shape.
+            metadata["data"] = {**(metadata.get("data") or {}), "person_erased": "true"}
             row.metadata = metadata
             row.actor = None
         Notification.objects.bulk_update(found, ["metadata", "actor"])
