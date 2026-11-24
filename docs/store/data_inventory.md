@@ -653,7 +653,7 @@ Who, besides those providers and the platform's operators, receives data, and wh
 
 **On erasure.** Deleted.
 
-**Also on erasure.** `_chat_notices_sent` also deletes rows about the person that other people hold, which are not exported.
+**Also on erasure.** before any row goes, `_scrub_their_name_elsewhere` runs (`sources.py`); `_notices_that_go_with_them` also deletes rows about the person that other people hold, which are not exported.
 
 **Retention.** Purged nightly: 90 days after `created_at`.
 
