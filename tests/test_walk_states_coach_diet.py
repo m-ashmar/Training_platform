@@ -90,3 +90,12 @@ def test_trainer_full_queue(walk_run, api):
     assert row["unread_count"] >= 1
     review = api(me).get(f"/api/routine/workout-sessions/{ids['session']}/?expand=sets")
     assert review.status_code == 200 and review.json()["status"] == "completed"
+
+    # The trainer's inbox holds the real `session_completed` notice the finish sent
+    # (the session route's own completion step), opening that session.
+    inbox = api(me).get("/api/social/notifications/?page_size=100",
+                        HTTP_X_APP_CHANNEL="apk").json()
+    rows = inbox["results"] if isinstance(inbox, dict) else inbox
+    finished = [r for r in rows if r["notification_type"] == "session_completed"]
+    assert finished, [r["notification_type"] for r in rows]
+    assert finished[0]["data"]["session_id"] == str(ids["session"])
