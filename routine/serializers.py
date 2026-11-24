@@ -633,6 +633,13 @@ class RoutineSerializer(RoutineAssigneesMixin, TranslatedJSONFieldMixin, seriali
     program already had. Outside it: 400 `validation_error` with
     `field_errors.days[0].code` `days_out_of_range` (the code `generate` answers for the
     same bound). A stored routine is not re-checked until a write sends `days`.
+
+    Whether it REPEATS (`routines/{id}/schedule/`, `routine/schedule.py`; S-282, kept as
+    built by the manager's ruling of 2026-11-24): with no `end_date`, a routine of 7 days
+    or fewer is a weekly cycle and runs on; one of MORE than 7 days is a programme
+    written out in full and FINISHES after one pass. A trainer who wants a longer cycle
+    to repeat sets an `end_date` beyond its days: it then runs, cycle after cycle, until
+    that date (when its days already cover start to end, it is one pass again).
     """
     routine_exercises = RoutineExerciseSerializer(many=True, read_only=True)
     created_by = serializers.StringRelatedField(read_only=True)

@@ -878,7 +878,9 @@ class RoutineViewSet(ExerciseMediaMixin, viewsets.ModelViewSet):
         follow it in the routine are taken one calendar day each — and never owed.
         A programme past its `end_date`, or whose every day is done when it does not
         repeat (its days cover its dates, or it has no end date and more than seven
-        days), is `finished`.
+        days), is `finished`. So a cycle of MORE than 7 days with no end date finishes
+        after one pass; with 7 or fewer it repeats weekly; with an end date shorter than
+        its days cover, it repeats until that date (S-282, kept as built).
 
         200::
 
