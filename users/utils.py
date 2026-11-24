@@ -531,11 +531,15 @@ def end_every_session(user) -> int:
 
 
 def _after_the_session_ended(user_id) -> None:
+    """On the commit of `end_every_session`: a new session generation (a memo a request
+    is about to write from the row as it was is then never believed), the memo dropped,
+    the open sockets told."""
     from training_platform.cache import private_cache
-    from training_platform.middleware import account_memo_key
+    from training_platform.middleware import account_memo_key, bump_account_generation
     from training_platform.ws_auth import end_open_sockets
 
     try:
+        bump_account_generation(user_id)
         private_cache().delete(account_memo_key(user_id))
     except Exception:
         # The memo lives a minute: a cached route then refuses within it.

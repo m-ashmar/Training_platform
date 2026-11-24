@@ -194,7 +194,9 @@ class AIChatConsumer(SessionEndsMixin, AsyncWebsocketConsumer):
 
         # A password change, a reset or a deactivation closes it at once
         # (`training_platform.ws_auth.SessionEndsMixin`; the owner, 2026-11-24).
-        await self.join_session_group()
+        if not await self.join_session_group():
+            await self.close(code=4001)
+            return
         await self.accept()
 
         # Log behavior event

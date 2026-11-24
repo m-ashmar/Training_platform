@@ -284,3 +284,146 @@ def test_a_socket_opened_with_the_fresh_pair_stays_open(
         return stayed
 
     assert async_to_sync(scenario)()
+
+
+# ------------------------------------------- the integrator's review of 7307f94
+def test_a_refresh_token_from_before_the_deploy_is_refused_after_the_change(
+        api, person, django_capture_on_commit_callbacks):
+    """A refresh token with no digest is accepted, and given one, by the refresh
+    (`SessionTokenRefreshSerializer`) — so after a password change the only thing that
+    refuses one is the blacklist `end_every_session` writes. Pinned here."""
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    legacy = str(_without_digest(RefreshToken.for_user(person)))
+    with django_capture_on_commit_callbacks(execute=True):
+        assert api(person).post(CHANGE, {"current_password": OLD, "new_password": NEW},
+                                content_type=JSON).status_code == 200
+
+    refused = api().post(REFRESH, {"refresh": legacy}, content_type=JSON)
+    assert refused.status_code == 401, refused.content
+    assert "access" not in refused.json() and "refresh" not in refused.json()
+
+
+def test_a_memo_written_after_the_change_is_not_believed(api, person, monkeypatch):
+    """The cache memo's race: a cached request reads the row BEFORE the change
+    commits and writes its memo AFTER the commit dropped it. That memo holds the old
+    digest; it carries the old session generation, so the next request reads the row
+    again and refuses the dead token instead of serving it for a minute."""
+    from training_platform.cache import private_cache
+    from training_platform.middleware import account_memo_key
+    from users.utils import _after_the_session_ended
+
+    other = _with(api, _sign_in(api, person)["access"])
+    assert other.get(CACHED).status_code == 200            # the entry is cached
+    cache = private_cache()
+    cache.delete(account_memo_key(person.pk))               # the memo's minute is over
+
+    changed, real_set = [], cache.set
+
+    def set_after_the_change(key, value, *args, **kwargs):
+        if key == account_memo_key(person.pk) and not changed:
+            # The change commits between this request's read of the row and its write.
+            changed.append(value)
+            person.set_password(NEW)
+            person.save(update_fields=["password"])
+            _after_the_session_ended(person.pk)
+        return real_set(key, value, *args, **kwargs)
+
+    monkeypatch.setattr(cache, "set", set_after_the_change)
+    other.get(CACHED)                    # began before the change: it may be answered
+    monkeypatch.undo()
+    assert changed, "the interleaving did not happen"
+
+    assert other.get(CACHED).status_code == 401, "the late memo served the dead token"
+
+
+@override_settings(CHANNEL_LAYERS={
+    'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'}})
+def test_a_socket_that_joins_after_the_change_committed_is_refused(
+        make_user, api, socket_keeps_the_test_connection,
+        django_capture_on_commit_callbacks, monkeypatch):
+    """The handshake's race: the socket authenticates in `connect()`, the change
+    commits and tells the session group, and only then does the socket join it — so
+    it never hears `session.ended`. The join asks the credential once more, after it is
+    in the group, and the socket is refused (4001)."""
+    from channels.routing import URLRouter
+    from channels.testing import WebsocketCommunicator
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    import chat.routing
+    from chat.consumers import ChatConsumer
+
+    client, _trainer, conversation = _conversation(make_user)
+    token = AccessToken.for_user(client)
+
+    def change():
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = api(client).post(CHANGE, {"current_password": OLD,
+                                             "new_password": NEW}, content_type=JSON)
+        assert resp.status_code == 200, resp.content
+
+    real_join = ChatConsumer.join_session_group
+
+    async def change_then_join(self):
+        await sync_to_async(change)()     # after connect's authentication, before the join
+        return await real_join(self)
+
+    monkeypatch.setattr(ChatConsumer, "join_session_group", change_then_join)
+    comm = WebsocketCommunicator(URLRouter(chat.routing.websocket_urlpatterns),
+                                 f"/ws/chat/{conversation.pk}/?token={token}")
+
+    async def scenario():
+        # The change runs inside the handshake, three password hashes included.
+        connected, code = await comm.connect(timeout=10)
+        if connected:
+            await comm.disconnect()
+        return connected, code
+
+    assert async_to_sync(scenario)() == (False, 4001)
+
+
+@override_settings(CHANNEL_LAYERS={
+    'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'}})
+def test_the_other_persons_socket_in_the_chat_stays_open_at_the_change(
+        make_user, api, socket_keeps_the_test_connection,
+        django_capture_on_commit_callbacks):
+    """One person's password change closes THEIR sockets only: the other person in the
+    same chat keeps theirs, and the thread keeps reaching it."""
+    from channels.layers import get_channel_layer
+    from channels.routing import URLRouter
+    from channels.testing import WebsocketCommunicator
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    import chat.routing
+    from chat.events import group_name
+
+    client, trainer, conversation = _conversation(make_user)
+    router = URLRouter(chat.routing.websocket_urlpatterns)
+    mine = WebsocketCommunicator(router, f"/ws/chat/{conversation.pk}/?token="
+                                         f"{AccessToken.for_user(client)}")
+    theirs = WebsocketCommunicator(router, f"/ws/chat/{conversation.pk}/?token="
+                                           f"{AccessToken.for_user(trainer)}")
+
+    def change():
+        with django_capture_on_commit_callbacks(execute=True):
+            resp = api(client).post(CHANGE, {"current_password": OLD,
+                                             "new_password": NEW}, content_type=JSON)
+        assert resp.status_code == 200, resp.content
+
+    event = {'type': 'message.new', 'message': {'id': 1, 'body': 'still here'}}
+
+    async def scenario():
+        assert (await mine.connect())[0] and (await theirs.connect())[0]
+        await sync_to_async(change)()
+        closed_frame = json.loads(await mine.receive_from(timeout=3))
+        closed = await mine.receive_output(timeout=3)
+        await get_channel_layer().group_send(group_name(conversation.pk), event)
+        reached = json.loads(await theirs.receive_from(timeout=3))
+        await theirs.disconnect()
+        await mine.disconnect()
+        return closed_frame, closed, reached
+
+    closed_frame, closed, reached = async_to_sync(scenario)()
+    assert (closed_frame["type"], closed_frame["code"]) == ("error", "auth")
+    assert closed == {"type": "websocket.close", "code": 4001}
+    assert (reached["type"], reached["message"]["body"]) == ("message.new", "still here")

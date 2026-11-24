@@ -157,17 +157,31 @@ class SessionEndsMixin:
     """For an `AsyncWebsocketConsumer`: close the socket when its account's session
     ends (a password change, a reset, a deactivation), not at its next frame.
 
-    Call `join_session_group()` once the user is known, before `accept()`, and
-    `leave_session_group()` in `disconnect`. `session_ended` re-checks this socket's
-    own token, so a socket opened with a fresh pair after the change stays open; when
-    the token no longer holds, `close_for_ended_session()` runs (a consumer overrides it
-    to say why first)."""
+    Call `join_session_group()` once the user is known, before `accept()`, and refuse
+    the socket (4001) when it answers False; `leave_session_group()` in `disconnect`.
+    `session_ended` re-checks this socket's own token, so a socket opened with a fresh
+    pair after the change stays open; when the token no longer holds,
+    `close_for_ended_session()` runs (a consumer overrides it to say why first).
+
+    THE HANDSHAKE'S GAP (the integrator's review of 7307f94, 2026-11-24): a socket
+    authenticates in `connect()`, then joins the group. A change that commits between
+    the two sends its `session.ended` to a group the socket is not in yet, and the
+    socket then listened with a dead token until the token expired. So the join asks
+    the credential once more AFTER it is in the group (`authenticate_scope`, one
+    query per connect): a change committed before that read is seen by it, and one
+    committed after it reaches the socket as `session.ended`."""
 
     _session_group = None
 
-    async def join_session_group(self):
+    async def join_session_group(self) -> bool:
+        """Join this account's session group; False when the credential no longer
+        holds once in it (the caller refuses the socket)."""
+        from channels.db import database_sync_to_async
+
         self._session_group = session_group(self.user.pk)
         await self.channel_layer.group_add(self._session_group, self.channel_name)
+        user = await database_sync_to_async(authenticate_scope)(self.scope)
+        return user is not None and user.pk == self.user.pk
 
     async def leave_session_group(self):
         if self._session_group:
