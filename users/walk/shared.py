@@ -120,6 +120,14 @@ def missing_plan(currency: str | None = None, *, diet: bool = False) -> list[str
             f"{' with the diet' if diet else ''} (the currency a new wallet takes)"]
 
 
+def choose_plan(currency: str, *, diet: bool = False, prefer: str | None = None):
+    """The plan `plan_for` chooses in `currency`, or None: the catalogue's `prefer` plan
+    (`catalogue_key`) when it is on sale there, else the cheapest. For an area's
+    `@needs`, to price exactly the plan its state will buy."""
+    plans = plans_on_sale(currency, diet=diet)
+    return (plans.filter(catalogue_key=prefer).first() if prefer else None) or plans.first()
+
+
 def plan_for(client, *, diet: bool = False, prefer: str | None = None):
     """A plan `client` can pay from their own wallet without an exchange rate: on sale,
     priced in the client's wallet currency (`currency_for`), with the diet if `diet`.
@@ -128,24 +136,33 @@ def plan_for(client, *, diet: bool = False, prefer: str | None = None):
     from wallet import currency_for
 
     currency = currency_for(client)
-    preferred = (plans_on_sale(currency, diet=diet).filter(catalogue_key=prefer).first()
-                 if prefer else None)
-    return preferred or cheapest_plan(currency, diet=diet)
+    return (choose_plan(currency, diet=diet, prefer=prefer)
+            or cheapest_plan(currency, diet=diet))
 
 
 def top_up(walk, agent, client, amount: str, currency: str | None = None):
     """Cash taken by `agent`, credited to `client`'s wallet through the agent's own route
     (`POST wallet/agent/topup/proxy/`, money type `wallet_move`, the receivable booked),
     in the client's own currency unless `currency` says otherwise (`currency_for`: a new
-    wallet's is the platform's base currency). Answers the route's body."""
+    wallet's is the platform's base currency). An amount above the agent's per-top-up cap
+    in that currency (`per_transaction_limit_for`) is handed over as several top-ups, as
+    an agent would. Answers the route's body (the last top-up's)."""
     import uuid
+    from decimal import Decimal
 
     from wallet import currency_for
+    from wallet.models import ensure_agent_profile
 
     currency = currency or currency_for(client)
-    _status, body = walk.api(agent, "post", "/api/wallet/agent/topup/proxy/", {
-        "client_identifier": str(client.pk), "amount": amount, "currency": currency,
-        "idempotency_key": f"walk-{uuid.uuid4().hex}"})
+    left = Decimal(amount)
+    cap = Decimal(ensure_agent_profile(agent).per_transaction_limit_for(currency) or left)
+    body = None
+    while left > 0:
+        part = min(left, cap)
+        _status, body = walk.api(agent, "post", "/api/wallet/agent/topup/proxy/", {
+            "client_identifier": str(client.pk), "amount": f"{part:.2f}",
+            "currency": currency, "idempotency_key": f"walk-{uuid.uuid4().hex}"})
+        left -= part
     return body
 
 

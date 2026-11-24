@@ -371,3 +371,72 @@ def test_a_plan_state_refuses_by_name_when_no_plan_is_on_sale_in_its_currency(
     assert Wallet.objects.count() == wallets
     assert not SubscriptionPlan.objects.filter(currency=base, is_active=True).exists()
     assert not ExchangeRate.objects.exists()
+
+
+# ------------------------------------------------------------------ the amounts, up front
+def _busy_day():
+    from users.walk import wallet
+
+    return ("agent_busy_day", "AGENT_DEFAULT_DAILY_LIMIT",
+            sum(amount for _c, amount in wallet.BUSY_BEFORE + wallet.BUSY_AFTER),
+            "one new agent takes in a day")
+
+
+def _frozen_unsettled():
+    from users.walk import coaching
+    from users.walk.shared import choose_plan, new_wallet_currency
+
+    plan = choose_plan(new_wallet_currency(), diet=coaching.PLAN["coaching_frozen"])
+    return ("coaching_frozen", "AGENT_DEFAULT_RECEIVABLE_CEILING",
+            coaching.CASH["coaching_frozen"] + plan.price, "one new agent holds unsettled")
+
+
+@pytest.mark.parametrize("declared", [_busy_day, _frozen_unsettled],
+                         ids=["busy_day_daily_cap", "frozen_ceiling"])
+def test_an_agent_cap_one_below_a_states_amount_is_refused_up_front(
+        declared, walk_run, settings):
+    """Each money state declares what it moves beside it (`coaching.py` CASH and PLAN,
+    `wallet.py` BUSY_* / EARNED / WITHDRAWN / SHORT_FUNDS), read by the state and by its
+    `@needs`. One below the amount, the run is refused before anything is written,
+    naming the setting, the amount, the state and the setting's value; AT the amount the
+    state builds, so the declaration is what the state really moves."""
+    from django.core.management.base import CommandError
+
+    from users.models import CustomUser
+
+    name, setting, amount, what = declared()
+    setattr(settings, setting, amount - 1)
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        walk_run(name)
+    message = str(refused.value)
+    assert (f"the setting {setting} at least {amount:,} ({name}: {what} {amount:,} "
+            f"{settings.PLATFORM_CURRENCY}; it is {amount - 1:,})") in message, message
+    assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+
+    setattr(settings, setting, amount)
+    assert walk_run(name)["ids"]["user"]
+
+
+def test_a_payout_setting_one_past_a_withdrawal_is_refused_up_front(walk_run, settings):
+    """The withdrawal states declare the one withdrawal they request (`WITHDRAWN`): a
+    payout minimum one above it, or a daily cap one below it, refuses the run up front by
+    name; at exactly the amount each builds."""
+    from django.core.management.base import CommandError
+
+    from users.walk import wallet
+
+    base, amount = settings.PLATFORM_CURRENCY, wallet.WITHDRAWN
+    for name in wallet.WITHDRAWAL_STATES:
+        settings.PAYOUT_MIN_AMOUNT = {**settings.PAYOUT_MIN_AMOUNT, base: amount + 1}
+        settings.PAYOUT_DAILY_CAP = {**settings.PAYOUT_DAILY_CAP, base: amount - 1}
+        with pytest.raises(CommandError, match="nothing was written") as refused:
+            walk_run(name)
+        message = str(refused.value)
+        assert (f"PAYOUT_MIN_AMOUNT[{base}] at most {amount:,} ({name} withdraws "
+                f"{amount:,}; it is {amount + 1:,})") in message, message
+        assert (f"PAYOUT_DAILY_CAP[{base}] at least {amount:,} ({name}: one trainer "
+                f"requests {amount:,} in a day; it is {amount - 1:,})") in message, message
+
+        settings.PAYOUT_MIN_AMOUNT = {**settings.PAYOUT_MIN_AMOUNT, base: amount}
+        settings.PAYOUT_DAILY_CAP = {**settings.PAYOUT_DAILY_CAP, base: amount}
+        assert walk_run(name)["ids"]["withdrawal"]

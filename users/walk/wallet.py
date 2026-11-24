@@ -14,26 +14,85 @@ profile, set the way the console sets them.
 **One currency per state, never a rate.** Each state trades in its client's own
 currency (`money_of`: the wallet's, or for an account no money has reached yet the
 platform's base currency, so a new Syrian client's wallet is in pounds). A top-up is in
-that currency and the agent's caps, ceiling and settlement are read in it; a trainer is
+that currency (`shared.top_up`, split on the agent's per-top-up cap in it) and the
+agent's ceiling and settlement are read in it; a trainer is
 a fresh account too, so the coaching price (`COACH_RATE`, in the trainer's currency) and
 the client's money are the same currency and a transfer never crosses. Nothing here
 converts, and nothing creates or sets an exchange rate: that is the operator's value,
 and a development database may have none (the app builders' does, on purpose).
 
-The helpers (`call`, `operator`, `agent`, `top_up`, `funded_client`, `coach`,
-`money_of`) are shared with `users/walk/coaching.py`, the other money module.
+The helpers (`call`, `operator`, `agent`, `funded_client`, `coach`, `money_of`) are
+shared with `users/walk/coaching.py`, the other money module; the top-up is the walk's
+one (`shared.top_up`).
 """
 from __future__ import annotations
 
 import uuid
 from decimal import ROUND_UP, Decimal
+from functools import partial
 
 from . import state
-from .framework import on_retire
+from .framework import agent_cash_gaps, needs, on_retire, withdrawal_gaps
+from .shared import top_up
 
 #: A trainer's monthly fee in the walk states, in the trainer's currency (a fresh
 #: account's: the platform's base currency, pounds).
 COACH_RATE = Decimal("40000.00")
+
+# What the states move, declared once: read by each state AND by its `@needs` (the
+# check before anything is written: `framework.agent_cash_gaps`, `withdrawal_gaps`), so
+# the check cannot drift from what the state does. In a new wallet's currency.
+
+#: The withdrawal states: what the trainer has earned before asking (sent by one client,
+#: whose cash one agent took, with the platform's commission on top: `gross_for`), and
+#: the one withdrawal the trainer asks for that day.
+EARNED = Decimal("60000")
+WITHDRAWN = Decimal("30000")
+WITHDRAWAL_STATES = ("trainer_withdrawal_requested", "trainer_withdrawal_sent",
+                     "trainer_withdrawal_refused")
+
+#: agent_busy_day, one agent's day: the top-ups (to which of the three clients, how much)
+#: before the operator's settlement and after it, the settlement, and the receivable
+#: ceiling the operator set on THIS agent (its own, so the default ceiling is not read).
+BUSY_BEFORE = ((0, Decimal("50000")), (1, Decimal("50000")))
+BUSY_SETTLEMENT = Decimal("60000")
+BUSY_AFTER = ((2, Decimal("50000")), (0, Decimal("45000")), (1, Decimal("45000")))
+BUSY_CEILING = Decimal("200000")
+
+#: client_wallet_short_of_coach: what the client's wallet holds, less than COACH_RATE.
+SHORT_FUNDS = Decimal("10000")
+
+
+def gross_for(earned) -> Decimal:
+    """What a client sends a trainer so that `earned` is left after the platform's
+    coaching commission (`COACHING_COMMISSION_RATE`), in whole units."""
+    from django.conf import settings
+
+    rate = Decimal(str(settings.COACHING_COMMISSION_RATE))
+    return (Decimal(earned) / (1 - rate)).quantize(Decimal("1"), rounding=ROUND_UP)
+
+
+def _what_a_withdrawal_state_moves(name):
+    """The payer's cash at one new agent, and the trainer's one withdrawal that day."""
+    return (agent_cash_gaps(name, in_a_day=gross_for(EARNED))
+            + withdrawal_gaps(name, smallest=WITHDRAWN, in_a_day=WITHDRAWN))
+
+
+for _name in WITHDRAWAL_STATES:
+    needs(_name)(partial(_what_a_withdrawal_state_moves, _name))
+
+
+@needs("agent_busy_day")
+def _what_the_busy_agent_takes():
+    """The day's top-ups at one new agent, against its daily and monthly caps. Its
+    ceiling is the operator's own (`BUSY_CEILING`), not the default, so none is read."""
+    day = sum(amount for _client, amount in BUSY_BEFORE + BUSY_AFTER)
+    return agent_cash_gaps("agent_busy_day", in_a_day=day, unsettled=Decimal("0"))
+
+
+@needs("client_wallet_short_of_coach")
+def _what_the_short_clients_agent_takes():
+    return agent_cash_gaps("client_wallet_short_of_coach", in_a_day=SHORT_FUNDS)
 
 
 def call(walk, user, method: str, path: str, data=None, *, expect=(200, 201)):
@@ -74,28 +133,9 @@ def agent(walk, part="agent", **console):
     return user
 
 
-def top_up(walk, agent_user, client, amount, currency=None):
-    """Cash handed to `agent_user`, credited to `client` by the agent's app
-    (`POST wallet/agent/topup/proxy/`, WALLET_MOVE), in the client's own currency
-    (`money_of`) unless one is named. An amount above the agent's per-top-up cap in
-    that currency is handed over in several top-ups, as an agent would."""
-    from wallet.models import ensure_agent_profile
-
-    currency = currency or money_of(client)
-    amount = Decimal(amount)
-    cap = ensure_agent_profile(agent_user).per_transaction_limit_for(currency) or amount
-    receipts = []
-    while amount > 0:
-        part = min(amount, Decimal(cap))
-        receipts.append(call(walk, agent_user, "post", "/api/wallet/agent/topup/proxy/", {
-            "client_identifier": str(client.pk), "amount": f"{part:.2f}",
-            "currency": currency, "idempotency_key": key()}))
-        amount -= part
-    return receipts
-
-
 def funded_client(walk, part=None, *, amount, via=None, **fields):
-    """A client whose wallet an agent topped up with `amount` pounds."""
+    """A client whose wallet an agent topped up with `amount`, in the client's own
+    currency (a new wallet's: pounds)."""
     client = walk.account(part, role="client", **fields)
     if Decimal(amount) > 0:
         top_up(walk, via or agent(walk, f"{part}_agent" if part else "agent"), client,
@@ -147,12 +187,9 @@ def earning_coach(walk, the_operator, *, amount, part=None):
     client of theirs, topped up by an agent, transferred it to them
     (`POST wallet/client/transfer/`, money the trainer may withdraw at once; the
     platform keeps its coaching commission, so the client sends a little more)."""
-    from django.conf import settings
-
     trainer = verified_coach(walk, the_operator, part)
     payout_method(walk, trainer)
-    rate = Decimal(str(settings.COACHING_COMMISSION_RATE))
-    gross = (Decimal(amount) / (1 - rate)).quantize(Decimal("1"), rounding=ROUND_UP)
+    gross = gross_for(amount)
     payer = funded_client(walk, f"{part}_client" if part else "client", amount=gross,
                           first_name="رامي", last_name="الحلبي")
     call(walk, payer, "post", "/api/wallet/client/transfer/", {
@@ -193,8 +230,8 @@ def _close_the_withdrawals_of_retired_walk_trainers(users):
                "operator.")
 def trainer_withdrawal_requested(walk):
     the_operator = operator(walk)
-    trainer = earning_coach(walk, the_operator, amount="60000")
-    made = withdraw(walk, trainer, "30000")
+    trainer = earning_coach(walk, the_operator, amount=EARNED)
+    made = withdraw(walk, trainer, WITHDRAWN)
     walk.ids(withdrawal=made["id"], operator=the_operator.pk)
 
 
@@ -205,8 +242,8 @@ def trainer_withdrawal_sent(walk):
     from payouts import services
 
     the_operator = operator(walk)
-    trainer = earning_coach(walk, the_operator, amount="60000")
-    made = withdraw(walk, trainer, "30000")
+    trainer = earning_coach(walk, the_operator, amount=EARNED)
+    made = withdraw(walk, trainer, WITHDRAWN)
     services.approve(made["id"], the_operator)
     services.mark_sent(made["id"], the_operator, transaction_id=f"WALK-{key()[:12]}")
     walk.ids(withdrawal=made["id"], operator=the_operator.pk)
@@ -219,8 +256,8 @@ def trainer_withdrawal_refused(walk):
     from payouts import services
 
     the_operator = operator(walk)
-    trainer = earning_coach(walk, the_operator, amount="60000")
-    made = withdraw(walk, trainer, "30000")
+    trainer = earning_coach(walk, the_operator, amount=EARNED)
+    made = withdraw(walk, trainer, WITHDRAWN)
     services.fail(made["id"], the_operator,
                   "رقم حساب شام كاش لا يطابق اسم صاحبه. صحّح طريقة الدفع ثم اطلب السحب من جديد.")
     walk.ids(withdrawal=made["id"], operator=the_operator.pk)
@@ -241,16 +278,15 @@ def agent_busy_day(walk):
     # The cash the clients hand over is in their currency; the ceiling the operator set
     # and the settlement are in that one (`AgentProfile.CEILING_FIELDS`).
     currency = money_of(clients[0])
-    me = agent(walk, None, **{AgentProfile.CEILING_FIELDS[currency]: "200000"})
-    top_up(walk, me, clients[0], "50000")
-    top_up(walk, me, clients[1], "50000")
+    me = agent(walk, None, **{AgentProfile.CEILING_FIELDS[currency]: BUSY_CEILING})
+    for client, amount in BUSY_BEFORE:
+        top_up(walk, me, clients[client], amount)
     profile = ensure_agent_profile(me)
-    settlement = agents.record_settlement(profile.pk, currency, Decimal("60000"),
+    settlement = agents.record_settlement(profile.pk, currency, BUSY_SETTLEMENT,
                                           the_operator, note="تسليم نقدي في المكتب",
                                           key=key())
-    top_up(walk, me, clients[2], "50000")
-    top_up(walk, me, clients[0], "45000")
-    top_up(walk, me, clients[1], "45000")
+    for client, amount in BUSY_AFTER:
+        top_up(walk, me, clients[client], amount)
     walk.ids(clients=[c.pk for c in clients], settlement=settlement.pk,
              operator=the_operator.pk, currency=currency)
 
@@ -271,7 +307,7 @@ def agent_key_paired_elsewhere(walk):
                "trainer is refused for the balance.")
 def client_wallet_short_of_coach(walk):
     trainer = coach(walk)
-    funded_client(walk, amount="10000")
+    funded_client(walk, amount=SHORT_FUNDS)
     walk.ids(trainer=trainer.pk, rate=f"{COACH_RATE:.2f}")
 
 

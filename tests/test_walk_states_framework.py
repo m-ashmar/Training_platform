@@ -346,14 +346,20 @@ def test_the_settings_a_state_moves_money_under_are_checked_up_front(walk_env, s
     from users.models import CustomUser
 
     settings.AGENT_DEFAULT_DAILY_LIMIT = 0
+    settings.AGENT_DEFAULT_PER_TRANSACTION_LIMIT = 0
     settings.PAYOUT_DAILY_CAP = {"USD": 5000}
     with pytest.raises(CommandError, match="nothing was written") as refused:
         _run(walk_env)
     message = str(refused.value)
-    assert "AGENT_DEFAULT_DAILY_LIMIT above 0" in message
-    assert "a SYP entry above 0 in the setting PAYOUT_DAILY_CAP" in message
+    # Said by each state's own declared check since the "above 0" floors were removed
+    # (2026-11-24: every state that takes agent cash or withdraws declares its amounts,
+    # `test_the_settings_are_checked_against_the_amounts_the_states_move`).
+    assert "the setting AGENT_DEFAULT_DAILY_LIMIT at least" in message and "it is 0)" in message
+    assert "AGENT_DEFAULT_PER_TRANSACTION_LIMIT above 0, or unset" in message
+    assert "PAYOUT_DAILY_CAP[SYP] at least" in message and "it is unset)" in message
     assert "PAYOUT_MIN_AMOUNT" not in message
     assert not CustomUser.objects.filter(email__startswith="walk.").exists()
+    settings.AGENT_DEFAULT_PER_TRANSACTION_LIMIT = 50000
 
     settings.AGENT_DEFAULT_DAILY_LIMIT = 250000
     manifest, _out = _run(walk_env, "--only", "member_with_post")
@@ -395,3 +401,36 @@ def test_keep_going_writes_what_succeeds_and_names_every_failure(walk_env, monke
     assert not CustomUser.objects.filter(email="walk.member_with_post@yalla.test").exists()
     assert CustomUser.objects.filter(email="walk.operator_staff@yalla.test",
                                      is_active=True).exists()
+
+
+def test_the_settings_are_checked_against_the_amounts_the_states_move(walk_env, settings):
+    """"Above 0" passed settings a state then failed on part-way. Each state declares
+    what it moves beside it (`coach_desk.py` CLIENT_TOP_UP x CLIENTS, `inbox.py` EARNED /
+    PAID_OUT / FAILED, `diet.py` TIMES_THE_PRICE), and its `@needs` compares the
+    settings with those: a new agent's daily and monthly caps and its ceiling, the payout
+    minimum and daily cap. Named up front, with the state and the amount."""
+    from users.models import CustomUser
+    from users.walk import coach_desk, inbox
+
+    day = coach_desk.CLIENT_TOP_UP * len(coach_desk.CLIENTS)
+    settings.AGENT_DEFAULT_DAILY_LIMIT = day - 1
+    with pytest.raises(CommandError, match="nothing was written") as refused:
+        _run(walk_env, "--only", "trainer_full_queue")
+    assert (f"AGENT_DEFAULT_DAILY_LIMIT at least {day:,} (trainer_full_queue"
+            in str(refused.value)), str(refused.value)
+    manifest, _out = _run(walk_env, "--only", "premium_no_diet_plan")   # 2 x a plan: fits
+    assert set(manifest["states"]) == {"premium_no_diet_plan"}
+    settings.AGENT_DEFAULT_DAILY_LIMIT = 250000
+
+    held = inbox._gross()                     # the client's cash at inbox's one agent
+    settings.AGENT_DEFAULT_RECEIVABLE_CEILING = held - 1
+    settings.PAYOUT_MIN_AMOUNT = {"SYP": inbox.PAID_OUT, "USD": 100}
+    settings.PAYOUT_DAILY_CAP = {"SYP": inbox.PAID_OUT, "USD": 5000}
+    with pytest.raises(CommandError) as refused:
+        _run(walk_env, "--only", "inbox_every_kind")
+    message = str(refused.value)
+    assert f"AGENT_DEFAULT_RECEIVABLE_CEILING at least {held:,} (inbox_every_kind" in message
+    assert f"PAYOUT_MIN_AMOUNT[SYP] at most {inbox.FAILED:,} (inbox_every_kind" in message
+    assert (f"PAYOUT_DAILY_CAP[SYP] at least {inbox.PAID_OUT + inbox.FAILED:,} "
+            f"(inbox_every_kind" in message), message
+    assert not CustomUser.objects.filter(email__startswith="walk.inbox_every_kind").exists()
