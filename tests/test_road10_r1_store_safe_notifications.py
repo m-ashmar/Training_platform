@@ -345,6 +345,34 @@ def test_every_record_and_state_notice_reads_the_same_on_every_build(
                                           _data(event_type)), (build, event_type)
 
 
+@pytest.mark.parametrize("build", ("apk", "ios", None))
+def test_every_inbox_route_reads_the_builds_flags_once_per_request(make_user, api, build):
+    """The build's capability rows (`policy.services.flags_for`) are read ONCE per
+    request on each inbox route (`NotificationViewSet._build_flags`), however many rows
+    the page holds or the route touches, and not at all when no channel is declared (the
+    strictest build needs no row). That one read is the inbox budget's seventh query
+    (tests/test_regression_gate.py); without cachalot, so every read reaches the
+    database and is counted."""
+    from cachalot.api import cachalot_disabled
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from notifications.models import Notification
+
+    person = make_user(_name(f"once_{build}"))
+    rows = [Notification.objects.create(
+        recipient=person, event_type="custom", deduplication_key=uuid.uuid4().hex,
+        metadata={"context": {"message": f"m{i}"}}) for i in range(25)]
+    routes = (("get", f"{INBOX}?page_size=20"), ("get", f"{INBOX}unread_count/"),
+              ("get", f"{INBOX}{rows[0].pk}/"), ("post", f"{INBOX}{rows[1].pk}/mark_read/"),
+              ("post", f"{INBOX}mark_all_read/"))
+    for method, path in routes:
+        with cachalot_disabled(), CaptureQueriesContext(connection) as seen:
+            answered = getattr(api(person), method)(path, **_headers(build))
+        assert answered.status_code == 200, (path, answered.content)
+        reads = sum("policy_channelcapabilities" in q["sql"] for q in seen.captured_queries)
+        assert reads == (1 if build else 0), (method, path, reads)
+
+
 def test_the_gate_reads_the_build_and_nothing_else():
     """`choose` and `hidden_event_types` take flags; the flags come from
     `policy.services.flags_for(channel, version)`, which takes no user."""
