@@ -154,7 +154,6 @@ class AchievementEngine:
         return awarded
 
     @classmethod
-    @classmethod
     def _flush_progress(cls, rows) -> None:
         """Write every collected progress row in one statement."""
         if not rows:
@@ -543,9 +542,6 @@ class AchievementEngine:
             activity_type__in=activity_types.WORKOUT,
             timestamp__time__lt=time(6, 0)
         ).exists()
-
-    @classmethod
-
 
     @classmethod
     @transaction.atomic
